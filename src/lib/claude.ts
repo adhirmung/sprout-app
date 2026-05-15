@@ -73,7 +73,7 @@ export async function streamCardChat(
 ): Promise<void> {
   const client = getClient();
   const stream = await client.messages.create({
-    model:      'claude-sonnet-4-6',
+    model:      'claude-haiku-4-5-20251001',
     max_tokens: 512,
     system:     systemPrompt,
     messages:   history,
@@ -274,7 +274,7 @@ export async function generateFeed(
       ] as MsgContent)
     : promptFn(topic, contentText, false);
 
-  const model = pdfBase64 ? 'claude-sonnet-4-6' : 'claude-haiku-4-5-20251001';
+  const model = 'claude-haiku-4-5-20251001';
 
   const msg = await client.messages.create({
     model, max_tokens: maxTokens,
