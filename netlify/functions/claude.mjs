@@ -1,7 +1,6 @@
-import type { Config } from '@netlify/functions';
-
 // Transparent proxy to Anthropic — API key never leaves the server
-export default async (request: Request): Promise<Response> => {
+
+export default async (request) => {
   if (request.method === 'OPTIONS') {
     return new Response(null, {
       headers: {
@@ -29,14 +28,13 @@ export default async (request: Request): Promise<Response> => {
   const upstream = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
-      'x-api-key':          apiKey,
-      'anthropic-version':  '2023-06-01',
-      'content-type':       'application/json',
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type':      'application/json',
     },
     body,
   });
 
-  // Stream the response body straight through (handles both JSON and SSE streaming)
   return new Response(upstream.body, {
     status: upstream.status,
     headers: {
@@ -46,4 +44,4 @@ export default async (request: Request): Promise<Response> => {
   });
 };
 
-export const config: Config = { path: '/api/v1/messages' };
+export const config = { path: '/api/v1/messages' };
