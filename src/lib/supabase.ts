@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import type { LearnerProfile, LibraryTree } from './types';
-import type { ChatMessage, GeneratedCards } from './claude';
+import type { ChatMessage, FeedCard } from './claude';
 
 const SUPABASE_URL  = 'https://nocguvewcpbdasoinztk.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5vY2d1dmV3Y3BiZGFzb2luenRrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1MzY4OTAsImV4cCI6MjA5NDExMjg5MH0.rDRX1WGTaNjlDwoWJCcJwbKP35WUsIyRuqXpCHBV4yg';
@@ -38,7 +38,7 @@ export async function dbSaveProfile(
 export async function dbLoadGeneratedCards(
   userId: string,
   fileKey: string,
-): Promise<{ cards: GeneratedCards; contentLen: number } | null> {
+): Promise<{ cards: FeedCard[]; contentLen: number } | null> {
   const { data } = await supabase
     .from('generated_cards')
     .select('cards_json, content_len')
@@ -46,14 +46,14 @@ export async function dbLoadGeneratedCards(
     .eq('file_key', fileKey)
     .single();
   if (!data) return null;
-  return { cards: data.cards_json as GeneratedCards, contentLen: data.content_len as number };
+  return { cards: data.cards_json as FeedCard[], contentLen: data.content_len as number };
 }
 
 export async function dbSaveGeneratedCards(
   userId: string,
   fileKey: string,
   topic: string,
-  cards: GeneratedCards,
+  cards: FeedCard[],
   contentLen: number,
 ): Promise<void> {
   const { error } = await supabase.from('generated_cards').upsert({
