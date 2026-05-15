@@ -1,0 +1,92 @@
+/* ============================================================
+   SPROUT — Design Tokens
+   ============================================================ */
+
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,500;12..96,600;12..96,700;12..96,800&family=Geist:wght@400;500;600;700;800&family=Geist+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* Surface */
+  --bg: #FAF7F2;
+  --bg-tint: #F4F0E8;
+  --card: #FFFFFF;
+  --card-soft: #FBFAF6;
+
+  /* Ink */
+  --ink: #1F2937;
+  --ink-2: #4A5563;
+  --ink-3: #8A93A0;
+  --ink-4: #C7CCD3;
+  --line: #ECE7DD;
+  --line-2: #DCD5C7;
+
+  /* Brand */
+  --brand: #2F9E5E;
+  --brand-2: #248B4F;
+  --brand-soft: #DCEFE2;
+  --brand-tint: #F0F8F2;
+
+  /* Accents */
+  --coral: #FF7A5C;
+  --coral-soft: #FFE4DA;
+  --gold: #F4B740;
+  --gold-soft: #FBEBC9;
+  --sky: #4FB7F5;
+  --sky-soft: #DBEEFC;
+  --plum: #8C5BD9;
+  --plum-soft: #EBE0FB;
+
+  /* Semantic */
+  --success: #2F9E5E;
+  --warn: #F4B740;
+  --error: #E5604D;
+
+  /* Radius */
+  --r-sm: 10px;
+  --r-md: 14px;
+  --r-lg: 20px;
+  --r-xl: 28px;
+  --r-pill: 999px;
+
+  /* Semantic colour completions */
+  --error-soft: #FFEEEA;
+  --error-line: #FFD2C9;
+  --success-line: #B7DEC2;
+
+  /* Shadow */
+  --shadow-1: 0 1px 0 rgba(31,41,55,0.04), 0 2px 6px rgba(31,41,55,0.04);
+  --shadow-2: 0 2px 0 rgba(31,41,55,0.04), 0 8px 24px rgba(31,41,55,0.06);
+  --shadow-3: 0 24px 60px rgba(31,41,55,0.14);
+
+  /* Spacing scale (4 px base) */
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Z-index scale */
+  --z-dropdown: 100;
+  --z-modal:    1000;
+  --z-toast:    4000;
+  --z-splash:   9999;
+
+  /* Font-size scale */
+  --text-2xs: 10px;
+  --text-xs:  11px;
+  --text-sm:  13px;
+  --text-base: 15px;
+  --text-md:  17px;
+  --text-lg:  20px;
+  --text-xl:  24px;
+  --text-2xl: 32px;
+
+  /* Typography */
+  --font-display: "Bricolage Grotesque", Georgia, serif;
+  --font-ui: "Geist", -apple-system, "Inter", system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+}
