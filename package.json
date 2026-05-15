@@ -12,7 +12,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.95.1",
     "@supabase/supabase-js": "^2.105.4",
-    "pdfjs-dist": "^5.7.284",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "react-router-dom": "^7.15.0"

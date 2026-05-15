@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { extractPdfTextAsync } from '../lib/pdfExtract';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { EmptyState } from '../components/EmptyState';
@@ -134,29 +133,24 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
         };
         reader.readAsText(file);
       } else if (isPDF) {
-        toast('Reading PDF…', 'success');
+        const estPages = Math.max(1, Math.round(file.size / 102_400));
+        toast(estPages > 32 ? `PDF is ~${estPages} pages — only first 32 will be processed` : 'Reading PDF…', estPages > 32 ? 'error' : 'success');
         file.arrayBuffer().then(async buf => {
-          const [text, pdfBase64] = await Promise.all([
-            extractPdfTextAsync(buf),
-            new Promise<string>(resolve => {
-              const reader = new FileReader();
-              reader.onload = () => resolve((reader.result as string).split(',')[1] ?? '');
-              reader.readAsDataURL(new Blob([buf], { type: 'application/pdf' }));
-            }),
-          ]);
-          const content = text || null;
+          const pdfBase64 = await new Promise<string>(resolve => {
+            const reader = new FileReader();
+            reader.onload = () => resolve((reader.result as string).split(',')[1] ?? '');
+            reader.readAsDataURL(new Blob([buf], { type: 'application/pdf' }));
+          });
 
-          // Upload to Supabase Storage so PDF is available after reload
           let storagePath: string | undefined;
           if (userId) {
-            toast('Saving PDF to cloud…', 'success');
             storagePath = await uploadPdfToStorage(userId, t, pdfBase64)
               .then(p => p ?? undefined)
-              .catch(() => { toast('Cloud save failed — PDF view only works this session', 'error'); return undefined; });
+              .catch(() => { toast('Cloud save failed — PDF only works this session', 'error'); return undefined; });
           }
 
-          setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content, pdfBase64, storagePath } });
-          toast(content ? `PDF uploaded ✓ (${content.length.toLocaleString()} chars extracted)` : 'PDF uploaded ✓ (image-based — Claude will read it directly)', 'success');
+          setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null, pdfBase64, storagePath } });
+          toast(`PDF uploaded ✓ (~${estPages} page${estPages !== 1 ? 's' : ''} — Claude reads it natively)`, 'success');
           setShowUpload(false);
         });
       } else {

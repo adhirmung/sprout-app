@@ -55,6 +55,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const content     = source?.item?.content     ?? null;
   const pdfBase64   = source?.item?.pdfBase64   ?? null;
   const storagePath = source?.item?.storagePath ?? null;
+  const fileType    = (source?.item?.fileType   ?? '').toUpperCase();
   const sourceKey   = source?.path?.join('/')   ?? 'general';
   const breadcrumb  = source?.path ? source.path.slice(0, -1).join(' › ') : '';
   const isLargeDoc  = (content?.length ?? 0) > LARGE_DOC_CHARS;
@@ -93,6 +94,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       let resolvedPdf = pdfBase64;
       if (!resolvedPdf && storagePath) {
         resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+      }
+
+      // PDFs must always use the native binary path — no degraded text fallback
+      if (fileType === 'PDF' && !resolvedPdf) {
+        throw new Error('Could not load PDF binary. Try re-uploading the file.');
       }
 
       const feed = await generateFeed(topic, content, resolvedPdf, mode);
@@ -300,16 +306,13 @@ function DocIdleView({
 
   const wordCount = source?.item?.content ? source.item.content.split(/\s+/).length : 0;
 
-  // Page estimate: prefer in-memory pdfBase64 size → fallback to stored file size → word count
-  const estPages = source?.item?.pdfBase64
-    ? Math.max(1, Math.ceil((source.item.pdfBase64.length * 3) / 4 / 100_000))
-    : source?.item?.size && fileType === 'PDF'
-      ? Math.max(1, Math.round(source.item.size * 1_048_576 / 150_000))
-      : wordCount > 0 ? Math.max(1, Math.ceil(wordCount / 300)) : null;
+  // Page estimate: file size for PDFs (~100 KB/page), word count for text files
+  const estPages = source?.item?.size && fileType === 'PDF'
+    ? Math.max(1, Math.round(source.item.size * 1_048_576 / 102_400))
+    : wordCount > 0 ? Math.max(1, Math.ceil(wordCount / 300)) : null;
 
-  // Only show extracted text if it reads like real prose (avg word ≥ 4 chars).
-  // PDF OCR extractions often produce garbled short fragments — fall back to generic copy.
-  const rawContent  = source?.item?.content ?? '';
+  // PDFs have no extracted text under Option C — always use the generic description
+  const rawContent = fileType === 'PDF' ? '' : (source?.item?.content ?? '');
   const sampleWords = rawContent.trim().split(/\s+/).slice(0, 60);
   const avgWordLen  = sampleWords.length > 5
     ? sampleWords.reduce((s, w) => s + w.length, 0) / sampleWords.length : 0;
@@ -375,7 +378,12 @@ function DocIdleView({
             <Icon name="file" size={15} stroke="var(--ink-3)" /> {estPages} pages
           </div>
         )}
-        {isLargeDoc && (
+        {fileType === 'PDF' && estPages && estPages > 32 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', border: '1px dashed var(--coral-soft)', borderRadius: 12, fontSize: 12, color: 'var(--coral)' }}>
+            ⚠ Large PDF — first 32 pages only
+          </div>
+        )}
+        {fileType !== 'PDF' && isLargeDoc && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', border: '1px dashed var(--line-2)', borderRadius: 12, fontSize: 12, color: 'var(--ink-3)' }}>
             📄 Large doc — key highlights only
           </div>
