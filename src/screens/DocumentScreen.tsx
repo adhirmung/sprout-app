@@ -10,7 +10,7 @@ import {
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
-import type { ChatMessage, FeedCard } from '../lib/claude';
+import type { ChatMessage, FeedCard, FeedAudit } from '../lib/claude';
 import { dbLoadGeneratedCards, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -41,6 +41,7 @@ interface DocumentScreenProps {
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
   const [phase,     setPhase]     = useState<'idle' | 'loading' | 'running' | 'done'>('idle');
   const [cards,     setCards]     = useState<FeedCard[]>([]);
+  const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
   const [score,     setScore]     = useState(0);
   const [streak,    setStreak]    = useState(0);
@@ -74,17 +75,18 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (!force) {
         if (userId) {
           const cached = await dbLoadGeneratedCards(userId, modeKey).catch(() => null);
-          if (cached) {
-            const data = cached.cards as unknown as FeedCard[];
-            if (Array.isArray(data) && data.length > 0) {
-              setCards(data); setIdx(0); setFromCache(true);
-              setStartTime(Date.now()); setPhase('running'); return;
-            }
+          if (cached && cached.result.cards.length > 0) {
+            setCards(cached.result.cards);
+            setAudit(cached.result.audit);
+            setIdx(0); setFromCache(true);
+            setStartTime(Date.now()); setPhase('running'); return;
           }
         } else {
-          const cached = Store.get<FeedCard[] | null>(`feed:${modeKey}`, null);
-          if (Array.isArray(cached) && cached.length > 0) {
-            setCards(cached); setIdx(0); setFromCache(true);
+          const cached = Store.get<{ cards: FeedCard[]; audit: FeedAudit | null } | null>(`feed:${modeKey}`, null);
+          if (cached && Array.isArray(cached.cards) && cached.cards.length > 0) {
+            setCards(cached.cards);
+            setAudit(cached.audit ?? null);
+            setIdx(0); setFromCache(true);
             setStartTime(Date.now()); setPhase('running'); return;
           }
         }
@@ -101,13 +103,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         throw new Error('Could not load PDF binary. Try re-uploading the file.');
       }
 
-      const feed = await generateFeed(topic, content, resolvedPdf, mode);
+      const result = await generateFeed(topic, content, resolvedPdf, mode);
       if (userId) {
-        dbSaveGeneratedCards(userId, modeKey, topic, feed as never, contentLen).catch(console.error);
+        dbSaveGeneratedCards(userId, modeKey, topic, result, contentLen).catch(console.error);
       } else {
-        Store.set(`feed:${modeKey}`, feed);
+        Store.set(`feed:${modeKey}`, { cards: result.cards, audit: result.audit });
       }
-      setCards(feed); setIdx(0); setStartTime(Date.now()); setPhase('running');
+      setCards(result.cards); setAudit(result.audit); setIdx(0); setStartTime(Date.now()); setPhase('running');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
       setPhase('idle');
@@ -153,7 +155,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         {phase === 'idle' && (
           <DocIdleView
             source={source} topic={topic} breadcrumb={breadcrumb}
-            isLargeDoc={isLargeDoc} fromCache={fromCache}
+            isLargeDoc={isLargeDoc} fromCache={fromCache} audit={audit}
             error={error} retryRef={retryRef} profile={profile}
             onBack={onBack}
             onGenerate={(mode) => generate(false, mode)}
@@ -259,11 +261,11 @@ function StatPill({ icon, color, value, label }: { icon: string; color: string; 
 // ── Idle view (two-column) ────────────────────────────────────
 
 function DocIdleView({
-  source, topic, breadcrumb, isLargeDoc, fromCache, error, retryRef, profile,
+  source, topic, breadcrumb, isLargeDoc, fromCache, audit, error, retryRef, profile,
   onBack, onGenerate, onRegenerate, onOpenTutor,
 }: {
   source: FeedSource | null; topic: string; breadcrumb: string;
-  isLargeDoc: boolean; fromCache: boolean; error: string;
+  isLargeDoc: boolean; fromCache: boolean; audit: FeedAudit | null; error: string;
   retryRef: React.RefObject<HTMLButtonElement | null>; profile: LearnerProfile | null;
   onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onOpenTutor: () => void;
 }) {
@@ -393,6 +395,8 @@ function DocIdleView({
         </div>
       </div>
 
+      {audit && <QualityBadge audit={audit} />}
+
       {pdfBlobUrl ? (
         <div style={{ borderRadius: 16, overflow: 'hidden', border: '1px solid var(--line)', minHeight: 380, flex: 1 }}>
           <iframe
@@ -499,6 +503,51 @@ function DocIdleView({
     <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '55% 45%' }}>
       <div style={{ overflowY: 'auto' }}>{leftPanel}</div>
       <div style={{ overflowY: 'auto' }}>{rightPanel}</div>
+    </div>
+  );
+}
+
+// ── Quality badge ─────────────────────────────────────────────
+
+function QualityBadge({ audit }: { audit: FeedAudit }) {
+  const scoreColor = (s: number) =>
+    s >= 75 ? 'var(--brand)' : s >= 50 ? 'var(--gold)' : 'var(--coral)';
+  const scoreBg = (s: number) =>
+    s >= 75 ? 'var(--brand-tint)' : s >= 50 ? '#FFFBEB' : 'var(--coral-soft)';
+
+  const pills = [
+    { label: 'Coverage', value: audit.coverageScore },
+    { label: 'Accuracy', value: audit.accuracyScore },
+    { label: 'Depth',    value: audit.depthScore    },
+  ];
+
+  return (
+    <div style={{ marginBottom: 24, padding: '14px 16px', borderRadius: 14, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.07em', color: 'var(--ink-3)', textTransform: 'uppercase' }}>
+          Content Quality
+        </div>
+        <div style={{ fontSize: 13, fontWeight: 800, color: scoreColor(audit.overallScore), fontFamily: 'var(--font-mono)' }}>
+          {audit.overallScore}/100
+        </div>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+        {pills.map(p => (
+          <div key={p.label} style={{ padding: '8px 10px', borderRadius: 10, background: scoreBg(p.value), textAlign: 'center' }}>
+            <div style={{ fontSize: 16, fontWeight: 800, color: scoreColor(p.value), fontFamily: 'var(--font-mono)', lineHeight: 1 }}>
+              {p.value}
+            </div>
+            <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--ink-3)', marginTop: 3, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+              {p.label}
+            </div>
+          </div>
+        ))}
+      </div>
+      {audit.missedTopics && audit.missedTopics.length > 0 && (
+        <div style={{ marginTop: 10, fontSize: 11, color: 'var(--ink-3)', lineHeight: 1.5 }}>
+          Not covered: {audit.missedTopics.join(' · ')}
+        </div>
+      )}
     </div>
   );
 }

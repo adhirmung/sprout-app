@@ -88,6 +88,19 @@ export async function streamCardChat(
 
 // ── Feed generator ────────────────────────────────────────────
 
+export interface FeedAudit {
+  coverageScore: number;   // 0–100: % of major topics from source represented in cards
+  accuracyScore: number;   // 0–100: how well cards reflect the source without adding outside knowledge
+  depthScore:    number;   // 0–100: whether cards span the full document vs clustering at the start
+  overallScore:  number;   // average of the three
+  missedTopics:  string[]; // up to 3 important topics from source not covered by any card
+}
+
+export interface FeedResult {
+  cards: FeedCard[];
+  audit: FeedAudit | null;
+}
+
 export type FeedCard =
   | { type: 'summary';        title: string; points: string[] }
   | { type: 'flashcard';      question: string; answer: string }
@@ -172,7 +185,14 @@ Return ONLY valid JSON — no markdown fences:
     },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 0, "explanation": "..." },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 1, "explanation": "..." }
-  ]
+  ],
+  "audit": {
+    "coverageScore": <0–100, % of major topics from the source represented across all cards>,
+    "accuracyScore": <0–100, how accurately cards reflect the source — deduct for content not grounded in the source>,
+    "depthScore": <0–100, whether cards span the full document or cluster around the opening pages>,
+    "overallScore": <integer average of the three scores>,
+    "missedTopics": [<up to 3 important topics from the source not covered by any card>]
+  }
 }`;
 }
 
@@ -205,7 +225,14 @@ Return ONLY valid JSON — no markdown fences:
     { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." }
-  ]
+  ],
+  "audit": {
+    "coverageScore": <0–100>,
+    "accuracyScore": <0–100>,
+    "depthScore": <0–100>,
+    "overallScore": <integer average>,
+    "missedTopics": [<up to 3 important topics not covered>]
+  }
 }`;
 }
 
@@ -232,7 +259,14 @@ Return ONLY valid JSON — no markdown fences:
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 1, "explanation": "..." },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 2, "explanation": "..." },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 0, "explanation": "..." }
-  ]
+  ],
+  "audit": {
+    "coverageScore": <0–100>,
+    "accuracyScore": <0–100>,
+    "depthScore": <0–100>,
+    "overallScore": <integer average>,
+    "missedTopics": [<up to 3 important topics not covered>]
+  }
 }`;
 }
 
@@ -257,14 +291,14 @@ export async function generateFeed(
   contentText: string | null,
   pdfBase64:   string | null,
   mode:        'activities' | 'flashcards' | 'quiz' = 'activities',
-): Promise<FeedCard[]> {
+): Promise<FeedResult> {
   const client = getClient();
 
   const promptFn  = mode === 'flashcards' ? buildFlashcardsOnlyPrompt
     : mode === 'quiz' ? buildQuizOnlyPrompt
     : buildActivitiesPrompt;
 
-  const maxTokens = mode === 'flashcards' ? 5000 : mode === 'quiz' ? 4000 : 7000;
+  const maxTokens = mode === 'flashcards' ? 6000 : mode === 'quiz' ? 5000 : 8000;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
   const userContent: MsgContent = pdfBase64
@@ -274,10 +308,9 @@ export async function generateFeed(
       ] as MsgContent)
     : promptFn(topic, contentText, false);
 
-  const model = 'claude-haiku-4-5-20251001';
-
   const msg = await client.messages.create({
-    model, max_tokens: maxTokens,
+    model:    'claude-haiku-4-5-20251001',
+    max_tokens: maxTokens,
     system:   'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages: [{ role: 'user', content: userContent }],
   });
@@ -287,7 +320,7 @@ export async function generateFeed(
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Failed to generate content. Please retry.');
 
-  let parsed: { cards: FeedCard[] };
+  let parsed: { cards: FeedCard[]; audit?: FeedAudit };
   try {
     parsed = JSON.parse(raw.slice(start, end + 1));
   } catch {
@@ -297,5 +330,6 @@ export async function generateFeed(
   if (!Array.isArray(parsed.cards) || parsed.cards.length === 0) {
     throw new Error('Invalid response. Please retry.');
   }
-  return parsed.cards;
+
+  return { cards: parsed.cards, audit: parsed.audit ?? null };
 }
