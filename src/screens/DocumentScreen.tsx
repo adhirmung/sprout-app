@@ -5,10 +5,8 @@ import { Chip } from '../components/Chip';
 import { ProgressBar } from '../components/ProgressBar';
 import {
   buildChatSystemPrompt,
-  generateBoosterCards,
   generateFeed,
   hasApiKey,
-  reauditCards,
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
@@ -120,25 +118,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
       const result = await generateFeed(topic, content, resolvedPdf, mode);
 
-      // Booster pass — text documents only; PDFs skip (no source to verify accuracy)
-      let allCards    = result.cards;
-      let finalAudit  = result.audit;
-      if (!resolvedPdf && result.audit?.missedTopics && result.audit.missedTopics.length > 0) {
-        const booster = await generateBoosterCards(topic, result.audit.missedTopics, content).catch(() => []);
-        if (booster.length > 0) {
-          allCards   = [...result.cards, ...booster];
-          const updated = await reauditCards(topic, allCards, content).catch(() => null);
-          if (updated) finalAudit = updated;
-        }
-      }
-
-      const finalResult = { cards: allCards, audit: finalAudit };
+      const finalResult = { cards: result.cards, audit: result.audit };
       if (userId) {
         dbSaveGeneratedCards(userId, modeKey, topic, finalResult, contentLen).catch(console.error);
       } else {
         Store.set(`feed:${modeKey}`, finalResult);
       }
-      setCards(allCards); setAudit(finalAudit); setIdx(0); setStartTime(Date.now()); setPhase('running');
+      setCards(result.cards); setAudit(result.audit); setIdx(0); setStartTime(Date.now()); setPhase('running');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
       setPhase('idle');
@@ -585,7 +571,7 @@ function QualityBadge({ audit }: { audit: FeedAudit }) {
 // ── Feed loading ──────────────────────────────────────────────
 
 function FeedLoading({ topic }: { topic: string }) {
-  const STEPS = ['Reading your content…', 'Matching to your learning profile…', 'Crafting your feed…', 'Filling coverage gaps…'];
+  const STEPS = ['Reading your content…', 'Matching to your learning profile…', 'Crafting your feed…'];
   const [step, setStep] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setStep(s => Math.min(s + 1, STEPS.length - 1)), 3500);
