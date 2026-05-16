@@ -64,6 +64,19 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   useEffect(() => { if (error) retryRef.current?.focus(); }, [error]);
 
+  // Preload cached audit on mount so the quality badge shows while idle
+  useEffect(() => {
+    if (userId) {
+      dbLoadGeneratedCards(userId, `${sourceKey}:feed:activities`)
+        .then(cached => { if (cached?.result.audit) setAudit(cached.result.audit); })
+        .catch(() => {});
+    } else {
+      const cached = Store.get<{ cards: FeedCard[]; audit: FeedAudit | null } | null>(`feed:${sourceKey}:feed:activities`, null);
+      if (cached?.audit) setAudit(cached.audit);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId, sourceKey]);
+
   const generate = async (force = false, mode: 'activities' | 'flashcards' | 'quiz' = 'activities') => {
     const modeKey = `${sourceKey}:feed:${mode}`;
     setPhase('loading');
