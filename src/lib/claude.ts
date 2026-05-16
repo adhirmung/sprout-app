@@ -123,16 +123,19 @@ function buildActivitiesPrompt(topic: string, contentText: string | null, hasPdf
   return `You are an expert educational content designer. Generate a rich, sequenced learning feed for: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-Generate exactly 9 cards in this order — all types required:
-1. summary  — 5 key points spanning the full material
-2. concept  — deep explanation with example, analogy, and 3-5 key terms
-3. flashcard — Q&A testing recall
-4. flashcard — Q&A on a different concept
-5. worked_example — step-by-step walk through a problem or process (3-5 steps)
-6. animation — 4-5 narrative steps showing how the process works
-7. fill_blank — one sentence with 2-3 blanks (use _____ for each blank)
-8. quiz — 4-option multiple choice
-9. quiz — 4-option multiple choice on a different concept
+Generate exactly 12 cards in this order — all types required:
+1.  summary       — 5 key points spanning the full material
+2.  concept       — deep explanation with example, analogy, and 3-5 key terms
+3.  concept       — a DIFFERENT concept from the source, same format
+4.  flashcard     — Q&A testing recall
+5.  flashcard     — Q&A on a different concept
+6.  flashcard     — Q&A on yet another concept from a later section
+7.  worked_example — step-by-step walk through a problem or process (3-5 steps)
+8.  animation     — 4-5 narrative steps showing how the process works
+9.  fill_blank    — one sentence with 2-3 blanks (use _____ for each blank)
+10. fill_blank    — a DIFFERENT sentence from a different section of the source
+11. quiz          — 4-option multiple choice
+12. quiz          — 4-option multiple choice on a different concept
 
 Rules:
 - Cover the FULL breadth of the source — not just the opening section
@@ -157,6 +160,19 @@ Return ONLY valid JSON — no markdown fences:
         { "term": "...", "definition": "..." }
       ]
     },
+    {
+      "type": "concept",
+      "title": "...",
+      "explanation": "2-3 clear sentences on a DIFFERENT concept from the source",
+      "example": "A concrete real-world example",
+      "analogy": "A memorable analogy or metaphor",
+      "keyTerms": [
+        { "term": "...", "definition": "..." },
+        { "term": "...", "definition": "..." },
+        { "term": "...", "definition": "..." }
+      ]
+    },
+    { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." },
     {
@@ -183,6 +199,12 @@ Return ONLY valid JSON — no markdown fences:
       "blanks": ["exact answer 1", "exact answer 2", "exact answer 3"],
       "hint": "Think about the main mechanism described in the source"
     },
+    {
+      "type": "fill_blank",
+      "sentence": "Another sentence from a later section with _____ and _____.",
+      "blanks": ["exact answer 1", "exact answer 2"],
+      "hint": "Hint referencing a different part of the source"
+    },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 0, "explanation": "..." },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 1, "explanation": "..." }
   ],
@@ -197,7 +219,7 @@ Return ONLY valid JSON — no markdown fences:
 }
 
 function buildFlashcardsOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
-  return `You are an expert educator. Generate 15 comprehensive flashcards for: "${topic}"
+  return `You are an expert educator. Generate 25 comprehensive flashcards for: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
 Rules:
@@ -206,10 +228,21 @@ Rules:
 - Answers: 1-3 precise sentences; include exact terminology from the source
 - Do NOT cluster around only the opening section
 - Include: key terms, processes, formulas, examples, named concepts, procedures
+- Each card must cover a DISTINCT concept — no repetition
 
 Return ONLY valid JSON — no markdown fences:
 {
   "cards": [
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
+    { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." },
     { "type": "flashcard", "question": "...", "answer": "..." },
@@ -237,7 +270,7 @@ Return ONLY valid JSON — no markdown fences:
 }
 
 function buildQuizOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
-  return `You are an expert educator. Generate 8 comprehensive multiple-choice quiz questions for: "${topic}"
+  return `You are an expert educator. Generate 12 comprehensive multiple-choice quiz questions for: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
 Rules:
@@ -247,6 +280,7 @@ Rules:
 - Distractors must be plausible — not obviously wrong
 - Explanation addresses the most tempting wrong answer (2-3 sentences)
 - Mix recall, application, and analysis questions
+- Each question must cover a DISTINCT concept — no repetition
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -258,7 +292,11 @@ Return ONLY valid JSON — no markdown fences:
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 3, "explanation": "..." },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 1, "explanation": "..." },
     { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 2, "explanation": "..." },
-    { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 0, "explanation": "..." }
+    { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 0, "explanation": "..." },
+    { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 3, "explanation": "..." },
+    { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 1, "explanation": "..." },
+    { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 2, "explanation": "..." },
+    { "type": "quiz", "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "correctIndex": 3, "explanation": "..." }
   ],
   "audit": {
     "coverageScore": <0–100>,
@@ -298,7 +336,7 @@ export async function generateFeed(
     : mode === 'quiz' ? buildQuizOnlyPrompt
     : buildActivitiesPrompt;
 
-  const maxTokens = mode === 'flashcards' ? 6000 : mode === 'quiz' ? 5000 : 8000;
+  const maxTokens = mode === 'flashcards' ? 10000 : mode === 'quiz' ? 6000 : 10000;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
   const userContent: MsgContent = pdfBase64
