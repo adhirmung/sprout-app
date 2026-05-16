@@ -132,6 +132,10 @@ Required card sequence (repeat types as needed to cover all major topics):
 - End with at least 2 quiz cards
 - Every major topic, named concept, process, and key figure in the source must appear in at least one card
 
+BEFORE generating any card: mentally divide the document into three equal thirds (beginning, middle, end).
+Allocate cards proportionally — approximately one third of all cards must draw from each third of the document.
+Do not move on from a third until you have extracted its key topics.
+
 Rules:
 - Cover the FULL breadth of the source — spread cards across ALL sections, not just the opening
 - All facts from source content only; never invent
@@ -220,11 +224,14 @@ Scale the count to the content: a dense 30-page document warrants 35-40 cards; a
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
+BEFORE generating any card: mentally divide the document into three equal thirds (beginning, middle, end).
+Allocate cards proportionally — approximately one third of all cards must draw from each third of the document.
+Do not move on from a third until you have extracted its key topics.
+
 Rules:
 - Every major section, named concept, process, key figure, and fact in the source must appear in at least one card
 - Vary question types: definitions, mechanisms, comparisons, cause-effect, applications
 - Answers: 1-3 precise sentences; include exact terminology from the source
-- Spread cards evenly across ALL sections — do NOT cluster around only the opening
 - Each card must cover a DISTINCT concept — no repetition
 
 Return ONLY valid JSON — no markdown fences:
@@ -271,6 +278,10 @@ function buildQuizOnlyPrompt(topic: string, contentText: string | null, hasPdf: 
 Scale the count to the content: a dense document warrants 14-16 questions; a short one 12.
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
+
+BEFORE generating any question: mentally divide the document into three equal thirds (beginning, middle, end).
+Allocate questions proportionally — approximately one third of all questions must draw from each third of the document.
+Do not move on from a third until you have extracted its key testable concepts.
 
 Rules:
 - Every major section and key concept in the source must be tested by at least one question
