@@ -237,7 +237,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
       {showTutor && (
         <TutorOverlay
-          topic={topic} content={content} profile={profile}
+          topic={topic} content={content} cards={cards} profile={profile}
           currentCard={phase === 'idle' ? undefined : cards[idx]}
           onClose={() => setShowTutor(false)}
         />
@@ -1171,16 +1171,31 @@ function ApiKeyGate({ onSave }: { onSave: () => void }) {
   );
 }
 
-// ── Tutor overlay (bottom sheet) ──────────────────────────────
+// ── Tutor overlay (chat panel) ────────────────────────────────
 
-function TutorOverlay({ topic, content, profile, currentCard, onClose }: {
-  topic: string; content: string | null; profile: LearnerProfile | null;
+function topicLabel(c: FeedCard): string {
+  switch (c.type) {
+    case 'summary':        return c.title;
+    case 'flashcard':      return c.question;
+    case 'concept':        return c.title;
+    case 'worked_example': return c.title;
+    case 'animation':      return c.title;
+    case 'fill_blank':     return c.sentence;
+    case 'quiz':           return c.question;
+    case 'diagram':        return c.title;
+    default:               return (c as { type: string }).type;
+  }
+}
+
+function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: {
+  topic: string; content: string | null; cards: FeedCard[]; profile: LearnerProfile | null;
   currentCard: FeedCard | undefined; onClose: () => void;
 }) {
   const [messages,  setMessages]  = useState<ChatMessage[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [error,     setError]     = useState('');
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const bottomRef  = useRef<HTMLDivElement>(null);
+  const isMobile   = useIsMobile();
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
@@ -1210,44 +1225,139 @@ function TutorOverlay({ topic, content, profile, currentCard, onClose }: {
   };
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 'var(--z-modal)' as unknown as number, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end' }}>
-      <div onClick={onClose} style={{ position: 'absolute', inset: 0, background: 'rgba(31,41,55,0.4)' }} />
+    <div style={{ position: 'fixed', inset: 0, zIndex: 'var(--z-modal)' as unknown as number, display: 'flex' }}>
+      {/* Backdrop */}
+      <div onClick={onClose} style={{ flex: 1, background: 'rgba(15,23,42,0.32)', backdropFilter: 'blur(2px)' }} />
+
+      {/* Panel */}
       <div style={{
-        position: 'relative', background: 'var(--card)', borderRadius: '20px 20px 0 0',
-        height: '70dvh', display: 'flex', flexDirection: 'column',
-        boxShadow: '0 -8px 32px rgba(31,41,55,0.12)', animation: 'fadeUp 0.25s ease',
+        width: isMobile ? '100vw' : 'min(760px, 58vw)',
+        height: '100dvh',
+        background: 'var(--card)',
+        display: 'flex',
+        flexDirection: 'column',
+        boxShadow: '-12px 0 48px rgba(15,23,42,0.14)',
+        animation: 'slideInRight 0.22s ease',
       }}>
-        <div style={{ padding: '12px 20px', display: 'flex', alignItems: 'center', gap: 10, borderBottom: '1px solid var(--line)', flexShrink: 0 }}>
-          <span style={{ fontSize: 18 }}>🎓</span>
-          <span style={{ flex: 1, fontWeight: 700, fontSize: 14 }}>Ask tutor</span>
-          <button className="btn btn-ghost" onClick={onClose} style={{ padding: 6, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Close tutor">
-            <Icon name="close" size={18} />
+
+        {/* Header */}
+        <div style={{
+          padding: '0 16px', height: 56, flexShrink: 0,
+          borderBottom: '1px solid var(--line)',
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: 'var(--card)',
+        }}>
+          <div style={{ width: 32, height: 32, borderRadius: 10, background: 'var(--brand)', display: 'grid', placeItems: 'center', flexShrink: 0 }}>
+            <Icon name="sparkle" size={16} stroke="white" />
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--ink)' }}>Tutor</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
+          </div>
+          <button className="btn btn-ghost" onClick={onClose}
+            style={{ padding: 8, borderRadius: '50%', minWidth: 40, minHeight: 40 }}
+            aria-label="Close tutor">
+            <Icon name="close" size={16} />
           </button>
         </div>
-        <div style={{ flex: 1, overflow: 'auto', padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {messages.length === 0 && (
-            <div style={{ color: 'var(--ink-3)', fontSize: 13, textAlign: 'center', padding: '30px 16px', lineHeight: 1.6 }}>
-              Ask anything about this card or the topic.
+
+        {/* Body: topics sidebar + chat */}
+        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+
+          {/* Topics sidebar — desktop only */}
+          {!isMobile && cards.length > 0 && (
+            <div style={{
+              width: 220, flexShrink: 0,
+              borderRight: '1px solid var(--line)',
+              overflowY: 'auto',
+              background: 'var(--bg)',
+              display: 'flex', flexDirection: 'column',
+            }}>
+              <div style={{ padding: '14px 14px 6px', fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', color: 'var(--ink-4)', textTransform: 'uppercase' }}>
+                Topics
+              </div>
+              {cards.map((c, i) => {
+                const meta  = CARD_META[c.type] ?? { icon: '📚', color: 'brand', chip: c.type };
+                const label = topicLabel(c);
+                return (
+                  <button
+                    key={i}
+                    onClick={() => handleSend(`Can you explain this to me: ${label}`)}
+                    disabled={streaming}
+                    style={{
+                      display: 'flex', alignItems: 'flex-start', gap: 8,
+                      padding: '8px 14px', border: 'none', background: 'none',
+                      cursor: 'pointer', textAlign: 'left', width: '100%',
+                      transition: 'background 0.12s',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--card)')}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                  >
+                    <span style={{ fontSize: 13, lineHeight: 1, paddingTop: 2, flexShrink: 0 }}>{meta.icon}</span>
+                    <span style={{ fontSize: 12, color: 'var(--ink-2)', lineHeight: 1.45, fontWeight: 500 }}>
+                      {label.length > 65 ? label.slice(0, 65) + '…' : label}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
           )}
-          {messages.map((m, i) => (
-            <div key={i} style={{
-              alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start', maxWidth: '88%',
-              padding: '10px 14px',
-              borderRadius: m.role === 'user' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-              background: m.role === 'user' ? 'var(--brand)' : 'var(--bg-tint)',
-              border: m.role === 'assistant' ? '1px solid var(--line)' : 'none',
-              color: m.role === 'user' ? 'white' : 'var(--ink)',
-              fontSize: 13, lineHeight: 1.6,
-            }}>
-              {m.content || (streaming && i === messages.length - 1 ? <TypingDots /> : null)}
+
+          {/* Chat area */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg)' }}>
+
+            {/* Messages */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {messages.length === 0 && (
+                <div style={{ margin: 'auto', textAlign: 'center', padding: '0 24px' }}>
+                  <div style={{ fontSize: 32, marginBottom: 12 }}>🎓</div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--ink)', marginBottom: 6 }}>Ask your tutor</div>
+                  <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6 }}>
+                    {cards.length > 0 && !isMobile
+                      ? 'Ask anything, or click a topic on the left to dive deeper.'
+                      : 'Ask anything about this content.'}
+                  </div>
+                </div>
+              )}
+
+              {messages.map((m, i) => (
+                <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                  {m.role === 'assistant' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <div style={{ width: 20, height: 20, borderRadius: 6, background: 'var(--brand)', display: 'grid', placeItems: 'center' }}>
+                        <Icon name="sparkle" size={11} stroke="white" />
+                      </div>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)' }}>Tutor</span>
+                    </div>
+                  )}
+                  <div style={{
+                    maxWidth: '82%',
+                    padding: '10px 14px',
+                    borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
+                    background: m.role === 'user' ? 'var(--brand)' : 'var(--card)',
+                    border: m.role === 'assistant' ? '1px solid var(--line)' : 'none',
+                    color: m.role === 'user' ? 'white' : 'var(--ink)',
+                    fontSize: 13, lineHeight: 1.65,
+                    boxShadow: m.role === 'assistant' ? '0 1px 4px rgba(0,0,0,0.05)' : 'none',
+                  }}>
+                    {m.content || (streaming && i === messages.length - 1 ? <TypingDots /> : null)}
+                  </div>
+                </div>
+              ))}
+
+              {error && (
+                <div style={{ fontSize: 12, color: 'var(--error)', padding: '8px 12px', background: 'var(--error-soft)', borderRadius: 8, border: '1px solid var(--error-line)' }}>
+                  {error}
+                </div>
+              )}
+              <div ref={bottomRef} />
             </div>
-          ))}
-          {error && <div style={{ fontSize: 12, color: 'var(--error)', padding: '8px 12px', background: 'var(--error-soft)', borderRadius: 8 }}>{error}</div>}
-          <div ref={bottomRef} />
-        </div>
-        <div style={{ padding: '12px 16px', borderTop: '1px solid var(--line)', flexShrink: 0 }}>
-          <ChatInput onSend={handleSend} disabled={streaming} placeholder="Ask anything…" />
+
+            {/* Input */}
+            <div style={{ padding: '12px 16px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', flexShrink: 0 }}>
+              <ChatInput onSend={handleSend} disabled={streaming} placeholder="Ask anything…" />
+            </div>
+          </div>
         </div>
       </div>
     </div>
