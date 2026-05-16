@@ -382,6 +382,72 @@ export async function generateFeed(
   return { cards: parsed.cards, audit: parsed.audit ?? null };
 }
 
+// ── Post-booster re-audit ─────────────────────────────────────
+// Re-scores the final deck (main + booster) using a compact card manifest.
+// Text-only, no PDF re-send — costs ~$0.003 per run.
+
+export async function reauditCards(
+  topic:       string,
+  cards:       FeedCard[],
+  contentText: string | null,
+): Promise<FeedAudit | null> {
+  if (cards.length === 0) return null;
+  const client = getClient();
+
+  const manifest = cards.map((c, i) => {
+    switch (c.type) {
+      case 'summary':        return `${i + 1}. Summary: "${c.title}" (${c.points.length} points)`;
+      case 'flashcard':      return `${i + 1}. Flashcard: "${c.question}"`;
+      case 'concept':        return `${i + 1}. Concept: "${c.title}" — terms: ${c.keyTerms.map(k => k.term).join(', ')}`;
+      case 'worked_example': return `${i + 1}. Worked Example: "${c.title}"`;
+      case 'animation':      return `${i + 1}. Animation: "${c.title}" (${c.steps.length} steps)`;
+      case 'fill_blank':     return `${i + 1}. Fill-blank: "${c.sentence}"`;
+      case 'quiz':           return `${i + 1}. Quiz: "${c.question}"`;
+      case 'diagram':        return `${i + 1}. Diagram: "${c.title}"`;
+      default:               return `${i + 1}. Card: ${(c as { type: string }).type}`;
+    }
+  }).join('\n');
+
+  const sourceCtx = contentText
+    ? `SOURCE CONTENT:\n"""\n${contentText.slice(0, 20_000)}\n"""`
+    : '(No source text — assess based on topic and card topics.)';
+
+  const prompt = `You are a content quality auditor. Score this ${cards.length}-card learning deck for "${topic}".
+
+${sourceCtx}
+
+CARD DECK:
+${manifest}
+
+Score 0-100 on each dimension:
+- coverageScore: % of major topics, named concepts, key figures, and facts from the source represented across all cards
+- accuracyScore: how well cards reflect the source without invented facts
+- depthScore: whether cards spread evenly across the full document (beginning, middle, end) or cluster at the front
+- overallScore: integer average of the three
+- missedTopics: up to 3 important source topics not covered by any card (empty array if none)
+
+Return ONLY valid JSON:
+{ "coverageScore": <0-100>, "accuracyScore": <0-100>, "depthScore": <0-100>, "overallScore": <integer>, "missedTopics": [] }`;
+
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 300,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: prompt }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) return null;
+
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1));
+    if (typeof parsed.coverageScore !== 'number') return null;
+    return parsed as FeedAudit;
+  } catch { return null; }
+}
+
 // ── Booster pass ──────────────────────────────────────────────
 // Generates one targeted flashcard per missed topic — text-only, no PDF re-send.
 
