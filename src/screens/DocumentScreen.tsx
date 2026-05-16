@@ -197,6 +197,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CardView
               key={idx} card={cards[idx]} idx={idx} total={cards.length}
+              topic={topic} content={content} profile={profile}
               onCorrect={() => addScore(20, true)}
               onWrong={() => addScore(0, false)}
               onRated={diff => addScore({ easy: 15, medium: 10, hard: 5 }[diff], true)}
@@ -636,8 +637,9 @@ const CARD_META: Record<string, { chip: string; color: string; icon: string }> =
   quiz:           { chip: 'Quiz',           color: 'coral', icon: '✅' },
 };
 
-function CardView({ card, idx, total, onCorrect, onWrong, onRated, onPrev, onNext }: {
+function CardView({ card, idx, total, topic, content, profile, onCorrect, onWrong, onRated, onPrev, onNext }: {
   card: FeedCard; idx: number; total: number;
+  topic: string; content: string | null; profile: LearnerProfile | null;
   onCorrect: () => void; onWrong: () => void;
   onRated: (d: 'easy' | 'medium' | 'hard') => void;
   onPrev: () => void; onNext: () => void;
@@ -670,6 +672,92 @@ function CardView({ card, idx, total, onCorrect, onWrong, onRated, onPrev, onNex
           {idx + 1 === total ? 'Finish' : 'Next'} <Icon name="arrow-right" size={16} />
         </button>
       </div>
+
+      <InlineChat key={idx} card={card} topic={topic} content={content} profile={profile} />
+    </div>
+  );
+}
+
+// ── Inline card chat ──────────────────────────────────────────
+
+function InlineChat({ card, topic, content, profile }: {
+  card: FeedCard; topic: string; content: string | null; profile: LearnerProfile | null;
+}) {
+  const [open,      setOpen]      = useState(false);
+  const [messages,  setMessages]  = useState<ChatMessage[]>([]);
+  const [streaming, setStreaming] = useState(false);
+  const bottomRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => { if (open) bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, open]);
+
+  const cardDesc = topicLabel(card);
+  const sys      = buildChatSystemPrompt(topic, content, cardDesc, profile);
+
+  const handleSend = async (text: string) => {
+    const userMsg: ChatMessage = { role: 'user', content: text };
+    const history = [...messages, userMsg];
+    setMessages([...history, { role: 'assistant', content: '' }]);
+    setStreaming(true);
+    let out = '';
+    try {
+      await streamCardChat(history, sys, chunk => {
+        out += chunk;
+        setMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'assistant', content: out }; return u; });
+      });
+    } catch {
+      setMessages(prev => prev.slice(0, -1));
+    } finally {
+      setStreaming(false);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 16, borderTop: '1px solid var(--line)', paddingTop: 12 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: 'none', border: 'none', cursor: 'pointer',
+          fontSize: 13, fontWeight: 600, color: 'var(--ink-3)',
+          padding: '4px 0', width: '100%',
+        }}
+      >
+        <Icon name="sparkle" size={14} stroke="var(--brand)" />
+        <span style={{ color: 'var(--brand)' }}>Ask about this card</span>
+        <Icon name={open ? 'chevron-up' : 'chevron-down'} size={14} stroke="var(--ink-4)" />
+      </button>
+
+      {open && (
+        <div className="fade-up" style={{ marginTop: 10 }}>
+          <div style={{
+            maxHeight: 260, overflowY: 'auto',
+            display: 'flex', flexDirection: 'column', gap: 8,
+            marginBottom: 10, padding: '4px 0',
+          }}>
+            {messages.length === 0 && (
+              <div style={{ fontSize: 12, color: 'var(--ink-4)', textAlign: 'center', padding: '12px 0' }}>
+                Ask anything about this card
+              </div>
+            )}
+            {messages.map((m, i) => (
+              <div key={i} style={{
+                alignSelf: m.role === 'user' ? 'flex-end' : 'flex-start',
+                maxWidth: '86%',
+                padding: '8px 12px',
+                borderRadius: m.role === 'user' ? '14px 14px 4px 14px' : '4px 14px 14px 14px',
+                background: m.role === 'user' ? 'var(--brand)' : 'var(--bg-tint)',
+                border: m.role === 'assistant' ? '1px solid var(--line)' : 'none',
+                color: m.role === 'user' ? 'white' : 'var(--ink)',
+                fontSize: 13, lineHeight: 1.6,
+              }}>
+                {m.content || (streaming && i === messages.length - 1 ? <TypingDots /> : null)}
+              </div>
+            ))}
+            <div ref={bottomRef} />
+          </div>
+          <ChatInput onSend={handleSend} disabled={streaming} placeholder="Ask about this card…" />
+        </div>
+      )}
     </div>
   );
 }
@@ -1191,9 +1279,11 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
   topic: string; content: string | null; cards: FeedCard[]; profile: LearnerProfile | null;
   currentCard: FeedCard | undefined; onClose: () => void;
 }) {
-  const [messages,  setMessages]  = useState<ChatMessage[]>([]);
-  const [streaming, setStreaming] = useState(false);
-  const [error,     setError]     = useState('');
+  const [messages,         setMessages]         = useState<ChatMessage[]>([]);
+  const [streaming,        setStreaming]         = useState(false);
+  const [error,            setError]             = useState('');
+  const [showTopicPicker,  setShowTopicPicker]   = useState(false);
+  const [pendingTopic,     setPendingTopic]      = useState('');
   const bottomRef  = useRef<HTMLDivElement>(null);
   const isMobile   = useIsMobile();
 
@@ -1205,6 +1295,8 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
     : `${currentCard.type} card about ${topic}`;
 
   const handleSend = async (text: string) => {
+    setShowTopicPicker(false);
+    setPendingTopic('');
     const userMsg: ChatMessage = { role: 'user', content: text };
     const history = [...messages, userMsg];
     setMessages([...history, { role: 'assistant', content: '' }]);
@@ -1224,6 +1316,11 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
     }
   };
 
+  const pickTopic = (label: string) => {
+    setPendingTopic(label);
+    setShowTopicPicker(false);
+  };
+
   return (
     <div style={{ position: 'fixed', inset: 0, zIndex: 'var(--z-modal)' as unknown as number, display: 'flex' }}>
       {/* Backdrop */}
@@ -1231,71 +1328,95 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
 
       {/* Panel */}
       <div style={{
-        width: isMobile ? '100vw' : 'min(760px, 58vw)',
-        height: '100dvh',
+        width: isMobile ? '100vw' : 'min(680px, 55vw)',
+        height: '100dvh', display: 'flex', flexDirection: 'column',
         background: 'var(--card)',
-        display: 'flex',
-        flexDirection: 'column',
         boxShadow: '-12px 0 48px rgba(15,23,42,0.14)',
         animation: 'slideInRight 0.22s ease',
       }}>
 
         {/* Header */}
-        <div style={{
-          padding: '0 16px', height: 56, flexShrink: 0,
-          borderBottom: '1px solid var(--line)',
-          display: 'flex', alignItems: 'center', gap: 10,
-          background: 'var(--card)',
-        }}>
-          <div style={{ width: 32, height: 32, borderRadius: 10, background: 'var(--brand)', display: 'grid', placeItems: 'center', flexShrink: 0 }}>
-            <Icon name="sparkle" size={16} stroke="white" />
+        <div style={{ padding: '0 16px', height: 56, flexShrink: 0, borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
+          <div style={{ width: 30, height: 30, borderRadius: 9, background: 'var(--brand)', display: 'grid', placeItems: 'center', flexShrink: 0 }}>
+            <Icon name="sparkle" size={15} stroke="white" />
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--ink)' }}>Tutor</div>
+            <div style={{ fontWeight: 700, fontSize: 14 }}>Tutor</div>
             <div style={{ fontSize: 11, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
           </div>
-          <button className="btn btn-ghost" onClick={onClose}
-            style={{ padding: 8, borderRadius: '50%', minWidth: 40, minHeight: 40 }}
-            aria-label="Close tutor">
+          <button className="btn btn-ghost" onClick={onClose} style={{ padding: 8, borderRadius: '50%', minWidth: 40, minHeight: 40 }} aria-label="Close">
             <Icon name="close" size={16} />
           </button>
         </div>
 
-        {/* Body: topics sidebar + chat */}
-        <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+        {/* Messages */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 8px', display: 'flex', flexDirection: 'column', gap: 12, background: 'var(--bg)' }}>
+          {messages.length === 0 && (
+            <div style={{ margin: 'auto', textAlign: 'center', padding: '0 24px' }}>
+              <div style={{ fontSize: 36, marginBottom: 10 }}>🎓</div>
+              <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 6 }}>Ask your tutor</div>
+              <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6 }}>
+                Ask anything, or tap <strong>+</strong> to pick a card topic.
+              </div>
+            </div>
+          )}
+          {messages.map((m, i) => (
+            <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+              {m.role === 'assistant' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                  <div style={{ width: 20, height: 20, borderRadius: 6, background: 'var(--brand)', display: 'grid', placeItems: 'center' }}>
+                    <Icon name="sparkle" size={11} stroke="white" />
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)' }}>Tutor</span>
+                </div>
+              )}
+              <div style={{
+                maxWidth: '82%', padding: '10px 14px',
+                borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
+                background: m.role === 'user' ? 'var(--brand)' : 'var(--card)',
+                border: m.role === 'assistant' ? '1px solid var(--line)' : 'none',
+                color: m.role === 'user' ? 'white' : 'var(--ink)',
+                fontSize: 13, lineHeight: 1.65,
+                boxShadow: m.role === 'assistant' ? '0 1px 4px rgba(0,0,0,0.05)' : 'none',
+              }}>
+                {m.content || (streaming && i === messages.length - 1 ? <TypingDots /> : null)}
+              </div>
+            </div>
+          ))}
+          {error && <div style={{ fontSize: 12, color: 'var(--error)', padding: '8px 12px', background: 'var(--error-soft)', borderRadius: 8 }}>{error}</div>}
+          <div ref={bottomRef} />
+        </div>
 
-          {/* Topics sidebar — desktop only */}
-          {!isMobile && cards.length > 0 && (
-            <div style={{
-              width: 220, flexShrink: 0,
-              borderRight: '1px solid var(--line)',
-              overflowY: 'auto',
-              background: 'var(--bg)',
-              display: 'flex', flexDirection: 'column',
+        {/* Input row with + topic picker */}
+        <div style={{ padding: '10px 16px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', flexShrink: 0, position: 'relative' }}>
+
+          {/* Topic picker popover */}
+          {showTopicPicker && cards.length > 0 && (
+            <div className="fade-up" style={{
+              position: 'absolute', bottom: '100%', left: 16, right: 16, marginBottom: 8,
+              background: 'var(--card)', border: '1px solid var(--line)', borderRadius: 14,
+              boxShadow: '0 8px 32px rgba(15,23,42,0.12)',
+              maxHeight: 280, overflowY: 'auto',
+              zIndex: 10,
             }}>
-              <div style={{ padding: '14px 14px 6px', fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', color: 'var(--ink-4)', textTransform: 'uppercase' }}>
-                Topics
+              <div style={{ padding: '10px 14px 6px', fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', color: 'var(--ink-4)', textTransform: 'uppercase' }}>
+                Pick a topic
               </div>
               {cards.map((c, i) => {
-                const meta  = CARD_META[c.type] ?? { icon: '📚', color: 'brand', chip: c.type };
+                const meta  = CARD_META[c.type] ?? { icon: '📚' };
                 const label = topicLabel(c);
                 return (
-                  <button
-                    key={i}
-                    onClick={() => handleSend(`Can you explain this to me: ${label}`)}
-                    disabled={streaming}
+                  <button key={i} onClick={() => pickTopic(label)}
                     style={{
-                      display: 'flex', alignItems: 'flex-start', gap: 8,
-                      padding: '8px 14px', border: 'none', background: 'none',
-                      cursor: 'pointer', textAlign: 'left', width: '100%',
-                      transition: 'background 0.12s',
+                      display: 'flex', alignItems: 'flex-start', gap: 8, width: '100%',
+                      padding: '8px 14px', border: 'none', background: 'none', cursor: 'pointer', textAlign: 'left',
                     }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--card)')}
+                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg-tint)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'none')}
                   >
-                    <span style={{ fontSize: 13, lineHeight: 1, paddingTop: 2, flexShrink: 0 }}>{meta.icon}</span>
-                    <span style={{ fontSize: 12, color: 'var(--ink-2)', lineHeight: 1.45, fontWeight: 500 }}>
-                      {label.length > 65 ? label.slice(0, 65) + '…' : label}
+                    <span style={{ fontSize: 13, flexShrink: 0, paddingTop: 1 }}>{meta.icon}</span>
+                    <span style={{ fontSize: 12, color: 'var(--ink-2)', fontWeight: 500, lineHeight: 1.45 }}>
+                      {label.length > 70 ? label.slice(0, 70) + '…' : label}
                     </span>
                   </button>
                 );
@@ -1303,59 +1424,32 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
             </div>
           )}
 
-          {/* Chat area */}
-          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', background: 'var(--bg)' }}>
-
-            {/* Messages */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 16px 8px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {messages.length === 0 && (
-                <div style={{ margin: 'auto', textAlign: 'center', padding: '0 24px' }}>
-                  <div style={{ fontSize: 32, marginBottom: 12 }}>🎓</div>
-                  <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--ink)', marginBottom: 6 }}>Ask your tutor</div>
-                  <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6 }}>
-                    {cards.length > 0 && !isMobile
-                      ? 'Ask anything, or click a topic on the left to dive deeper.'
-                      : 'Ask anything about this content.'}
-                  </div>
-                </div>
-              )}
-
-              {messages.map((m, i) => (
-                <div key={i} style={{ display: 'flex', flexDirection: 'column', alignItems: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                  {m.role === 'assistant' && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                      <div style={{ width: 20, height: 20, borderRadius: 6, background: 'var(--brand)', display: 'grid', placeItems: 'center' }}>
-                        <Icon name="sparkle" size={11} stroke="white" />
-                      </div>
-                      <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)' }}>Tutor</span>
-                    </div>
-                  )}
-                  <div style={{
-                    maxWidth: '82%',
-                    padding: '10px 14px',
-                    borderRadius: m.role === 'user' ? '18px 18px 4px 18px' : '4px 18px 18px 18px',
-                    background: m.role === 'user' ? 'var(--brand)' : 'var(--card)',
-                    border: m.role === 'assistant' ? '1px solid var(--line)' : 'none',
-                    color: m.role === 'user' ? 'white' : 'var(--ink)',
-                    fontSize: 13, lineHeight: 1.65,
-                    boxShadow: m.role === 'assistant' ? '0 1px 4px rgba(0,0,0,0.05)' : 'none',
-                  }}>
-                    {m.content || (streaming && i === messages.length - 1 ? <TypingDots /> : null)}
-                  </div>
-                </div>
-              ))}
-
-              {error && (
-                <div style={{ fontSize: 12, color: 'var(--error)', padding: '8px 12px', background: 'var(--error-soft)', borderRadius: 8, border: '1px solid var(--error-line)' }}>
-                  {error}
-                </div>
-              )}
-              <div ref={bottomRef} />
-            </div>
-
-            {/* Input */}
-            <div style={{ padding: '12px 16px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', flexShrink: 0 }}>
-              <ChatInput onSend={handleSend} disabled={streaming} placeholder="Ask anything…" />
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            {/* + button */}
+            {cards.length > 0 && (
+              <button
+                onClick={() => setShowTopicPicker(p => !p)}
+                title="Pick a topic"
+                style={{
+                  width: 40, height: 40, borderRadius: 12, flexShrink: 0,
+                  border: '1.5px solid var(--line)',
+                  background: showTopicPicker ? 'var(--brand-tint)' : 'var(--card)',
+                  color: showTopicPicker ? 'var(--brand)' : 'var(--ink-3)',
+                  display: 'grid', placeItems: 'center',
+                  cursor: 'pointer', fontSize: 20, fontWeight: 300, lineHeight: 1,
+                  transition: 'background 0.12s, color 0.12s',
+                }}>
+                +
+              </button>
+            )}
+            <div style={{ flex: 1 }}>
+              <ChatInput
+                onSend={handleSend}
+                disabled={streaming}
+                placeholder="Ask anything…"
+                prefill={pendingTopic}
+                onPrefillConsumed={() => setPendingTopic('')}
+              />
             </div>
           </div>
         </div>
@@ -1366,12 +1460,25 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
 
 // ── Shared primitives ─────────────────────────────────────────
 
-function ChatInput({ onSend, disabled, placeholder }: { onSend: (t: string) => void; disabled: boolean; placeholder: string }) {
+function ChatInput({ onSend, disabled, placeholder, prefill, onPrefillConsumed }: {
+  onSend: (t: string) => void; disabled: boolean; placeholder: string;
+  prefill?: string; onPrefillConsumed?: () => void;
+}) {
   const [input, setInput] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (prefill) {
+      setInput(prefill);
+      inputRef.current?.focus();
+      onPrefillConsumed?.();
+    }
+  }, [prefill]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const send = () => { if (!input.trim() || disabled) return; onSend(input.trim()); setInput(''); };
   return (
     <div style={{ display: 'flex', gap: 8 }}>
-      <input className="input" value={input} onChange={e => setInput(e.target.value)}
+      <input ref={inputRef} className="input" value={input} onChange={e => setInput(e.target.value)}
         onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }}
         placeholder={placeholder} disabled={disabled} style={{ flex: 1, fontSize: 13 }} />
       <button className="btn btn-primary" onClick={send} disabled={!input.trim() || disabled}
