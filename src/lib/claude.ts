@@ -123,26 +123,22 @@ function buildActivitiesPrompt(topic: string, contentText: string | null, hasPdf
   return `You are an expert educational content designer. Generate a rich, sequenced learning feed for: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-Generate exactly 12 cards in this order — all types required:
-1.  summary       — 5 key points spanning the full material
-2.  concept       — deep explanation with example, analogy, and 3-5 key terms
-3.  concept       — a DIFFERENT concept from the source, same format
-4.  flashcard     — Q&A testing recall
-5.  flashcard     — Q&A on a different concept
-6.  flashcard     — Q&A on yet another concept from a later section
-7.  worked_example — step-by-step walk through a problem or process (3-5 steps)
-8.  animation     — 4-5 narrative steps showing how the process works
-9.  fill_blank    — one sentence with 2-3 blanks (use _____ for each blank)
-10. fill_blank    — a DIFFERENT sentence from a different section of the source
-11. quiz          — 4-option multiple choice
-12. quiz          — 4-option multiple choice on a different concept
+Generate as many cards as needed to achieve full coverage of the source — minimum 12, maximum 20.
+Scale the count to the content: a dense 30-page document warrants 18-20 cards; a short 5-page document 12-14.
+
+Required card sequence (repeat types as needed to cover all major topics):
+- Start with: summary, concept, concept
+- Then alternate freely between: flashcard, concept, worked_example, animation, fill_blank, quiz
+- End with at least 2 quiz cards
+- Every major topic, named concept, process, and key figure in the source must appear in at least one card
 
 Rules:
-- Cover the FULL breadth of the source — not just the opening section
+- Cover the FULL breadth of the source — spread cards across ALL sections, not just the opening
 - All facts from source content only; never invent
 - fill_blank: number of _____ must exactly equal blanks array length
 - worked_example steps: each step builds logically on the previous
 - quiz correctIndex is 0-based; distractors must be plausible
+- No two cards may cover the same concept
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -219,15 +215,16 @@ Return ONLY valid JSON — no markdown fences:
 }
 
 function buildFlashcardsOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
-  return `You are an expert educator. Generate 25 comprehensive flashcards for: "${topic}"
+  return `You are an expert educator. Generate as many flashcards as needed to achieve full coverage of the source — minimum 20, maximum 40.
+Scale the count to the content: a dense 30-page document warrants 35-40 cards; a short 5-page document 20-25.
+Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
 Rules:
-- Span the FULL breadth of the material — cover all major sections, concepts, and facts
+- Every major section, named concept, process, key figure, and fact in the source must appear in at least one card
 - Vary question types: definitions, mechanisms, comparisons, cause-effect, applications
 - Answers: 1-3 precise sentences; include exact terminology from the source
-- Do NOT cluster around only the opening section
-- Include: key terms, processes, formulas, examples, named concepts, procedures
+- Spread cards evenly across ALL sections — do NOT cluster around only the opening
 - Each card must cover a DISTINCT concept — no repetition
 
 Return ONLY valid JSON — no markdown fences:
@@ -270,11 +267,13 @@ Return ONLY valid JSON — no markdown fences:
 }
 
 function buildQuizOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
-  return `You are an expert educator. Generate 12 comprehensive multiple-choice quiz questions for: "${topic}"
+  return `You are an expert educator. Generate as many quiz questions as needed to achieve full coverage of the source — minimum 12, maximum 16.
+Scale the count to the content: a dense document warrants 14-16 questions; a short one 12.
+Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
 Rules:
-- Span the FULL breadth of the material
+- Every major section and key concept in the source must be tested by at least one question
 - Each question has exactly 4 options
 - correctIndex is 0-based (0 = first option is correct)
 - Distractors must be plausible — not obviously wrong
@@ -336,7 +335,7 @@ export async function generateFeed(
     : mode === 'quiz' ? buildQuizOnlyPrompt
     : buildActivitiesPrompt;
 
-  const maxTokens = mode === 'flashcards' ? 10000 : mode === 'quiz' ? 6000 : 10000;
+  const maxTokens = mode === 'flashcards' ? 16000 : mode === 'quiz' ? 8000 : 12000;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
   const userContent: MsgContent = pdfBase64
