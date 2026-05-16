@@ -381,3 +381,56 @@ export async function generateFeed(
 
   return { cards: parsed.cards, audit: parsed.audit ?? null };
 }
+
+// ── Booster pass ──────────────────────────────────────────────
+// Generates one targeted flashcard per missed topic — text-only, no PDF re-send.
+
+export async function generateBoosterCards(
+  topic:       string,
+  missedTopics: string[],
+  contentText: string | null,
+): Promise<FeedCard[]> {
+  if (missedTopics.length === 0) return [];
+  const client = getClient();
+
+  const topicList = missedTopics.map((t, i) => `${i + 1}. ${t}`).join('\n');
+  const sourceCtx = contentText
+    ? `SOURCE CONTENT:\n"""\n${contentText.slice(0, 20_000)}\n"""`
+    : '(Use accurate general knowledge for this topic.)';
+
+  const prompt = `You are an expert educator. Generate exactly ${missedTopics.length} flashcard(s) for the topic "${topic}".
+${sourceCtx}
+
+Each flashcard must directly address exactly one of these missed topics — in order:
+${topicList}
+
+Rules:
+- One flashcard per missed topic — no more, no less
+- Answers: 1-3 precise sentences with exact facts, names, dates, or measurements
+- Ground answers in the source content where possible; otherwise use accurate general knowledge
+
+Return ONLY valid JSON — no markdown fences:
+{ "cards": [{ "type": "flashcard", "question": "...", "answer": "..." }] }`;
+
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 1500,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: prompt }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) return [];
+
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1));
+    return Array.isArray(parsed.cards) ? parsed.cards as FeedCard[] : [];
+  } catch {
+    try {
+      const parsed = JSON.parse(repairJson(raw.slice(start)));
+      return Array.isArray(parsed.cards) ? parsed.cards as FeedCard[] : [];
+    } catch { return []; }
+  }
+}

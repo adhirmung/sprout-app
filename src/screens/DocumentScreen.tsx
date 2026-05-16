@@ -5,6 +5,7 @@ import { Chip } from '../components/Chip';
 import { ProgressBar } from '../components/ProgressBar';
 import {
   buildChatSystemPrompt,
+  generateBoosterCards,
   generateFeed,
   hasApiKey,
   saveApiKey,
@@ -117,12 +118,21 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       }
 
       const result = await generateFeed(topic, content, resolvedPdf, mode);
-      if (userId) {
-        dbSaveGeneratedCards(userId, modeKey, topic, result, contentLen).catch(console.error);
-      } else {
-        Store.set(`feed:${modeKey}`, { cards: result.cards, audit: result.audit });
+
+      // Booster pass — fill missed topics with targeted flashcards (text-only, no PDF re-send)
+      let allCards = result.cards;
+      if (result.audit?.missedTopics && result.audit.missedTopics.length > 0) {
+        const booster = await generateBoosterCards(topic, result.audit.missedTopics, content).catch(() => []);
+        if (booster.length > 0) allCards = [...result.cards, ...booster];
       }
-      setCards(result.cards); setAudit(result.audit); setIdx(0); setStartTime(Date.now()); setPhase('running');
+
+      const finalResult = { cards: allCards, audit: result.audit };
+      if (userId) {
+        dbSaveGeneratedCards(userId, modeKey, topic, finalResult, contentLen).catch(console.error);
+      } else {
+        Store.set(`feed:${modeKey}`, { cards: allCards, audit: result.audit });
+      }
+      setCards(allCards); setAudit(result.audit); setIdx(0); setStartTime(Date.now()); setPhase('running');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
       setPhase('idle');
@@ -568,7 +578,7 @@ function QualityBadge({ audit }: { audit: FeedAudit }) {
 // ── Feed loading ──────────────────────────────────────────────
 
 function FeedLoading({ topic }: { topic: string }) {
-  const STEPS = ['Reading your content…', 'Matching to your learning profile…', 'Crafting your feed…'];
+  const STEPS = ['Reading your content…', 'Matching to your learning profile…', 'Crafting your feed…', 'Filling coverage gaps…'];
   const [step, setStep] = useState(0);
   useEffect(() => {
     const id = setInterval(() => setStep(s => Math.min(s + 1, STEPS.length - 1)), 3500);
