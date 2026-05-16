@@ -120,10 +120,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
       const result = await generateFeed(topic, content, resolvedPdf, mode);
 
-      // Booster pass — fill missed topics, then re-audit the full deck
+      // Booster pass — text documents only; PDFs skip (no source to verify accuracy)
       let allCards    = result.cards;
       let finalAudit  = result.audit;
-      if (result.audit?.missedTopics && result.audit.missedTopics.length > 0) {
+      if (!resolvedPdf && result.audit?.missedTopics && result.audit.missedTopics.length > 0) {
         const booster = await generateBoosterCards(topic, result.audit.missedTopics, content).catch(() => []);
         if (booster.length > 0) {
           allCards   = [...result.cards, ...booster];
