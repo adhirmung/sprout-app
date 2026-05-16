@@ -191,7 +191,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         {phase === 'done' && (
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CompletionView
-              cards={cards} score={score}
+              cards={cards} score={score} audit={audit}
               elapsed={startTime ? Date.now() - startTime : 0}
               onBack={onBack}
               onRestart={() => { setIdx(0); setScore(0); setStreak(0); setStartTime(Date.now()); setPhase('running'); }}
@@ -1083,8 +1083,8 @@ function QuizCard({ card, onCorrect, onWrong }: {
 
 // ── Completion view ───────────────────────────────────────────
 
-function CompletionView({ cards, score, elapsed, onBack, onRestart }: {
-  cards: FeedCard[]; score: number; elapsed: number;
+function CompletionView({ cards, score, audit, elapsed, onBack, onRestart }: {
+  cards: FeedCard[]; score: number; audit: FeedAudit | null; elapsed: number;
   onBack: () => void; onRestart: () => void;
 }) {
   const mins    = Math.floor(elapsed / 60000);
@@ -1096,7 +1096,7 @@ function CompletionView({ cards, score, elapsed, onBack, onRestart }: {
       <div style={{ fontSize: 64, marginBottom: 14, animation: 'pop 0.6s ease' }}>🌱</div>
       <h2 className="display" style={{ fontSize: 32, marginBottom: 8 }}>Great work!</h2>
       <p style={{ color: 'var(--ink-2)', marginBottom: 28, fontSize: 15 }}>Your sprout grew a little taller today.</p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 32 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 28 }}>
         {([
           { v: cards.length, l: 'Cards',  c: 'brand' },
           { v: score,        l: 'Points', c: 'gold'  },
@@ -1108,6 +1108,11 @@ function CompletionView({ cards, score, elapsed, onBack, onRestart }: {
           </div>
         ))}
       </div>
+      {audit && (
+        <div style={{ marginBottom: 28, textAlign: 'left' }}>
+          <QualityBadge audit={audit} />
+        </div>
+      )}
       <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
         <button className="btn btn-secondary" onClick={onRestart}>
           <Icon name="rotate" size={16} /> Review again
