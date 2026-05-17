@@ -43,8 +43,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [cards,     setCards]     = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
-  const [score,     setScore]     = useState(0);
-  const [streak,    setStreak]    = useState(0);
+  const [score,       setScore]       = useState(0);
+  const [streak,      setStreak]      = useState(0);
+  const [quizCorrect, setQuizCorrect] = useState(0);
+  const [quizTotal,   setQuizTotal]   = useState(0);
   const [startTime, setStartTime] = useState<number | null>(null);
   const [error,     setError]     = useState('');
   const [fromCache, setFromCache] = useState(false);
@@ -84,6 +86,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     setFromCache(false);
     setScore(0);
     setStreak(0);
+    setQuizCorrect(0);
+    setQuizTotal(0);
     try {
       if (!force) {
         if (userId) {
@@ -184,8 +188,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             <CardView
               key={idx} card={cards[idx]} idx={idx} total={cards.length}
               topic={topic} content={content} profile={profile}
-              onCorrect={() => addScore(20, true)}
-              onWrong={() => addScore(0, false)}
+              onCorrect={() => { addScore(20, true);  setQuizCorrect(c => c + 1); setQuizTotal(t => t + 1); }}
+              onWrong={()  => { addScore(0,  false); setQuizTotal(t => t + 1); }}
               onRated={diff => addScore({ easy: 15, medium: 10, hard: 5 }[diff], true)}
               onPrev={prev} onNext={next}
             />
@@ -195,9 +199,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CompletionView
               cards={cards} score={score} audit={audit}
+              quizCorrect={quizCorrect} quizTotal={quizTotal}
               elapsed={startTime ? Date.now() - startTime : 0}
               onBack={onBack}
-              onRestart={() => { setIdx(0); setScore(0); setStreak(0); setStartTime(Date.now()); setPhase('running'); }}
+              onRestart={() => { setIdx(0); setScore(0); setStreak(0); setQuizCorrect(0); setQuizTotal(0); setStartTime(Date.now()); setPhase('running'); }}
             />
           </div>
         )}
@@ -1173,20 +1178,22 @@ function QuizCard({ card, onCorrect, onWrong }: {
 
 // ── Completion view ───────────────────────────────────────────
 
-function CompletionView({ cards, score, audit, elapsed, onBack, onRestart }: {
-  cards: FeedCard[]; score: number; audit: FeedAudit | null; elapsed: number;
+function CompletionView({ cards, score, audit, quizCorrect, quizTotal, elapsed, onBack, onRestart }: {
+  cards: FeedCard[]; score: number; audit: FeedAudit | null;
+  quizCorrect: number; quizTotal: number; elapsed: number;
   onBack: () => void; onRestart: () => void;
 }) {
   const mins    = Math.floor(elapsed / 60000);
   const secs    = Math.floor((elapsed % 60000) / 1000);
   const timeStr = `${mins}:${String(secs).padStart(2, '0')}`;
+  const quizPct = quizTotal > 0 ? Math.round((quizCorrect / quizTotal) * 100) : null;
 
   return (
     <div className="card fade-up" style={{ padding: 40, textAlign: 'center' }}>
       <div style={{ fontSize: 64, marginBottom: 14, animation: 'pop 0.6s ease' }}>🌱</div>
       <h2 className="display" style={{ fontSize: 32, marginBottom: 8 }}>Great work!</h2>
       <p style={{ color: 'var(--ink-2)', marginBottom: 28, fontSize: 15 }}>Your sprout grew a little taller today.</p>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 28 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: quizPct !== null ? 16 : 28 }}>
         {([
           { v: cards.length, l: 'Cards',  c: 'brand' },
           { v: score,        l: 'Points', c: 'gold'  },
@@ -1198,6 +1205,17 @@ function CompletionView({ cards, score, audit, elapsed, onBack, onRestart }: {
           </div>
         ))}
       </div>
+      {quizPct !== null && (
+        <div style={{ marginBottom: 16, padding: '14px 20px', borderRadius: 14, background: quizPct >= 80 ? 'var(--brand-tint)' : quizPct >= 60 ? '#FFFBEB' : 'var(--coral-soft)', border: `1px solid ${quizPct >= 80 ? 'var(--brand-soft)' : quizPct >= 60 ? 'rgba(244,183,64,0.35)' : 'var(--coral-soft)'}`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ textAlign: 'left' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)', marginBottom: 2 }}>Quiz score</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-2)' }}>{quizCorrect} correct out of {quizTotal}</div>
+          </div>
+          <div style={{ fontSize: 32, fontWeight: 800, fontFamily: 'var(--font-mono)', color: quizPct >= 80 ? 'var(--brand)' : quizPct >= 60 ? 'var(--gold)' : 'var(--coral)' }}>
+            {quizPct}%
+          </div>
+        </div>
+      )}
       {audit && (
         <div style={{ marginBottom: 28, textAlign: 'left' }}>
           <QualityBadge audit={audit} />
