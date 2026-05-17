@@ -86,6 +86,26 @@ export async function streamCardChat(
   }
 }
 
+// ── Content map ───────────────────────────────────────────────
+
+export interface SubTopic {
+  id:      string;
+  title:   string;
+  summary: string;
+}
+
+export interface Topic {
+  id:        string;
+  title:     string;
+  summary:   string;
+  subtopics: SubTopic[];
+}
+
+export interface ContentMap {
+  synthesis: string;
+  topics:    Topic[];
+}
+
 // ── Feed generator ────────────────────────────────────────────
 
 export interface FeedAudit {
@@ -499,4 +519,72 @@ Return ONLY valid JSON — no markdown fences:
       return Array.isArray(parsed.cards) ? parsed.cards as FeedCard[] : [];
     } catch { return []; }
   }
+}
+
+// ── Content map generator ─────────────────────────────────────
+
+export async function generateContentMap(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+): Promise<ContentMap> {
+  const client = getClient();
+  const hasPdf = !!pdfBase64;
+
+  const prompt = `You are an expert educational content analyst. Analyze this document and extract a structured learning map.
+
+Topic: "${topic}"
+${sourceBlock(contentText, hasPdf)}
+
+Extract a hierarchical topic map. Cover the FULL document proportionally — topics from the beginning, middle, and end.
+Generate 4–8 major topics, each with 2–5 subtopics.
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "synthesis": "3–4 sentences: the document's main theme, key arguments, overall structure, and why it matters to a student",
+  "topics": [
+    {
+      "id": "t1",
+      "title": "Major Topic Name",
+      "summary": "1–2 sentences describing what this topic covers and its significance",
+      "subtopics": [
+        { "id": "t1s1", "title": "Subtopic Name", "summary": "1–2 sentences on this specific subtopic" },
+        { "id": "t1s2", "title": "Subtopic Name", "summary": "1–2 sentences on this specific subtopic" }
+      ]
+    }
+  ]
+}`;
+
+  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
+  const userContent: MsgContent = pdfBase64
+    ? ([
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'text', text: prompt },
+      ] as MsgContent)
+    : prompt;
+
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 4000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: userContent }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Failed to generate topic map. Please retry.');
+
+  let parsed: ContentMap;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    parsed = JSON.parse(repairJson(raw.slice(start)));
+  }
+
+  if (!parsed.synthesis || !Array.isArray(parsed.topics) || parsed.topics.length === 0) {
+    throw new Error('Invalid topic map response. Please retry.');
+  }
+
+  return parsed;
 }

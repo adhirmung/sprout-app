@@ -5,12 +5,13 @@ import { Chip } from '../components/Chip';
 import { ProgressBar } from '../components/ProgressBar';
 import {
   buildChatSystemPrompt,
+  generateContentMap,
   generateFeed,
   hasApiKey,
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
-import type { ChatMessage, FeedCard, FeedAudit } from '../lib/claude';
+import type { ChatMessage, ContentMap, FeedCard, FeedAudit } from '../lib/claude';
 import { dbLoadGeneratedCards, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -39,8 +40,9 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,     setPhase]     = useState<'idle' | 'loading' | 'running' | 'done'>('idle');
-  const [cards,     setCards]     = useState<FeedCard[]>([]);
+  const [phase,      setPhase]      = useState<'idle' | 'mapping' | 'map' | 'loading' | 'running' | 'done'>('idle');
+  const [contentMap, setContentMap] = useState<ContentMap | null>(null);
+  const [cards,      setCards]      = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
   const [score,       setScore]       = useState(0);
@@ -65,6 +67,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const contentLen  = content?.length ?? 0;
 
   useEffect(() => { if (error) retryRef.current?.focus(); }, [error]);
+
+  // Preload cached content map on mount (instant load if returning to doc)
+  useEffect(() => {
+    const cached = Store.get<ContentMap | null>(`map:${sourceKey}`, null);
+    if (cached?.synthesis && Array.isArray(cached.topics)) setContentMap(cached);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sourceKey]);
 
   // Preload cached audit on mount so the quality badge shows while idle
   useEffect(() => {
@@ -135,6 +144,35 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   };
 
+  const startLearning = async () => {
+    const mapKey = `map:${sourceKey}`;
+    // Serve from cache if available
+    const cached = Store.get<ContentMap | null>(mapKey, null);
+    if (cached?.synthesis && Array.isArray(cached.topics)) {
+      setContentMap(cached);
+      setPhase('map');
+      return;
+    }
+    setPhase('mapping');
+    setError('');
+    try {
+      let resolvedPdf = pdfBase64;
+      if (!resolvedPdf && storagePath) {
+        resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+      }
+      if (fileType === 'PDF' && !resolvedPdf) {
+        throw new Error('Could not load PDF binary. Try re-uploading the file.');
+      }
+      const map = await generateContentMap(topic, content, resolvedPdf);
+      Store.set(mapKey, map);
+      setContentMap(map);
+      setPhase('map');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to generate topic map. Please retry.');
+      setPhase('idle');
+    }
+  };
+
   const next = () => { if (idx + 1 >= cards.length) { setPhase('done'); } else { setIdx(i => i + 1); } };
   const prev = () => { if (idx > 0) setIdx(i => i - 1); };
 
@@ -150,13 +188,40 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     </div>
   );
 
+  if (phase === 'map' && contentMap) return (
+    <MapView
+      contentMap={contentMap}
+      topic={topic}
+      hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
+      onBack={() => setPhase('idle')}
+      onPractice={(mode) => { setPhase('idle'); generate(false, mode); }}
+      onRegenerate={async () => {
+        Store.del(`map:${sourceKey}`);
+        setContentMap(null);
+        setPhase('mapping');
+        setError('');
+        try {
+          let resolvedPdf = pdfBase64;
+          if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+          const map = await generateContentMap(topic, content, resolvedPdf);
+          Store.set(`map:${sourceKey}`, map);
+          setContentMap(map);
+          setPhase('map');
+        } catch (e) {
+          setError(e instanceof Error ? e.message : 'Failed to generate topic map.');
+          setPhase('idle');
+        }
+      }}
+    />
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
       {phase !== 'idle' && (
         <FeedHeader
           topic={topic} breadcrumb={breadcrumb}
           score={score} streak={streak}
-          onBack={phase === 'loading' ? () => { setPhase('idle'); setError(''); } : onBack}
+          onBack={(phase === 'loading' || phase === 'mapping') ? () => { setPhase('idle'); setError(''); } : onBack}
         />
       )}
 
@@ -175,14 +240,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           <DocIdleView
             source={source} topic={topic} breadcrumb={breadcrumb}
             isLargeDoc={isLargeDoc} fromCache={fromCache} audit={audit}
+            hasMap={!!contentMap}
             error={error} retryRef={retryRef} profile={profile}
             onBack={onBack}
             onGenerate={(mode) => generate(false, mode)}
             onRegenerate={() => generate(true, 'activities')}
             onOpenTutor={() => setShowTutor(true)}
+            onStartLearning={startLearning}
           />
         )}
-        {phase === 'loading' && <FeedLoading topic={topic} />}
+        {(phase === 'loading' || phase === 'mapping') && <FeedLoading topic={topic} />}
         {phase === 'running' && cards.length > 0 && cards[idx] && (
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CardView
@@ -282,13 +349,13 @@ function StatPill({ icon, color, value, label }: { icon: string; color: string; 
 // ── Idle view (two-column) ────────────────────────────────────
 
 function DocIdleView({
-  source, topic, breadcrumb, isLargeDoc, fromCache, audit, error, retryRef, profile,
-  onBack, onGenerate, onRegenerate, onOpenTutor,
+  source, topic, breadcrumb, isLargeDoc, fromCache, audit, hasMap, error, retryRef, profile,
+  onBack, onGenerate, onRegenerate, onOpenTutor, onStartLearning,
 }: {
   source: FeedSource | null; topic: string; breadcrumb: string;
-  isLargeDoc: boolean; fromCache: boolean; audit: FeedAudit | null; error: string;
+  isLargeDoc: boolean; fromCache: boolean; audit: FeedAudit | null; hasMap: boolean; error: string;
   retryRef: React.RefObject<HTMLButtonElement | null>; profile: LearnerProfile | null;
-  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onOpenTutor: () => void;
+  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onOpenTutor: () => void; onStartLearning: () => void;
 }) {
   const isMobile = useIsMobile();
   const [hoveredMode, setHoveredMode] = useState<string | null>(null);
@@ -445,9 +512,39 @@ function DocIdleView({
   const rightPanel = (
     <div style={{ padding: isMobile ? '8px 20px 32px' : '40px 48px', display: 'flex', flexDirection: 'column' }}>
       <h2 className="display" style={{ fontSize: 32, marginBottom: 8 }}>Learn this</h2>
-      <p style={{ color: 'var(--ink-2)', fontSize: 14, marginBottom: 28, lineHeight: 1.6 }}>
+      <p style={{ color: 'var(--ink-2)', fontSize: 14, marginBottom: 20, lineHeight: 1.6 }}>
         Choose how you want to study this content.
       </p>
+
+      {/* Start Learning — primary meta-learning entry point */}
+      <button
+        onClick={onStartLearning}
+        style={{
+          padding: '18px 20px', borderRadius: 18, marginBottom: 28,
+          background: 'linear-gradient(135deg, var(--brand-tint) 0%, rgba(47,158,94,0.12) 100%)',
+          border: '2px solid var(--brand)', display: 'flex', alignItems: 'center', gap: 14,
+          textAlign: 'left', cursor: 'pointer', width: '100%',
+          boxShadow: '0 2px 12px rgba(47,158,94,0.15)',
+        }}
+      >
+        <div style={{ width: 50, height: 50, borderRadius: 14, background: 'var(--brand)', display: 'grid', placeItems: 'center', fontSize: 24, flexShrink: 0 }}>
+          🗺️
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 }}>
+            <span style={{ fontWeight: 800, fontSize: 15, color: 'var(--brand-2)' }}>Start Learning</span>
+            {hasMap && <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--brand)', background: 'var(--brand-soft)', padding: '2px 7px', borderRadius: 6 }}>READY</span>}
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+            Explore the topic map, read summaries, then dive into practice.
+          </div>
+        </div>
+        <Icon name="chevron-right" size={18} stroke="var(--brand)" />
+      </button>
+
+      <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: '0.08em', color: 'var(--ink-4)', textTransform: 'uppercase', marginBottom: 12 }}>
+        Or jump straight to practice
+      </div>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
         {MODES.map(m => (
@@ -524,6 +621,123 @@ function DocIdleView({
     <div style={{ height: '100%', display: 'grid', gridTemplateColumns: '55% 45%' }}>
       <div style={{ overflowY: 'auto' }}>{leftPanel}</div>
       <div style={{ overflowY: 'auto' }}>{rightPanel}</div>
+    </div>
+  );
+}
+
+// ── Map view ──────────────────────────────────────────────────
+
+function MapView({ contentMap, topic, hasCache, onBack, onPractice, onRegenerate }: {
+  contentMap: ContentMap;
+  topic: string;
+  hasCache: boolean;
+  onBack: () => void;
+  onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate: () => void;
+}) {
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const isMobile = useIsMobile();
+
+  const toggle = (id: string) => setExpanded(prev => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ padding: '0 16px', height: 58, flexShrink: 0, background: 'var(--card)', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button className="btn btn-ghost" onClick={onBack} style={{ padding: 8, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Back to library">
+          <Icon name="arrow-left" size={20} />
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Topic Map</div>
+          <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
+        </div>
+        {hasCache && (
+          <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 12px', color: 'var(--ink-3)', gap: 6 }}>
+            <Icon name="refresh" size={14} stroke="var(--ink-3)" /> Refresh
+          </button>
+        )}
+      </div>
+
+      {/* Scrollable content */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '28px 24px' }}>
+        <div style={{ maxWidth: 720, margin: '0 auto' }}>
+
+          {/* Synthesis / Big Picture */}
+          <div style={{ padding: '20px 24px', borderRadius: 18, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 28 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--brand)', textTransform: 'uppercase', marginBottom: 10 }}>
+              Big Picture
+            </div>
+            <p style={{ margin: 0, fontSize: 15, lineHeight: 1.8, color: 'var(--ink-2)' }}>
+              {contentMap.synthesis}
+            </p>
+          </div>
+
+          {/* Topic tree */}
+          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--ink-3)', textTransform: 'uppercase', marginBottom: 14 }}>
+            Topics · {contentMap.topics.length}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
+            {contentMap.topics.map((t, i) => {
+              const isOpen = expanded.has(t.id);
+              return (
+                <div key={t.id} style={{ borderRadius: 16, border: `1.5px solid ${isOpen ? 'var(--brand-soft)' : 'var(--line)'}`, background: 'var(--card)', overflow: 'hidden', transition: 'border-color 0.2s' }}>
+                  <button
+                    onClick={() => toggle(t.id)}
+                    style={{ width: '100%', padding: '16px 20px', display: 'flex', alignItems: 'flex-start', gap: 14, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                  >
+                    <div style={{ width: 28, height: 28, borderRadius: 8, background: isOpen ? 'var(--brand)' : 'var(--bg-tint)', border: `1px solid ${isOpen ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 12, fontWeight: 800, color: isOpen ? 'white' : 'var(--ink-3)', fontFamily: 'var(--font-mono)', transition: 'all 0.2s' }}>
+                      {i + 1}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--ink)', marginBottom: isOpen ? 0 : 4 }}>{t.title}</div>
+                      {!isOpen && <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.5 }}>{t.summary}</div>}
+                    </div>
+                    <div style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0, marginTop: 4 }}>
+                      <Icon name="chevron-right" size={18} stroke={isOpen ? 'var(--brand)' : 'var(--ink-4)'} />
+                    </div>
+                  </button>
+
+                  {isOpen && (
+                    <div style={{ borderTop: '1px solid var(--brand-soft)', padding: '6px 0 14px' }}>
+                      {/* Topic summary */}
+                      <div style={{ padding: '10px 20px 10px 62px', fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6, fontStyle: 'italic' }}>
+                        {t.summary}
+                      </div>
+                      {/* Subtopics */}
+                      {t.subtopics.map(sub => (
+                        <div key={sub.id} style={{ padding: '10px 20px 10px 62px', display: 'flex', gap: 12, borderTop: '1px dashed var(--line)' }}>
+                          <div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--brand-soft)', border: '1.5px solid var(--brand)', flexShrink: 0, marginTop: 5 }} />
+                          <div>
+                            <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink)', marginBottom: 3 }}>{sub.title}</div>
+                            <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6 }}>{sub.summary}</div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Practice CTA */}
+      <div style={{ flexShrink: 0, padding: isMobile ? '12px 16px' : '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <button className="btn btn-primary" onClick={() => onPractice('activities')} style={{ flex: 1, minWidth: 140, gap: 8 }}>
+          🎮 Practice Activities
+        </button>
+        <button className="btn btn-ghost" onClick={() => onPractice('flashcards')} style={{ gap: 6 }}>
+          🃏 Flashcards
+        </button>
+        <button className="btn btn-ghost" onClick={() => onPractice('quiz')} style={{ gap: 6 }}>
+          🧠 Quiz
+        </button>
+      </div>
     </div>
   );
 }
