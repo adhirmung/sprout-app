@@ -106,6 +106,25 @@ export interface ContentMap {
   topics:    Topic[];
 }
 
+// ── Document reading ──────────────────────────────────────────
+
+export interface TopicKeyTerm {
+  term:       string;
+  definition: string;
+}
+
+export interface TopicReading {
+  topicId:       string;
+  title:         string;
+  paragraphs:    string[];
+  keyTerms:      TopicKeyTerm[];
+  whyItMatters:  string;
+}
+
+export interface DocumentReading {
+  topics: TopicReading[];
+}
+
 // ── Feed generator ────────────────────────────────────────────
 
 export interface FeedAudit {
@@ -584,6 +603,90 @@ Return ONLY valid JSON — no markdown fences:
 
   if (!parsed.synthesis || !Array.isArray(parsed.topics) || parsed.topics.length === 0) {
     throw new Error('Invalid topic map response. Please retry.');
+  }
+
+  return parsed;
+}
+
+// ── Document reading generator ────────────────────────────────
+
+export async function generateReading(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+  contentMap:  ContentMap,
+): Promise<DocumentReading> {
+  const client = getClient();
+  const hasPdf = !!pdfBase64;
+
+  const mapOutline = contentMap.topics.map(t =>
+    `- id: "${t.id}" | "${t.title}": ${t.subtopics.map(s => s.title).join(', ')}`
+  ).join('\n');
+
+  const prompt = `You are an expert educational content writer. Write a detailed study guide for each topic listed below.
+
+Topic: "${topic}"
+${sourceBlock(contentText, hasPdf)}
+
+TOPICS TO COVER (use these exact topicId values):
+${mapOutline}
+
+For EACH topic write:
+1. paragraphs: 2–3 paragraphs (4–6 sentences each). Each paragraph covers a distinct subtopic or aspect. Use specific facts, figures, and named concepts from the source. Grade 9–10 reading level — clear and precise.
+2. keyTerms: 3–5 important terms from this topic with concise, accurate definitions (1–2 sentences each).
+3. whyItMatters: one sentence explaining why this topic is significant in the broader context.
+
+Rules:
+- Ground everything in the source — no invented facts
+- Key terms must appear naturally in the paragraphs
+- Cover every subtopic listed for each topic across the paragraphs
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "topics": [
+    {
+      "topicId": "t1",
+      "title": "...",
+      "paragraphs": ["paragraph 1...", "paragraph 2...", "paragraph 3..."],
+      "keyTerms": [
+        { "term": "...", "definition": "..." },
+        { "term": "...", "definition": "..." },
+        { "term": "...", "definition": "..." }
+      ],
+      "whyItMatters": "..."
+    }
+  ]
+}`;
+
+  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
+  const userContent: MsgContent = pdfBase64
+    ? ([
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'text', text: prompt },
+      ] as MsgContent)
+    : prompt;
+
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 8000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: userContent }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Failed to generate reading material. Please retry.');
+
+  let parsed: DocumentReading;
+  try {
+    parsed = JSON.parse(raw.slice(start, end + 1));
+  } catch {
+    parsed = JSON.parse(repairJson(raw.slice(start)));
+  }
+
+  if (!Array.isArray(parsed.topics) || parsed.topics.length === 0) {
+    throw new Error('Invalid reading response. Please retry.');
   }
 
   return parsed;
