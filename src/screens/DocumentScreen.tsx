@@ -193,6 +193,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       contentMap={contentMap}
       topic={topic}
       hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
+      profile={profile}
       onBack={() => setPhase('idle')}
       onPractice={(mode) => { setPhase('idle'); generate(false, mode); }}
       onRegenerate={async () => {
@@ -625,12 +626,31 @@ function DocIdleView({
   );
 }
 
+// ── Map view helpers ──────────────────────────────────────────
+
+const TOPIC_COLORS = ['#2F9E5E', '#3B82F6', '#8B5CF6', '#F59E0B', '#EF4444', '#06B6D4', '#EC4899', '#10B981'];
+
+function getCognitiveTip(profile: LearnerProfile | null): string | null {
+  if (!profile) return null;
+  const wm = profile.workingMemory.score;
+  const ps = profile.processingSpeed.score;
+  const sa = profile.sustainedAttention.score;
+  const fi = profile.fluidIntelligence.score;
+  if (wm < 45) return 'Study in 10-minute bursts, then take a 3-minute break before continuing.';
+  if (sa < 45) return 'Set a 15-minute focus timer — your attention is sharpest in short sprints.';
+  if (ps < 45) return 'Read each subtopic twice — your brain processes deeply when given time.';
+  if (fi > 70) return 'Link new topics to things you already know — your pattern recognition is strong.';
+  if (wm > 70) return 'You can handle 25–30 minute sessions — your working memory handles complex material well.';
+  return 'Study all topics before jumping to practice — build the full picture first.';
+}
+
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, onBack, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, profile, onBack, onPractice, onRegenerate }: {
   contentMap: ContentMap;
   topic: string;
   hasCache: boolean;
+  profile: LearnerProfile | null;
   onBack: () => void;
   onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate: () => void;
@@ -644,79 +664,172 @@ function MapView({ contentMap, topic, hasCache, onBack, onPractice, onRegenerate
     return next;
   });
 
+  const mapPct = Math.min(45, 30 + Math.max(0, contentMap.topics.length - 4) * 2);
+  const cognitiveTip = getCognitiveTip(profile);
+
+  const StepDot = ({ n, active }: { n: number; active: boolean }) => (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+      <div style={{
+        width: 32, height: 32, borderRadius: '50%',
+        background: active ? 'var(--brand)' : 'var(--bg-tint)',
+        border: `2px solid ${active ? 'var(--brand)' : 'var(--line)'}`,
+        display: 'grid', placeItems: 'center',
+        fontSize: 13, fontWeight: 800,
+        color: active ? 'white' : 'var(--ink-4)',
+        transition: 'all 0.2s',
+      }}>{n}</div>
+      <div style={{ fontSize: 10, fontWeight: 700, color: active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+        {n === 1 ? 'Map' : n === 2 ? 'Read' : 'Practice'}
+      </div>
+    </div>
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
       {/* Header */}
       <div style={{ padding: '0 16px', height: 58, flexShrink: 0, background: 'var(--card)', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button className="btn btn-ghost" onClick={onBack} style={{ padding: 8, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Back to library">
+        <button className="btn btn-ghost" onClick={onBack} style={{ padding: 8, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Back">
           <Icon name="arrow-left" size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Topic Map</div>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Learning Guide</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         {hasCache && (
-          <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 12px', color: 'var(--ink-3)', gap: 6 }}>
-            <Icon name="refresh" size={14} stroke="var(--ink-3)" /> Refresh
+          <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
+            <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
           </button>
         )}
       </div>
 
       {/* Scrollable content */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '28px 24px' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '24px 24px' }}>
         <div style={{ maxWidth: 720, margin: '0 auto' }}>
 
-          {/* Synthesis / Big Picture */}
-          <div style={{ padding: '20px 24px', borderRadius: 18, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 28 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--brand)', textTransform: 'uppercase', marginBottom: 10 }}>
+          {/* Step progress */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0, marginBottom: 24 }}>
+            <StepDot n={1} active={true} />
+            <div style={{ width: isMobile ? 40 : 64, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <StepDot n={2} active={false} />
+            <div style={{ width: isMobile ? 40 : 64, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <StepDot n={3} active={false} />
+          </div>
+
+          {/* Step 1 label */}
+          <div style={{ textAlign: 'center', marginBottom: 20 }}>
+            <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 999, background: 'var(--brand)', color: 'white' }}>
+              <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Step 1 · Topic Map</span>
+            </div>
+            <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ink-3)' }}>Study this first before moving to practice</p>
+          </div>
+
+          {/* Understanding meter */}
+          <div style={{ padding: '14px 18px', borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', marginBottom: 16, boxShadow: '0 1px 6px rgba(0,0,0,0.04)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+              <div style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 600 }}>After understanding this map</div>
+              <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)' }}>{mapPct}%</div>
+            </div>
+            <div style={{ height: 8, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden', marginBottom: 6 }}>
+              <div style={{ width: `${mapPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand) 0%, #7ed5a0 100%)' }} />
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>content understanding · complete all 3 steps for 90%+</div>
+          </div>
+
+          {/* Cognitive tip */}
+          {cognitiveTip && (
+            <div style={{ padding: '12px 16px', borderRadius: 12, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.4)', marginBottom: 20, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+              <span style={{ fontSize: 16, flexShrink: 0 }}>🧠</span>
+              <div>
+                <div style={{ fontSize: 10, fontWeight: 800, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>Your cognitive profile suggests</div>
+                <div style={{ fontSize: 13, color: '#78350F', lineHeight: 1.6 }}>{cognitiveTip}</div>
+              </div>
+            </div>
+          )}
+
+          {/* Big Picture synthesis */}
+          <div style={{ padding: '18px 20px', borderRadius: 16, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 20 }}>
+            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--brand)', textTransform: 'uppercase', marginBottom: 8 }}>
               Big Picture
             </div>
-            <p style={{ margin: 0, fontSize: 15, lineHeight: 1.8, color: 'var(--ink-2)' }}>
+            <p style={{ margin: 0, fontSize: 14, lineHeight: 1.8, color: 'var(--ink-2)' }}>
               {contentMap.synthesis}
             </p>
           </div>
 
-          {/* Topic tree */}
-          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--ink-3)', textTransform: 'uppercase', marginBottom: 14 }}>
+          {/* Mind-map style topic tree */}
+          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--ink-3)', textTransform: 'uppercase', marginBottom: 12 }}>
             Topics · {contentMap.topics.length}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 24 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
             {contentMap.topics.map((t, i) => {
+              const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
               const isOpen = expanded.has(t.id);
               return (
-                <div key={t.id} style={{ borderRadius: 16, border: `1.5px solid ${isOpen ? 'var(--brand-soft)' : 'var(--line)'}`, background: 'var(--card)', overflow: 'hidden', transition: 'border-color 0.2s' }}>
+                <div key={t.id} style={{
+                  borderRadius: 14,
+                  border: `1.5px solid ${isOpen ? color + '44' : 'var(--line)'}`,
+                  background: 'var(--card)',
+                  overflow: 'hidden',
+                  borderLeft: `4px solid ${color}`,
+                  transition: 'border-color 0.2s, box-shadow 0.2s',
+                  boxShadow: isOpen ? `0 2px 12px ${color}18` : 'none',
+                }}>
                   <button
                     onClick={() => toggle(t.id)}
-                    style={{ width: '100%', padding: '16px 20px', display: 'flex', alignItems: 'flex-start', gap: 14, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                    style={{ width: '100%', padding: '14px 16px', display: 'flex', alignItems: 'flex-start', gap: 12, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
                   >
-                    <div style={{ width: 28, height: 28, borderRadius: 8, background: isOpen ? 'var(--brand)' : 'var(--bg-tint)', border: `1px solid ${isOpen ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 12, fontWeight: 800, color: isOpen ? 'white' : 'var(--ink-3)', fontFamily: 'var(--font-mono)', transition: 'all 0.2s' }}>
+                    {/* Numbered circle in topic color */}
+                    <div style={{
+                      width: 26, height: 26, borderRadius: '50%',
+                      background: isOpen ? color : color + '18',
+                      border: `1.5px solid ${color}`,
+                      display: 'grid', placeItems: 'center',
+                      flexShrink: 0, fontSize: 11, fontWeight: 800,
+                      color: isOpen ? 'white' : color,
+                      fontFamily: 'var(--font-mono)',
+                      transition: 'all 0.2s',
+                    }}>
                       {i + 1}
                     </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--ink)', marginBottom: isOpen ? 0 : 4 }}>{t.title}</div>
-                      {!isOpen && <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.5 }}>{t.summary}</div>}
+                      <div style={{ fontWeight: 700, fontSize: 14, color: 'var(--ink)', marginBottom: isOpen ? 0 : 3 }}>{t.title}</div>
+                      {!isOpen && <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.5 }}>{t.summary}</div>}
                     </div>
-                    <div style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0, marginTop: 4 }}>
-                      <Icon name="chevron-right" size={18} stroke={isOpen ? 'var(--brand)' : 'var(--ink-4)'} />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+                      {!isOpen && (
+                        <span style={{ fontSize: 10, fontWeight: 700, color: color, background: color + '18', padding: '2px 7px', borderRadius: 6 }}>
+                          {t.subtopics.length} subtopics
+                        </span>
+                      )}
+                      <div style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
+                        <Icon name="chevron-right" size={16} stroke={isOpen ? color : 'var(--ink-4)'} />
+                      </div>
                     </div>
                   </button>
 
                   {isOpen && (
-                    <div style={{ borderTop: '1px solid var(--brand-soft)', padding: '6px 0 14px' }}>
+                    <div style={{ borderTop: `1px solid ${color}22`, paddingBottom: 10 }}>
                       {/* Topic summary */}
-                      <div style={{ padding: '10px 20px 10px 62px', fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6, fontStyle: 'italic' }}>
+                      <div style={{ padding: '10px 16px 10px 54px', fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.65, fontStyle: 'italic' }}>
                         {t.summary}
                       </div>
-                      {/* Subtopics */}
-                      {t.subtopics.map(sub => (
-                        <div key={sub.id} style={{ padding: '10px 20px 10px 62px', display: 'flex', gap: 12, borderTop: '1px dashed var(--line)' }}>
-                          <div style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--brand-soft)', border: '1.5px solid var(--brand)', flexShrink: 0, marginTop: 5 }} />
-                          <div>
-                            <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink)', marginBottom: 3 }}>{sub.title}</div>
-                            <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6 }}>{sub.summary}</div>
+                      {/* Subtopics with colored connector line */}
+                      <div style={{ position: 'relative', paddingLeft: 54 }}>
+                        {/* Vertical connector line */}
+                        <div style={{ position: 'absolute', left: 28, top: 0, bottom: 12, width: 2, background: `linear-gradient(to bottom, ${color}55, ${color}11)`, borderRadius: 2 }} />
+                        {t.subtopics.map((sub) => (
+                          <div key={sub.id} style={{ display: 'flex', gap: 12, padding: '8px 16px 8px 0', position: 'relative' }}>
+                            {/* Horizontal connector */}
+                            <div style={{ position: 'absolute', left: -26, top: 17, width: 18, height: 2, background: color + '55' }} />
+                            {/* Dot */}
+                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0, marginTop: 5, border: `2px solid white`, boxShadow: `0 0 0 1.5px ${color}` }} />
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 600, fontSize: 13, color: 'var(--ink)', marginBottom: 2 }}>{sub.title}</div>
+                              <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.6 }}>{sub.summary}</div>
+                            </div>
                           </div>
-                        </div>
-                      ))}
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>
@@ -726,15 +839,16 @@ function MapView({ contentMap, topic, hasCache, onBack, onPractice, onRegenerate
         </div>
       </div>
 
-      {/* Practice CTA */}
-      <div style={{ flexShrink: 0, padding: isMobile ? '12px 16px' : '16px 24px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-        <button className="btn btn-primary" onClick={() => onPractice('activities')} style={{ flex: 1, minWidth: 140, gap: 8 }}>
-          🎮 Practice Activities
+      {/* Compact practice CTA */}
+      <div style={{ flexShrink: 0, padding: '10px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={{ fontSize: 12, color: 'var(--ink-3)', fontWeight: 600, marginRight: 4, whiteSpace: 'nowrap' }}>Ready to practice?</span>
+        <button onClick={() => onPractice('activities')} style={{ padding: '8px 14px', borderRadius: 10, background: 'var(--brand)', color: 'white', border: 'none', cursor: 'pointer', fontSize: 12, fontWeight: 700, whiteSpace: 'nowrap' }}>
+          🎮 Activities
         </button>
-        <button className="btn btn-ghost" onClick={() => onPractice('flashcards')} style={{ gap: 6 }}>
+        <button onClick={() => onPractice('flashcards')} style={{ padding: '8px 12px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
           🃏 Flashcards
         </button>
-        <button className="btn btn-ghost" onClick={() => onPractice('quiz')} style={{ gap: 6 }}>
+        <button onClick={() => onPractice('quiz')} style={{ padding: '8px 12px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
           🧠 Quiz
         </button>
       </div>
