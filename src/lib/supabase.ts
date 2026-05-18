@@ -145,6 +145,50 @@ export async function fetchPdfBase64FromStorage(storagePath: string): Promise<st
   }
 }
 
+// ── Generic content cache (map / reading / visuals) ───────────
+
+/**
+ * Load a cached content blob (map, reading, or visuals) for a given file.
+ * Returns null when no entry exists.
+ */
+export async function dbLoadContent<T>(
+  userId: string,
+  fileKey: string,
+  contentType: 'map' | 'reading' | 'visuals',
+): Promise<T | null> {
+  const { data } = await supabase
+    .from('generated_content')
+    .select('data_json')
+    .eq('user_id', userId)
+    .eq('file_key', fileKey)
+    .eq('content_type', contentType)
+    .single();
+  return data ? (data.data_json as T) : null;
+}
+
+/**
+ * Persist a content blob (map, reading, or visuals) for a given file.
+ * Upserts so re-generation overwrites the old cache.
+ */
+export async function dbSaveContent<T>(
+  userId: string,
+  fileKey: string,
+  contentType: 'map' | 'reading' | 'visuals',
+  data: T,
+): Promise<void> {
+  const { error } = await supabase.from('generated_content').upsert(
+    {
+      user_id:      userId,
+      file_key:     fileKey,
+      content_type: contentType,
+      data_json:    data,
+      generated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id,file_key,content_type' },
+  );
+  if (error) throw error;
+}
+
 // ── Library ───────────────────────────────────────────────────
 
 export async function dbLoadLibrary(userId: string): Promise<LibraryTree> {

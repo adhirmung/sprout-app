@@ -16,7 +16,7 @@ import {
   streamCardChat,
 } from '../lib/claude';
 import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
-import { dbLoadGeneratedCards, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
+import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
 
@@ -74,14 +74,27 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   useEffect(() => { if (error) retryRef.current?.focus(); }, [error]);
 
-  // Preload cached content map and reading on mount
+  // Preload cached content map and reading on mount (localStorage first, then Supabase)
   useEffect(() => {
     const cachedMap = Store.get<ContentMap | null>(`map:${sourceKey}`, null);
-    if (cachedMap?.synthesis && Array.isArray(cachedMap.topics)) setContentMap(cachedMap);
+    if (cachedMap?.synthesis && Array.isArray(cachedMap.topics)) {
+      setContentMap(cachedMap);
+    } else if (userId) {
+      dbLoadContent<ContentMap>(userId, sourceKey, 'map')
+        .then(data => { if (data?.synthesis && Array.isArray(data.topics)) { Store.set(`map:${sourceKey}`, data); setContentMap(data); } })
+        .catch(() => {});
+    }
+
     const cachedReading = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
-    if (cachedReading && Array.isArray(cachedReading.topics)) setDocumentReading(cachedReading);
+    if (cachedReading?.topics?.length && cachedReading.topics[0]?.subtopics?.length) {
+      setDocumentReading(cachedReading);
+    } else if (userId) {
+      dbLoadContent<DocumentReading>(userId, sourceKey, 'reading')
+        .then(data => { if (data?.topics?.length && data.topics[0]?.subtopics?.length) { Store.set(`reading:${sourceKey}`, data); setDocumentReading(data); } })
+        .catch(() => {});
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sourceKey]);
+  }, [userId, sourceKey]);
 
   // Preload cached audit on mount so the quality badge shows while idle
   useEffect(() => {
@@ -106,9 +119,17 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       try {
         const cacheKey = `visuals:${sourceKey}`;
         if (!force) {
+          // Check localStorage first (fast), then Supabase (authenticated users)
           const cached = Store.get<VisualSet | null>(cacheKey, null);
           if (cached && Array.isArray(cached.components) && cached.components.length > 0) {
             setVisualSet(cached); setFromCache(true); setPhase('visuals'); return;
+          }
+          if (userId) {
+            const dbCached = await dbLoadContent<VisualSet>(userId, sourceKey, 'visuals').catch(() => null);
+            if (dbCached && Array.isArray(dbCached.components) && dbCached.components.length > 0) {
+              Store.set(cacheKey, dbCached);
+              setVisualSet(dbCached); setFromCache(true); setPhase('visuals'); return;
+            }
           }
         }
         let resolvedPdf = pdfBase64;
@@ -116,6 +137,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         if (fileType === 'PDF' && !resolvedPdf) throw new Error('Could not load PDF binary. Try re-uploading the file.');
         const vs = await generateVisualComponents(topic, content, resolvedPdf);
         Store.set(cacheKey, vs);
+        if (userId) dbSaveContent(userId, sourceKey, 'visuals', vs).catch(console.error);
         setVisualSet(vs); setPhase('visuals');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
@@ -176,12 +198,22 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   const startLearning = async () => {
     const mapKey = `map:${sourceKey}`;
-    // Serve from cache if available
+    // Serve from localStorage cache if available
     const cached = Store.get<ContentMap | null>(mapKey, null);
     if (cached?.synthesis && Array.isArray(cached.topics)) {
       setContentMap(cached);
       setPhase('map');
       return;
+    }
+    // Serve from Supabase cache for authenticated users
+    if (userId) {
+      const dbCached = await dbLoadContent<ContentMap>(userId, sourceKey, 'map').catch(() => null);
+      if (dbCached?.synthesis && Array.isArray(dbCached.topics)) {
+        Store.set(mapKey, dbCached);
+        setContentMap(dbCached);
+        setPhase('map');
+        return;
+      }
     }
     setPhase('mapping');
     setError('');
@@ -195,6 +227,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       }
       const map = await generateContentMap(topic, content, resolvedPdf);
       Store.set(mapKey, map);
+      if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
       setContentMap(map);
       setPhase('map');
     } catch (e) {
@@ -204,12 +237,22 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   };
 
   const startReading = async (map: ContentMap) => {
-    const cached = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
     // Only use cache if it has the new subtopic format (not old paragraphs format)
+    const cached = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
     if (cached?.topics?.length && cached.topics[0]?.subtopics?.length) {
       setDocumentReading(cached);
       setPhase('read');
       return;
+    }
+    // Check Supabase cache for authenticated users
+    if (userId) {
+      const dbCached = await dbLoadContent<DocumentReading>(userId, sourceKey, 'reading').catch(() => null);
+      if (dbCached?.topics?.length && dbCached.topics[0]?.subtopics?.length) {
+        Store.set(`reading:${sourceKey}`, dbCached);
+        setDocumentReading(dbCached);
+        setPhase('read');
+        return;
+      }
     }
     setPhase('read-loading');
     setError('');
@@ -221,6 +264,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       const sentenceTarget = wmScore < 40 ? 2 : wmScore < 55 ? 3 : wmScore < 72 ? 4 : 5;
       const reading = await generateReading(topic, content, resolvedPdf, map, sentenceTarget);
       Store.set(`reading:${sourceKey}`, reading);
+      if (userId) dbSaveContent(userId, sourceKey, 'reading', reading).catch(console.error);
       setDocumentReading(reading);
       setPhase('read');
     } catch (e) {
