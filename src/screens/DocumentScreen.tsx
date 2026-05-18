@@ -1245,12 +1245,12 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
     const subTerms = ct.keyTerms.slice(si * termsPerSub, (si + 1) * termsPerSub);
 
     return (
-      /* Outer: centers the card horizontally, constrains max width */
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, alignItems: 'center' }}>
-        <div style={{ width: '100%', maxWidth: 600, display: 'flex', flexDirection: 'column', gap: 12, minHeight: 0, flex: 1 }}>
+      /* Outer: scrollable column, card + chat flow naturally below each other */
+      <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
+        <div style={{ maxWidth: 580, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 12, paddingBottom: 20 }}>
 
           {/* Progress strip */}
-          <div style={{ flexShrink: 0 }}>
+          <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
               <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)' }}>{safeCardIdx + 1} / {allCards.length}</span>
               <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)' }}>{progressPct}% complete</span>
@@ -1260,54 +1260,29 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
             </div>
           </div>
 
-          {/* Card — constrained, scrolls internally */}
-          <div style={{ flex: 1, minHeight: 0, maxHeight: isMobile ? 'none' : 560, display: 'flex', flexDirection: 'column', borderRadius: isMobile ? 16 : 20, border: `2px solid ${color}44`, background: 'var(--card)', overflow: 'hidden', boxShadow: '0 4px 24px rgba(0,0,0,0.07)' }}>
+          {/* Card — natural height, no internal scroll */}
+          <div style={{ borderRadius: isMobile ? 16 : 20, border: `2px solid ${color}44`, background: 'var(--card)', overflow: 'hidden', boxShadow: '0 4px 24px rgba(0,0,0,0.07)' }}>
 
             {/* Card header */}
-            <div style={{ padding: isMobile ? '14px 16px 10px' : '16px 22px 12px', borderBottom: `1px solid ${color}22`, flexShrink: 0 }}>
+            <div style={{ padding: isMobile ? '14px 16px 10px' : '16px 22px 12px', borderBottom: `1px solid ${color}22` }}>
               <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color, marginBottom: 4 }}>{ct.title}</div>
               <h2 style={{ fontSize: isMobile ? 17 : 20, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.3, margin: 0 }}>{sub.title}</h2>
             </div>
 
-            {/* Card body — scrolls internally */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '14px 16px' : '16px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Card body — flows freely, no scroll trap */}
+            <div style={{ padding: isMobile ? '14px 16px' : '16px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
               <p style={{ margin: 0, fontSize: isMobile ? 14 : 15, lineHeight: 1.8, color: 'var(--ink-2)' }}>{sub.content}</p>
-
               {subTerms.length > 0 && <FocusTerms terms={subTerms} color={color} />}
-
-              {/* Ask chat panel */}
-              {focusChatOpen && (
-                <div style={{ borderRadius: 14, border: `1.5px solid ${color}44`, overflow: 'hidden' }}>
-                  <div style={{ padding: '8px 14px', background: color + '0d', display: 'flex', alignItems: 'center', gap: 7, borderBottom: `1px solid ${color}22` }}>
-                    <span style={{ fontSize: 14 }}>✨</span>
-                    <span style={{ fontSize: 12, fontWeight: 800, color }}>Ask about this</span>
-                  </div>
-                  <div style={{ maxHeight: 200, overflowY: 'auto', padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {focusChatMessages.length === 0 && (
-                      <div style={{ fontSize: 12, color: 'var(--ink-4)', textAlign: 'center', padding: '10px 0' }}>Ask anything about this subtopic</div>
-                    )}
-                    {focusChatMessages.map((m, mi) => (
-                      <div key={mi} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
-                        <div style={{ maxWidth: '85%', padding: '8px 12px', borderRadius: m.role === 'user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px', background: m.role === 'user' ? color : 'var(--bg-tint)', color: m.role === 'user' ? 'white' : 'var(--ink-2)', fontSize: 13, lineHeight: 1.5 }}>
-                          {m.content || <span style={{ opacity: 0.5 }}>…</span>}
-                        </div>
-                      </div>
-                    ))}
-                    <div ref={focusChatBottomRef} />
-                  </div>
-                  <FocusChatInput color={color} streaming={focusChatStreaming} onSend={handleFocusChat} />
-                </div>
-              )}
             </div>
 
             {/* Card footer */}
-            <div style={{ flexShrink: 0, borderTop: `1px solid ${color}22` }}>
-              {/* Ask about this — prominent button */}
+            <div style={{ borderTop: `1px solid ${color}22` }}>
+              {/* Ask about this card — prominent toggle */}
               <div style={{ padding: '10px 16px', borderBottom: `1px solid ${color}11` }}>
                 <button
                   onClick={() => setFocusChatOpen(o => !o)}
                   style={{
-                    width: '100%', padding: '9px 14px', borderRadius: 10, cursor: 'pointer',
+                    width: '100%', padding: '10px 14px', borderRadius: 10, cursor: 'pointer',
                     background: focusChatOpen ? color : color + '12',
                     border: `1.5px solid ${color}55`,
                     display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
@@ -1321,7 +1296,7 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
                 </button>
               </div>
 
-              {/* Status buttons — natural width, centred */}
+              {/* Status buttons */}
               <div style={{ padding: '10px 16px', display: 'flex', gap: 8, justifyContent: 'center' }}>
                 <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'read' ? 'unread' : 'read' }))}
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`, background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)', color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
@@ -1341,8 +1316,34 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
             </div>
           </div>
 
+          {/* Chat panel — sits BELOW the card, not trapped inside */}
+          {focusChatOpen && (
+            <div style={{ borderRadius: 16, border: `1.5px solid ${color}44`, background: 'var(--card)', overflow: 'hidden', boxShadow: '0 2px 16px rgba(0,0,0,0.07)' }}>
+              {/* Chat header */}
+              <div style={{ padding: '11px 16px', background: color + '0d', display: 'flex', alignItems: 'center', gap: 8, borderBottom: `1px solid ${color}22` }}>
+                <span style={{ fontSize: 15 }}>✨</span>
+                <span style={{ fontSize: 13, fontWeight: 800, color }}>Ask about this card</span>
+              </div>
+              {/* Messages */}
+              <div style={{ maxHeight: 260, overflowY: 'auto', padding: '12px 16px', display: 'flex', flexDirection: 'column', gap: 9 }}>
+                {focusChatMessages.length === 0 && (
+                  <div style={{ fontSize: 13, color: 'var(--ink-4)', textAlign: 'center', padding: '18px 0' }}>Ask anything about this subtopic</div>
+                )}
+                {focusChatMessages.map((m, mi) => (
+                  <div key={mi} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                    <div style={{ maxWidth: '85%', padding: '8px 13px', borderRadius: m.role === 'user' ? '14px 14px 3px 14px' : '14px 14px 14px 3px', background: m.role === 'user' ? color : 'var(--bg-tint)', color: m.role === 'user' ? 'white' : 'var(--ink-2)', fontSize: 13, lineHeight: 1.55 }}>
+                      {m.content || <span style={{ opacity: 0.5 }}>…</span>}
+                    </div>
+                  </div>
+                ))}
+                <div ref={focusChatBottomRef} />
+              </div>
+              <FocusChatInput color={color} streaming={focusChatStreaming} onSend={handleFocusChat} />
+            </div>
+          )}
+
           {/* Prev / Next */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexShrink: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}>
             <button onClick={() => setCardIdx(i => Math.max(0, i - 1))} disabled={safeCardIdx === 0}
               style={{ padding: '8px 20px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === 0 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: 'var(--ink-2)', opacity: safeCardIdx === 0 ? 0.35 : 1, transition: 'opacity 0.2s' }}>
               ← Prev
@@ -1645,18 +1646,16 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
         )}
       </div>
 
-      {/* Body — Focus mode fills full width; List mode has sidebar */}
-      {viewMode === 'cards' ? (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, padding: isMobile ? '14px 14px 10px' : '20px 28px 14px' }}>
-          {subActionBar}
-          {cardView}
-        </div>
-      ) : (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
-          {mainContent}
-          {showSidebar && sidebar}
-        </div>
-      )}
+      {/* Body — always row layout; sidebar visible in both List and Focus modes */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
+        {viewMode === 'cards' ? (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, padding: isMobile ? '14px 14px 10px' : '20px 28px 14px' }}>
+            {subActionBar}
+            {cardView}
+          </div>
+        ) : mainContent}
+        {showSidebar && sidebar}
+      </div>
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
