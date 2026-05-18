@@ -113,10 +113,17 @@ export interface TopicKeyTerm {
   definition: string;
 }
 
+export interface SubtopicQuiz {
+  question:    string;
+  options:     string[];   // exactly 3 options
+  answer:      number;     // 0-based index of correct option
+  explanation: string;     // 1-2 sentences shown after answering
+}
+
 export interface TopicReading {
   topicId:      string;
   title:        string;
-  subtopics:    { title: string; content: string }[];
+  subtopics:    { title: string; content: string; quiz: SubtopicQuiz }[];
   keyTerms:     TopicKeyTerm[];
   whyItMatters: string;
 }
@@ -641,7 +648,7 @@ TOPICS AND SUBTOPICS TO COVER (use these exact topicId values):
 ${mapOutline}
 
 For EACH topic write:
-1. subtopics: for each subtopic listed above, write EXACTLY ${sentenceInstruction}. Use specific facts, figures, and named concepts from the source. Grade 9–10 reading level.
+1. subtopics: for each subtopic listed above, write EXACTLY ${sentenceInstruction}. Use specific facts, figures, and named concepts from the source. Grade 9–10 reading level. Also generate one short quiz question testing the key idea of that subtopic — 3 answer options, exactly one correct, plus a 1-sentence explanation of the correct answer.
 2. keyTerms: 3–5 important terms from this topic with concise, accurate definitions (1–2 sentences each).
 3. whyItMatters: one sentence explaining why this topic matters in the broader context.
 
@@ -649,6 +656,8 @@ Rules:
 - Ground everything in the source — no invented facts
 - Key terms must appear naturally in the subtopic content
 - The subtopic titles in your output must match the titles listed above exactly
+- Quiz distractors must be plausible — not obviously wrong
+- Quiz correctIndex is 0-based
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -657,8 +666,16 @@ Return ONLY valid JSON — no markdown fences:
       "topicId": "t1",
       "title": "...",
       "subtopics": [
-        { "title": "Subtopic name from outline", "content": "..." },
-        { "title": "Another subtopic name", "content": "..." }
+        {
+          "title": "Subtopic name from outline",
+          "content": "...",
+          "quiz": {
+            "question": "...",
+            "options": ["Option A", "Option B", "Option C"],
+            "answer": 0,
+            "explanation": "One sentence explaining why the correct answer is right."
+          }
+        }
       ],
       "keyTerms": [
         { "term": "...", "definition": "..." },
@@ -680,7 +697,7 @@ Return ONLY valid JSON — no markdown fences:
 
   const msg = await client.messages.create({
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 8000,
+    max_tokens: 12000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   });
