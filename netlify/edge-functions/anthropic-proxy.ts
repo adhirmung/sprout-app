@@ -35,15 +35,18 @@ export default async (request: Request): Promise<Response> => {
   }
 
   try {
+    const forwardHeaders: Record<string, string> = {
+      'x-api-key':         apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type':      'application/json',
+    };
+    // Only forward anthropic-beta if the client actually sent it
+    const betaHeader = request.headers.get('anthropic-beta');
+    if (betaHeader) forwardHeaders['anthropic-beta'] = betaHeader;
+
     const upstream = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
-      headers: {
-        'x-api-key':         apiKey,
-        'anthropic-version': '2023-06-01',
-        // Forward optional beta features (extended thinking, etc.)
-        'anthropic-beta':    request.headers.get('anthropic-beta') ?? '',
-        'content-type':      'application/json',
-      },
+      headers: forwardHeaders,
       // Pipe the request body straight through — no buffering
       body: request.body,
     });
