@@ -14,7 +14,7 @@ import {
 } from '../lib/claude';
 import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit } from '../lib/claude';
 import { dbLoadGeneratedCards, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
-import { Store } from '../lib/store';
+import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -951,12 +951,13 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
   onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate: () => void;
 }) {
-  const [expandedSubs,  setExpandedSubs]  = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
-  const [expandedTerms, setExpandedTerms] = useState<Set<string>>(new Set());
-  const [seenTopics,    setSeenTopics]    = useState<Set<string>>(new Set());
-  const [activeId,      setActiveId]      = useState(documentReading.topics[0]?.topicId ?? '');
-  const [elapsedSec,    setElapsedSec]    = useState(0);
-  const [breakDismissed, setBreakDismissed] = useState(false);
+  type SubStatus = 'unread' | 'read' | 'learnt';
+
+  const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
+  const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
+  const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
+  const [elapsedSec,        setElapsedSec]        = useState(0);
+  const [breakDismissed,    setBreakDismissed]    = useState(false);
 
   const isMobile    = useIsMobile();
   const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 820);
@@ -969,60 +970,49 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
     return () => window.removeEventListener('resize', fn);
   }, []);
 
-  const wpm            = getReadingWpm(profile);
-  const breakMinutes   = getBreakIntervalMinutes(profile);
-  const cognitiveTip   = getCognitiveTip(profile);
+  const wpm          = getReadingWpm(profile);
+  const breakMinutes = getBreakIntervalMinutes(profile);
+  const cognitiveTip = getCognitiveTip(profile);
 
-  // Count total words across all subtopic content
+  // Total words for reading time estimate
   const totalWords = documentReading.topics.reduce((sum, t) =>
     sum + (t.subtopics ?? []).reduce((s, sub) => s + sub.content.split(/\s+/).length, 0), 0);
   const totalReadMinutes = Math.max(1, Math.ceil(totalWords / wpm));
 
-  // Progress based on seen topics
-  const progressPct = documentReading.topics.length === 0 ? 0
-    : Math.round((seenTopics.size / documentReading.topics.length) * 100);
-  const wordsRead   = Math.round((progressPct / 100) * totalWords);
-  const remainingMinutes = Math.max(0, Math.ceil((totalWords - wordsRead) / wpm));
-  const motivational = getMotivationalMessage(progressPct);
+  // Progress driven by user-marked subtopics
+  const allSubKeys  = documentReading.topics.flatMap(t =>
+    (t.subtopics ?? []).map((_, si) => `${t.topicId}-${si}`));
+  const totalSubs   = allSubKeys.length;
+  const doneCount   = allSubKeys.filter(k => subStatuses[k] && subStatuses[k] !== 'unread').length;
+  const progressPct = totalSubs === 0 ? 0 : Math.round((doneCount / totalSubs) * 100);
 
-  // Elapsed time ticker (every 30s)
+  // Celebrate milestone nodes as they're reached
+  useEffect(() => {
+    [25, 50, 75, 100].forEach(m => {
+      if (progressPct >= m && !reachedMilestones.has(m)) {
+        setReachedMilestones(prev => new Set([...prev, m]));
+        celebrate();
+      }
+    });
+  }, [progressPct]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Elapsed time ticker (every 30 s)
   useEffect(() => {
     const id = setInterval(() => setElapsedSec(Math.floor((Date.now() - startRef.current) / 1000)), 30_000);
     return () => clearInterval(id);
   }, []);
 
-  const elapsedMinutes  = Math.floor(elapsedSec / 60);
-  const showBreak       = elapsedMinutes >= breakMinutes && !breakDismissed;
+  const elapsedMinutes = Math.floor(elapsedSec / 60);
+  const showBreak      = elapsedMinutes >= breakMinutes && !breakDismissed;
 
-  // IntersectionObserver: track active + seen topics
-  useEffect(() => {
-    const obs = new IntersectionObserver(
-      entries => entries.forEach(e => {
-        const id = e.target.id.replace('rt-', '');
-        if (e.isIntersecting) {
-          setActiveId(id);
-          setSeenTopics(prev => new Set([...prev, id]));
-        }
-      }),
-      { threshold: 0.25, root: scrollRef.current },
-    );
-    documentReading.topics.forEach(t => {
-      const el = document.getElementById(`rt-${t.topicId}`);
-      if (el) obs.observe(el);
-    });
-    return () => obs.disconnect();
-  }, [documentReading]);
+  const markStatus = (key: string, status: SubStatus) =>
+    setSubStatuses(prev => ({ ...prev, [key]: prev[key] === status ? 'unread' : status }));
 
-  const scrollTo = (topicId: string) => {
+  const scrollTo = (topicId: string) =>
     document.getElementById(`rt-${topicId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    setActiveId(topicId);
-  };
 
-  const toggleSub   = (key: string) => setExpandedSubs(prev => {
+  const toggleSub = (key: string) => setExpandedSubs(prev => {
     const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
-  });
-  const toggleTerms = (id: string) => setExpandedTerms(prev => {
-    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
 
   const StepDot = ({ n, active, done }: { n: number; active: boolean; done: boolean }) => (
@@ -1050,60 +1040,65 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
       overflowY: 'auto', padding: '20px 14px',
       height: '100%',
     }}>
-      {/* Progress */}
-      <div style={{ marginBottom: 20 }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-          <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-3)' }}>Progress</span>
-          <span style={{ fontSize: 20, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)' }}>{progressPct}%</span>
-        </div>
-        <div style={{ height: 6, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
-          <div style={{ width: `${progressPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand), #7ed5a0)', transition: 'width 0.6s ease' }} />
-        </div>
+      {/* Total reading time */}
+      <div style={{ marginBottom: 20, padding: '12px 14px', borderRadius: 12, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
+        <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-2)', marginBottom: 5 }}>Total Reading Time</div>
+        <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>~{totalReadMinutes} min</div>
+        {cognitiveTip && <div style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 6, lineHeight: 1.4, fontStyle: 'italic' }}>{cognitiveTip}</div>}
       </div>
 
-      {/* Time */}
-      <div style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--bg-tint)', marginBottom: 16 }}>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 5 }}>Reading time</div>
-        <div style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 600 }}>
-          {remainingMinutes > 0 ? `~${remainingMinutes} min left` : 'Done!'}
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 3 }}>
-          ~{totalReadMinutes} min total
-        </div>
-      </div>
-
-      {/* Topic checklist */}
-      <div style={{ marginBottom: 16 }}>
-        <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-3)', marginBottom: 8 }}>Topics</div>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {documentReading.topics.map((t, i) => {
-            const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
-            const isSeen  = seenTopics.has(t.topicId);
-            const isActive = activeId === t.topicId;
-            return (
-              <button key={t.topicId} onClick={() => scrollTo(t.topicId)} style={{
-                display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 8,
-                background: isActive ? color + '15' : 'none',
-                border: isActive ? `1px solid ${color}44` : '1px solid transparent',
-                cursor: 'pointer', textAlign: 'left',
-              }}>
-                <div style={{ width: 18, height: 18, borderRadius: '50%', background: isSeen ? color : 'var(--bg-tint)', border: `1.5px solid ${isSeen ? color : 'var(--line)'}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 9, color: isSeen ? 'white' : 'var(--ink-4)', fontWeight: 800 }}>
-                  {isSeen ? '✓' : i + 1}
-                </div>
-                <span style={{ fontSize: 12, fontWeight: isActive ? 700 : 500, color: isActive ? color : isSeen ? 'var(--ink-2)' : 'var(--ink-3)', lineHeight: 1.3 }}>
-                  {t.title.split(' ').slice(0, 4).join(' ')}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* Motivational message */}
-      <div style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 16 }}>
-        <div style={{ fontSize: 18, marginBottom: 4 }}>{motivational.emoji}</div>
-        <div style={{ fontSize: 12, color: 'var(--brand-2)', lineHeight: 1.5, fontWeight: 600 }}>{motivational.text}</div>
-      </div>
+      {/* Milestone spine */}
+      {(() => {
+        const MILESTONES = [
+          { pct: 25,  emoji: '⚡', msg: 'Great start — keep it up!' },
+          { pct: 50,  emoji: '🔥', msg: "Halfway! You're on fire!" },
+          { pct: 75,  emoji: '🏁', msg: 'Final stretch — almost there!' },
+          { pct: 100, emoji: '🎉', msg: 'Complete! You nailed it!' },
+        ];
+        return (
+          <div style={{ position: 'relative', marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-2)', marginBottom: 12 }}>Your Progress</div>
+            {/* Spine line */}
+            <div style={{ position: 'absolute', left: 9, top: 36, bottom: 0, width: 2, background: 'var(--line)', borderRadius: 2 }} />
+            {/* Filled spine overlay */}
+            <div style={{
+              position: 'absolute', left: 9, top: 36, width: 2, borderRadius: 2,
+              background: 'linear-gradient(180deg, var(--brand), #7ed5a0)',
+              height: `${Math.min(progressPct, 99)}%`,
+              transition: 'height 0.6s ease',
+            }} />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+              {MILESTONES.map((m) => {
+                const reached = progressPct >= m.pct;
+                return (
+                  <div key={m.pct} style={{ display: 'flex', alignItems: 'flex-start', gap: 12, paddingBottom: 28 }}>
+                    {/* Node */}
+                    <div style={{
+                      width: 20, height: 20, borderRadius: '50%', flexShrink: 0,
+                      background: reached ? 'var(--brand)' : 'var(--card)',
+                      border: `2.5px solid ${reached ? 'var(--brand)' : 'var(--line)'}`,
+                      display: 'grid', placeItems: 'center',
+                      fontSize: 9, color: 'white', fontWeight: 800,
+                      boxShadow: reached ? '0 0 0 3px var(--brand-tint)' : 'none',
+                      transition: 'all 0.4s ease',
+                      zIndex: 1, position: 'relative',
+                    }}>
+                      {reached && '✓'}
+                    </div>
+                    {/* Label */}
+                    <div style={{ paddingTop: 1 }}>
+                      <div style={{ fontSize: 11, fontWeight: 800, color: reached ? 'var(--brand)' : 'var(--ink-4)', marginBottom: 2 }}>{m.pct}%</div>
+                      <div style={{ fontSize: 12, color: reached ? 'var(--ink-2)' : 'var(--ink-4)', lineHeight: 1.4 }}>
+                        {reached ? `${m.emoji} ${m.msg}` : m.msg}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Break reminder */}
       {showBreak ? (
@@ -1113,13 +1108,12 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
             <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 10, color: 'var(--ink-4)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕</button>
           </div>
           <div style={{ fontSize: 11, fontWeight: 800, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 3 }}>Take a break</div>
-          <div style={{ fontSize: 12, color: '#78350F', lineHeight: 1.5 }}>You've been reading for {elapsedMinutes} min. A short break will help retention.</div>
+          <div style={{ fontSize: 12, color: '#78350F', lineHeight: 1.5 }}>You've been reading {elapsedMinutes} min. A short break boosts retention.</div>
         </div>
       ) : (
         <div style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 3 }}>⏱ Next break</div>
-          <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>After {breakMinutes} min of reading</div>
-          {cognitiveTip && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 5, lineHeight: 1.4, fontStyle: 'italic' }}>{cognitiveTip}</div>}
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 3 }}>⏱ Next break</div>
+          <div style={{ fontSize: 12, color: 'var(--ink-2)' }}>After {breakMinutes} min of reading</div>
         </div>
       )}
     </div>
@@ -1129,28 +1123,6 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
   const mainContent = (
     <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
       <div style={{ maxWidth: 680, margin: '0 auto', padding: isMobile ? '20px 16px 32px' : '24px 28px 40px' }}>
-
-        {/* Step progress */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0, marginBottom: 18 }}>
-          <StepDot n={1} active={false} done={true} />
-          <div style={{ width: isMobile ? 36 : 56, height: 2, background: 'var(--brand)', margin: '0 4px', marginBottom: 18 }} />
-          <StepDot n={2} active={true} done={false} />
-          <div style={{ width: isMobile ? 36 : 56, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 18 }} />
-          <StepDot n={3} active={false} done={false} />
-        </div>
-
-        {/* Mobile progress bar */}
-        {isMobile && (
-          <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 12, background: 'var(--card)', border: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ height: 6, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
-                <div style={{ width: `${progressPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand), #7ed5a0)', transition: 'width 0.6s' }} />
-              </div>
-            </div>
-            <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{progressPct}%</span>
-            <span style={{ fontSize: 12, color: 'var(--ink-3)', whiteSpace: 'nowrap' }}>~{remainingMinutes}m left</span>
-          </div>
-        )}
 
         {/* Mobile break reminder */}
         {isMobile && showBreak && (
@@ -1164,18 +1136,20 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
         {/* Topic pills nav */}
         <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
           {documentReading.topics.map((t, i) => {
-            const color    = TOPIC_COLORS[i % TOPIC_COLORS.length];
-            const isActive = activeId === t.topicId;
-            const isSeen   = seenTopics.has(t.topicId);
+            const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
+            const topicSubKeys = (t.subtopics ?? []).map((_, si) => `${t.topicId}-${si}`);
+            const topicDone  = topicSubKeys.filter(k => subStatuses[k] && subStatuses[k] !== 'unread').length;
+            const topicTotal = topicSubKeys.length;
+            const topicComplete = topicTotal > 0 && topicDone === topicTotal;
             return (
               <button key={t.topicId} onClick={() => scrollTo(t.topicId)} style={{
                 whiteSpace: 'nowrap', padding: '5px 11px', borderRadius: 999,
-                background: isActive ? color : isSeen ? color + '18' : 'var(--bg-tint)',
-                color: isActive ? 'white' : isSeen ? color : 'var(--ink-3)',
-                border: `1.5px solid ${isActive ? color : isSeen ? color + '55' : 'var(--line)'}`,
+                background: topicComplete ? color : 'var(--bg-tint)',
+                color: topicComplete ? 'white' : 'var(--ink-3)',
+                border: `1.5px solid ${topicComplete ? color : topicDone > 0 ? color + '55' : 'var(--line)'}`,
                 cursor: 'pointer', fontSize: 12, fontWeight: 700, transition: 'all 0.2s',
               }}>
-                {isSeen && !isActive ? '✓ ' : ''}{i + 1} · {t.title.split(' ').slice(0, 3).join(' ')}
+                {topicComplete ? '✓ ' : topicDone > 0 ? `${topicDone}/${topicTotal} ` : ''}{i + 1} · {t.title.split(' ').slice(0, 3).join(' ')}
               </button>
             );
           })}
@@ -1183,70 +1157,102 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
 
         {/* Topic sections */}
         {documentReading.topics.map((t, i) => {
-          const color     = TOPIC_COLORS[i % TOPIC_COLORS.length];
-          const termsOpen = expandedTerms.has(t.topicId);
-          const subs      = t.subtopics ?? [];
+          const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
+          const subs  = t.subtopics ?? [];
           return (
             <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12 }}>
               {/* Topic heading */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>
-                  {i + 1}
-                </div>
+                <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>{i + 1}</div>
                 <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
               </div>
               <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
 
-              {/* Subtopic accordions */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+              {/* Subtopic accordions with read/learnt ticks + key terms inside */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
                 {subs.map((sub, si) => {
                   const key    = `${t.topicId}-${si}`;
                   const isOpen = expandedSubs.has(key);
+                  const status = subStatuses[key] ?? 'unread';
+                  const isRead   = status === 'read' || status === 'learnt';
+                  const isLearnt = status === 'learnt';
+                  // Distribute key terms across subtopics
+                  const termsPerSub = Math.ceil(t.keyTerms.length / subs.length);
+                  const subTerms = t.keyTerms.slice(si * termsPerSub, (si + 1) * termsPerSub);
                   return (
-                    <div key={key} style={{ borderRadius: 12, border: `1.5px solid ${isOpen ? color + '55' : 'var(--line)'}`, overflow: 'hidden', transition: 'border-color 0.2s' }}>
+                    <div key={key} style={{ borderRadius: 14, border: `1.5px solid ${isRead ? color + '66' : isOpen ? color + '44' : 'var(--line)'}`, overflow: 'hidden', transition: 'border-color 0.25s', background: isRead ? color + '06' : 'var(--card)' }}>
+                      {/* Accordion header */}
                       <button
                         onClick={() => toggleSub(key)}
-                        style={{ width: '100%', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, background: isOpen ? color + '08' : 'var(--card)', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                        style={{ width: '100%', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, background: 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left' }}
                       >
-                        <div style={{ width: 20, height: 20, borderRadius: 6, background: isOpen ? color : color + '20', border: `1.5px solid ${color}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, fontWeight: 800, color: isOpen ? 'white' : color, transition: 'all 0.2s' }}>
-                          {si + 1}
+                        <div style={{ width: 22, height: 22, borderRadius: 7, background: isRead ? color : isOpen ? color : color + '20', border: `1.5px solid ${color}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, fontWeight: 800, color: isRead || isOpen ? 'white' : color, transition: 'all 0.2s' }}>
+                          {isLearnt ? '🧠' : isRead ? '✓' : si + 1}
                         </div>
-                        <span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: 'var(--ink)' }}>{sub.title}</span>
+                        <span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: isRead ? color : 'var(--ink)' }}>{sub.title}</span>
+                        {/* Status dot when collapsed */}
+                        {!isOpen && isRead && (
+                          <div style={{ width: 8, height: 8, borderRadius: '50%', background: isLearnt ? '#8C5BD9' : color, flexShrink: 0 }} />
+                        )}
                         <div style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}>
                           <Icon name="chevron-right" size={15} stroke={isOpen ? color : 'var(--ink-4)'} />
                         </div>
                       </button>
+
+                      {/* Expanded content */}
                       {isOpen && (
-                        <div style={{ padding: '4px 14px 14px 44px', borderTop: `1px solid ${color}22` }}>
-                          <p style={{ margin: 0, fontSize: 15, lineHeight: 1.85, color: 'var(--ink-2)' }}>{sub.content}</p>
+                        <div style={{ borderTop: `1px solid ${color}22` }}>
+                          {/* Reading content */}
+                          <div style={{ padding: '12px 16px 12px 46px' }}>
+                            <p style={{ margin: 0, fontSize: 15, lineHeight: 1.85, color: 'var(--ink-2)' }}>{sub.content}</p>
+                          </div>
+
+                          {/* Key terms for this subtopic */}
+                          {subTerms.length > 0 && (
+                            <div style={{ margin: '0 16px 12px 46px', borderRadius: 10, border: `1px solid ${color}33`, overflow: 'hidden' }}>
+                              <div style={{ padding: '7px 12px', background: color + '0d', fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color }}>
+                                📖 Key Terms
+                              </div>
+                              {subTerms.map((kt, ki) => (
+                                <div key={kt.term} style={{ padding: '9px 12px', borderTop: `1px solid ${color}22`, background: ki % 2 === 0 ? 'transparent' : color + '04' }}>
+                                  <span style={{ fontWeight: 700, fontSize: 13, color }}>{kt.term}</span>
+                                  <span style={{ fontSize: 13, color: 'var(--ink-3)', marginLeft: 6 }}>— {kt.definition}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {/* Read / Learnt tick buttons */}
+                          <div style={{ padding: '10px 14px', borderTop: `1px solid ${color}11`, display: 'flex', gap: 8, alignItems: 'center' }}>
+                            <span style={{ fontSize: 11, color: 'var(--ink-4)', fontWeight: 600, marginRight: 4 }}>Mark as:</span>
+                            <button
+                              onClick={() => markStatus(key, 'read')}
+                              style={{
+                                padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`,
+                                background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)',
+                                color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)',
+                                transition: 'all 0.2s',
+                              }}
+                            >
+                              ✓ Read
+                            </button>
+                            <button
+                              onClick={() => markStatus(key, 'learnt')}
+                              style={{
+                                padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`,
+                                background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)',
+                                color: isLearnt ? 'white' : 'var(--ink-3)',
+                                transition: 'all 0.2s',
+                              }}
+                            >
+                              🧠 Learnt
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
                   );
                 })}
-              </div>
-
-              {/* Key terms (collapsible) */}
-              <div style={{ borderRadius: 12, border: '1px solid var(--line)', overflow: 'hidden', marginBottom: 14 }}>
-                <button
-                  onClick={() => toggleTerms(t.topicId)}
-                  style={{ width: '100%', padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: color + '0d', border: 'none', cursor: 'pointer' }}
-                >
-                  <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color }}>Key Terms · {t.keyTerms.length}</span>
-                  <div style={{ transform: termsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
-                    <Icon name="chevron-right" size={13} stroke={color} />
-                  </div>
-                </button>
-                {termsOpen && (
-                  <div>
-                    {t.keyTerms.map((kt, ki) => (
-                      <div key={kt.term} style={{ padding: '11px 14px', borderTop: '1px solid var(--line)', background: ki % 2 === 0 ? 'var(--card)' : 'var(--bg)' }}>
-                        <div style={{ fontWeight: 700, fontSize: 13, color, marginBottom: 3 }}>{kt.term}</div>
-                        <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.65 }}>{kt.definition}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
               </div>
 
               {/* Why it matters */}
