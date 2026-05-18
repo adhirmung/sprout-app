@@ -382,7 +382,7 @@ function LibraryTreeNode({
   depth: number;
   onOpenFile: (src: FeedSource) => void;
 }) {
-  const [open, setOpen] = useState(depth === 0);
+  const [open, setOpen] = useState(false);
   const indent = 10 + depth * 14;
 
   if (item.type === 'file') {
