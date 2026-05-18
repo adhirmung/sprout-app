@@ -12,7 +12,7 @@ import { ProfileScreen } from './screens/ProfileScreen';
 import { Store } from './lib/store';
 import { supabase, dbLoadProfile, dbLoadLibrary, dbSaveProfile, dbSaveLibrary } from './lib/supabase';
 import { saveApiKey } from './lib/claude';
-import type { FeedSource, LearnerProfile, LibraryTree, Route, User } from './lib/types';
+import type { FeedSource, LearnerProfile, LibraryItem, LibraryTree, Route, User } from './lib/types';
 
 export default function App() {
   return (
@@ -191,11 +191,13 @@ function AppCore() {
     );
   }
 
+  const library: LibraryTree = Store.get('library', {});
+
   return (
-    <AppShell user={user} route={route} setRoute={setRoute} onLogout={handleLogout}>
+    <AppShell user={user} route={route} setRoute={setRoute} onLogout={handleLogout} library={library} onOpenFile={startFeed}>
       {route === 'home' && (
         <HomeScreen user={user} profile={profile}
-          library={Store.get('library', {})}
+          library={library}
           onStartFromLibrary={startFeed}
           onGotoLibrary={() => setRoute('library')}
           onQuickStudy={quickStudy} />
@@ -223,10 +225,12 @@ interface AppShellProps {
   setRoute: (r: Route) => void;
   onLogout: () => void;
   hideNav?: boolean;
+  library?: LibraryTree;
+  onOpenFile?: (src: FeedSource) => void;
   children: React.ReactNode;
 }
 
-function AppShell({ user, route, setRoute, onLogout, hideNav, children }: AppShellProps) {
+function AppShell({ user, route, setRoute, onLogout, hideNav, library, onOpenFile, children }: AppShellProps) {
   const [mobileOpen, setMobileOpen] = useState(false);
 
   useEffect(() => { setMobileOpen(false); }, [route]);
@@ -235,17 +239,23 @@ function AppShell({ user, route, setRoute, onLogout, hideNav, children }: AppShe
     return <div style={{ height: '100dvh', background: 'var(--bg)' }}>{children}</div>;
   }
 
+  const hasLibrary = library && Object.keys(library).length > 0;
+
   return (
     <div className="shell" style={{ display: 'grid', gridTemplateColumns: '240px 1fr', height: '100dvh', background: 'var(--bg)' }}>
       {/* Sidebar */}
       <aside className="sidebar" style={{
         background: 'var(--card)', borderRight: '1px solid var(--line)',
-        display: 'flex', flexDirection: 'column', padding: '20px 14px',
+        display: 'flex', flexDirection: 'column', overflow: 'hidden',
+        padding: '20px 14px',
       }}>
-        <div style={{ padding: '0 6px 18px', borderBottom: '1px solid var(--line)', marginBottom: 14 }}>
+        {/* Logo */}
+        <div style={{ padding: '0 6px 18px', borderBottom: '1px solid var(--line)', marginBottom: 14, flexShrink: 0 }}>
           <SproutWordmark size={18} />
         </div>
-        <nav style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 4 }}>
+
+        {/* Nav items */}
+        <nav style={{ display: 'flex', flexDirection: 'column', gap: 4, flexShrink: 0 }}>
           {NAV_ITEMS.map(n => (
             <button key={n.id} onClick={() => setRoute(n.id as Route)}
               aria-current={route === n.id ? 'page' : undefined}
@@ -262,7 +272,24 @@ function AppShell({ user, route, setRoute, onLogout, hideNav, children }: AppShe
             </button>
           ))}
         </nav>
-        <div className="card" style={{ padding: 12, marginTop: 12 }}>
+
+        {/* Library tree */}
+        {hasLibrary && onOpenFile && (
+          <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+            <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)', padding: '0 8px 8px', flexShrink: 0 }}>
+              Subjects
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', scrollbarWidth: 'none' }}>
+              <LibraryTreeView tree={library} path={[]} depth={0} onOpenFile={onOpenFile} />
+            </div>
+          </div>
+        )}
+
+        {/* Spacer when no library */}
+        {!hasLibrary && <div style={{ flex: 1 }} />}
+
+        {/* User card */}
+        <div className="card" style={{ padding: 12, marginTop: 12, flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
             <Avatar name={user?.name} />
             <div style={{ flex: 1, minWidth: 0 }}>
@@ -293,9 +320,9 @@ function AppShell({ user, route, setRoute, onLogout, hideNav, children }: AppShe
       {/* Mobile drawer */}
       {mobileOpen && (
         <div onClick={() => setMobileOpen(false)} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.4)', zIndex: 'var(--z-dropdown)' as unknown as number }}>
-          <div onClick={e => e.stopPropagation()} style={{ width: 260, height: '100%', background: 'var(--card)', padding: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div onClick={e => e.stopPropagation()} style={{ width: 260, height: '100%', background: 'var(--card)', padding: 20, display: 'flex', flexDirection: 'column', gap: 8, overflow: 'hidden' }}>
             <SproutWordmark size={18} />
-            <div style={{ height: 12 }} />
+            <div style={{ height: 4 }} />
             {NAV_ITEMS.map(n => (
               <button key={n.id} onClick={() => setRoute(n.id as Route)} className="btn btn-ghost" style={{
                 justifyContent: 'flex-start', padding: '12px 14px',
@@ -305,9 +332,121 @@ function AppShell({ user, route, setRoute, onLogout, hideNav, children }: AppShe
                 <Icon name={n.icon} size={18} /> {n.label}
               </button>
             ))}
-            <div style={{ flex: 1 }} />
+            {hasLibrary && onOpenFile && (
+              <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)', marginBottom: 6 }}>Subjects</div>
+                <div style={{ flex: 1, overflowY: 'auto', scrollbarWidth: 'none' }}>
+                  <LibraryTreeView tree={library!} path={[]} depth={0} onOpenFile={onOpenFile} />
+                </div>
+              </div>
+            )}
+            {!hasLibrary && <div style={{ flex: 1 }} />}
             <button className="btn btn-secondary" onClick={onLogout}><Icon name="logout" size={16} /> Sign out</button>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Sidebar library tree ───────────────────────────────────────
+
+function LibraryTreeView({
+  tree, path, depth, onOpenFile,
+}: {
+  tree: LibraryTree;
+  path: string[];
+  depth: number;
+  onOpenFile: (src: FeedSource) => void;
+}) {
+  const entries = Object.entries(tree).sort((a, b) => {
+    // folders first, then files alphabetically
+    if (a[1].type !== b[1].type) return a[1].type === 'folder' ? -1 : 1;
+    return a[0].localeCompare(b[0]);
+  });
+  return (
+    <>
+      {entries.map(([name, item]) => (
+        <LibraryTreeNode key={name} name={name} item={item} path={[...path, name]} depth={depth} onOpenFile={onOpenFile} />
+      ))}
+    </>
+  );
+}
+
+function LibraryTreeNode({
+  name, item, path, depth, onOpenFile,
+}: {
+  name: string;
+  item: LibraryItem;
+  path: string[];
+  depth: number;
+  onOpenFile: (src: FeedSource) => void;
+}) {
+  const [open, setOpen] = useState(depth === 0);
+  const indent = 10 + depth * 14;
+
+  if (item.type === 'file') {
+    return (
+      <button
+        onClick={() => onOpenFile({ path, item })}
+        title={name}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 7,
+          paddingLeft: indent + 20, paddingRight: 10, paddingTop: 5, paddingBottom: 5,
+          width: '100%', textAlign: 'left', background: 'none', border: 'none',
+          cursor: 'pointer', borderRadius: 8, color: 'var(--ink-3)', fontSize: 12,
+          transition: 'background 0.12s, color 0.12s',
+        }}
+        onMouseEnter={e => {
+          (e.currentTarget as HTMLElement).style.background = 'var(--brand-tint)';
+          (e.currentTarget as HTMLElement).style.color = 'var(--brand-2)';
+        }}
+        onMouseLeave={e => {
+          (e.currentTarget as HTMLElement).style.background = 'none';
+          (e.currentTarget as HTMLElement).style.color = 'var(--ink-3)';
+        }}
+      >
+        <Icon name="file" size={12} stroke="currentColor" style={{ flexShrink: 0 }} />
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{name}</span>
+      </button>
+    );
+  }
+
+  // Folder
+  const childCount = Object.keys(item.children).length;
+  return (
+    <div>
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={name}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 7,
+          paddingLeft: indent, paddingRight: 10, paddingTop: 6, paddingBottom: 6,
+          width: '100%', textAlign: 'left', background: 'none', border: 'none',
+          cursor: 'pointer', borderRadius: 8,
+          color: open ? 'var(--ink)' : 'var(--ink-2)',
+          fontSize: 12, fontWeight: 700,
+          transition: 'background 0.12s, color 0.12s',
+        }}
+        onMouseEnter={e => (e.currentTarget as HTMLElement).style.background = 'var(--bg-tint)'}
+        onMouseLeave={e => (e.currentTarget as HTMLElement).style.background = 'none'}
+      >
+        {/* Chevron */}
+        <span style={{ flexShrink: 0, transition: 'transform 0.18s', display: 'grid', placeItems: 'center', transform: open ? 'rotate(0deg)' : 'rotate(-90deg)' }}>
+          <Icon name="chevron-down" size={11} stroke="var(--ink-4)" />
+        </span>
+        {/* Folder icon — filled/open tint when expanded */}
+        <span style={{ flexShrink: 0, color: open ? 'var(--brand)' : 'var(--ink-3)', display: 'grid', placeItems: 'center' }}>
+          <Icon name="folder" size={13} stroke="currentColor" />
+        </span>
+        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{name}</span>
+        {/* Child count badge */}
+        <span style={{ fontSize: 10, color: 'var(--ink-4)', background: 'var(--bg-tint)', borderRadius: 999, padding: '1px 5px', flexShrink: 0 }}>{childCount}</span>
+      </button>
+
+      {open && (
+        <div style={{ borderLeft: '1.5px solid var(--line)', marginLeft: indent + 13, paddingLeft: 4 }}>
+          <LibraryTreeView tree={item.children} path={path} depth={depth + 1} onOpenFile={onOpenFile} />
         </div>
       )}
     </div>
