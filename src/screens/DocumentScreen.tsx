@@ -5,14 +5,16 @@ import { Chip } from '../components/Chip';
 import { ProgressBar } from '../components/ProgressBar';
 import {
   buildChatSystemPrompt,
+  evaluateWrittenAnswer,
   generateContentMap,
   generateFeed,
+  generatePracticeQuiz,
   generateReading,
   hasApiKey,
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
-import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit } from '../lib/claude';
+import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, WrittenEvaluation } from '../lib/claude';
 import { dbLoadGeneratedCards, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -41,7 +43,7 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice'>('idle');
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
@@ -227,7 +229,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       profile={profile}
       onBack={() => setPhase('idle')}
       onRead={() => startReading(contentMap)}
-      onPractice={(mode) => { setPhase('idle'); generate(false, mode); }}
+      onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
         Store.del(`map:${sourceKey}`);
         setContentMap(null);
@@ -248,6 +250,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
+  if (phase === 'practice' && documentReading) return (
+    <PracticeView
+      documentReading={documentReading}
+      topic={topic}
+      profile={profile}
+      onBack={() => setPhase('read')}
+    />
+  );
+
   if (phase === 'read' && documentReading && contentMap) return (
     <ReadView
       documentReading={documentReading}
@@ -255,7 +266,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       hasCache={!!Store.get<DocumentReading | null>(`reading:${sourceKey}`, null)}
       profile={profile}
       onBack={() => setPhase('map')}
-      onPractice={(mode) => { setPhase('idle'); generate(false, mode); }}
+      onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
         Store.del(`reading:${sourceKey}`);
         setDocumentReading(null);
@@ -939,6 +950,466 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onR
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
             <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Practice</span>
           </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Practice quiz helpers ─────────────────────────────────────
+
+interface UserAnswer {
+  questionId: string;
+  score:      number;
+  maxScore:   number;
+  userValue:  string | number | null;
+  feedback?:  string;
+}
+
+interface PracticeReport {
+  totalScore:      number;
+  maxScore:        number;
+  percentage:      number;
+  topicBreakdown:  { topicId: string; topicTitle: string; score: number; maxScore: number; percentage: number }[];
+  suggestions:     string[];
+  overallFeedback: string;
+  band:            'excellent' | 'good' | 'fair' | 'needs-work';
+}
+
+function buildPracticeReport(quiz: PracticeQuiz, answers: UserAnswer[]): PracticeReport {
+  const total    = answers.reduce((s, a) => s + a.score, 0);
+  const maxScore = quiz.questions.reduce((s, q) => s + (q.type === 'written' ? 2 : 1), 0);
+  const pct      = maxScore === 0 ? 0 : Math.round((total / maxScore) * 100);
+
+  const topicMap = new Map<string, { title: string; score: number; max: number }>();
+  quiz.questions.forEach((q, i) => {
+    const a = answers[i];
+    if (!a) return;
+    if (!topicMap.has(q.topicId)) topicMap.set(q.topicId, { title: q.topicTitle, score: 0, max: 0 });
+    const t = topicMap.get(q.topicId)!;
+    t.score += a.score;
+    t.max   += q.type === 'written' ? 2 : 1;
+  });
+
+  const topicBreakdown = [...topicMap.entries()].map(([topicId, t]) => ({
+    topicId, topicTitle: t.title, score: t.score, maxScore: t.max,
+    percentage: t.max === 0 ? 0 : Math.round((t.score / t.max) * 100),
+  })).sort((a, b) => a.percentage - b.percentage);
+
+  const weakTopics = topicBreakdown.filter(t => t.percentage < 60);
+  const suggestions: string[] = weakTopics.length === 0
+    ? ['Excellent across the board! Try a new quiz to keep the knowledge fresh.']
+    : weakTopics.map(t => `Revisit "${t.topicTitle}" — you scored ${t.percentage}% on those questions.`);
+  if (pct < 50) suggestions.push('Go back to the reading and focus on the red topics above, then retry.');
+
+  const band: PracticeReport['band'] = pct >= 85 ? 'excellent' : pct >= 70 ? 'good' : pct >= 50 ? 'fair' : 'needs-work';
+  const overallFeedback = (
+    band === 'excellent'  ? '🎉 Outstanding! You have a strong command of this material.' :
+    band === 'good'       ? '👏 Well done! A few gaps to close — you\'re nearly there.' :
+    band === 'fair'       ? '💪 Solid effort. Focus on the weaker topics and try again.' :
+                            '📚 Keep at it — revisit the reading and tackle those red topics.'
+  );
+  return { totalScore: total, maxScore, percentage: pct, topicBreakdown, suggestions, overallFeedback, band };
+}
+
+const Q_TYPE_META = {
+  mcq:     { label: 'Multiple Choice', color: '#3B82F6', bg: '#EFF6FF' },
+  fill:    { label: 'Fill in Blank',   color: '#F59E0B', bg: '#FFFBEB' },
+  written: { label: 'Written Answer',  color: '#8B5CF6', bg: '#F5F3FF' },
+} as const;
+
+const BAND_COLOR = {
+  excellent:    '#10B981',
+  good:         '#3B82F6',
+  fair:         '#F59E0B',
+  'needs-work': '#EF4444',
+} as const;
+
+function PracticeView({
+  documentReading, topic, profile: _profile, onBack,
+}: {
+  documentReading: DocumentReading;
+  topic:           string;
+  profile:         LearnerProfile | null;
+  onBack:          () => void;
+}) {
+  const isMobile = useIsMobile();
+  type Phase = 'generating' | 'quiz' | 'done';
+  const [practicePhase, setPracticePhase] = useState<Phase>('generating');
+  const [quiz,          setQuiz]          = useState<PracticeQuiz | null>(null);
+  const [genError,      setGenError]      = useState('');
+  const [currentQ,      setCurrentQ]      = useState(0);
+  const [answers,       setAnswers]       = useState<UserAnswer[]>([]);
+
+  // Per-question interaction state
+  const [selectedOption, setSelectedOption] = useState<number | null>(null);
+  const [textInput,      setTextInput]      = useState('');
+  const [submitted,      setSubmitted]      = useState(false);
+  const [evaluating,     setEvaluating]     = useState(false);
+  const [qFeedback,      setQFeedback]      = useState<{ score: number; feedback: string } | null>(null);
+
+  const resetQ = () => {
+    setSelectedOption(null);
+    setTextInput('');
+    setSubmitted(false);
+    setEvaluating(false);
+    setQFeedback(null);
+  };
+
+  const runGenerate = async () => {
+    setPracticePhase('generating');
+    setGenError('');
+    setCurrentQ(0);
+    setAnswers([]);
+    resetQ();
+    try {
+      const q = await generatePracticeQuiz(documentReading, topic);
+      setQuiz(q);
+      setPracticePhase('quiz');
+    } catch (e) {
+      setGenError(e instanceof Error ? e.message : 'Failed to generate quiz.');
+    }
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { void runGenerate(); }, []);
+
+  const currentQuestion: PracticeQuestion | null = quiz?.questions[currentQ] ?? null;
+
+  const handleSubmit = async () => {
+    if (!currentQuestion || submitted || evaluating) return;
+
+    if (currentQuestion.type === 'mcq') {
+      if (selectedOption === null) return;
+      const correct = selectedOption === currentQuestion.answer ? 1 : 0;
+      setSubmitted(true);
+      setAnswers(prev => [...prev, { questionId: currentQuestion.id, score: correct, maxScore: 1, userValue: selectedOption }]);
+      setQFeedback({
+        score: correct,
+        feedback: correct
+          ? `✓ Correct! ${currentQuestion.explanation}`
+          : `✗ The answer is option ${String.fromCharCode(65 + (currentQuestion.answer ?? 0))}. ${currentQuestion.explanation}`,
+      });
+
+    } else if (currentQuestion.type === 'fill') {
+      if (!textInput.trim()) return;
+      const userNorm    = textInput.trim().toLowerCase();
+      const correctNorm = (currentQuestion.blank ?? '').toLowerCase();
+      const correct     = userNorm === correctNorm ? 1 : 0;
+      setSubmitted(true);
+      setAnswers(prev => [...prev, { questionId: currentQuestion.id, score: correct, maxScore: 1, userValue: textInput }]);
+      setQFeedback({
+        score: correct,
+        feedback: correct
+          ? `✓ Correct! "${currentQuestion.blank}" — ${currentQuestion.explanation}`
+          : `✗ The answer was "${currentQuestion.blank}". ${currentQuestion.explanation}`,
+      });
+
+    } else if (currentQuestion.type === 'written') {
+      if (!textInput.trim()) return;
+      setEvaluating(true);
+      let evalResult: WrittenEvaluation;
+      try {
+        evalResult = await evaluateWrittenAnswer(
+          currentQuestion.question,
+          currentQuestion.sampleAnswer ?? '',
+          textInput,
+          topic,
+        );
+      } catch {
+        evalResult = { score: 1, feedback: 'Partial credit — could not fully evaluate.' };
+      }
+      setSubmitted(true);
+      setEvaluating(false);
+      setAnswers(prev => [...prev, {
+        questionId: currentQuestion.id,
+        score:      evalResult.score,
+        maxScore:   2,
+        userValue:  textInput,
+        feedback:   evalResult.feedback,
+      }]);
+      setQFeedback({ score: evalResult.score, feedback: evalResult.feedback });
+    }
+  };
+
+  const handleNext = () => {
+    if (!quiz) return;
+    if (currentQ + 1 >= quiz.questions.length) {
+      setPracticePhase('done');
+    } else {
+      setCurrentQ(q => q + 1);
+      resetQ();
+    }
+  };
+
+  const report = quiz && answers.length > 0 && practicePhase === 'done'
+    ? buildPracticeReport(quiz, answers)
+    : null;
+
+  // ── Generating / error ──────────────────────────────────────
+  if (practicePhase === 'generating') {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', alignItems: 'center', justifyContent: 'center', gap: 20, padding: 32 }}>
+        {genError ? (
+          <>
+            <div style={{ fontSize: 32 }}>⚠️</div>
+            <div style={{ fontSize: 15, color: 'var(--ink-2)', textAlign: 'center', maxWidth: 360 }}>{genError}</div>
+            <button onClick={() => void runGenerate()} className="btn btn-primary">Try again</button>
+            <button onClick={onBack} style={{ fontSize: 13, color: 'var(--ink-3)', background: 'none', border: 'none', cursor: 'pointer' }}>← Back to reading</button>
+          </>
+        ) : (
+          <>
+            <div style={{ width: 48, height: 48, borderRadius: '50%', border: '4px solid var(--brand)', borderTopColor: 'transparent', animation: 'spin 0.9s linear infinite' }} />
+            <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--ink)' }}>Generating your quiz…</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-3)', textAlign: 'center' }}>Crafting questions across all topics</div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // ── Done / report ───────────────────────────────────────────
+  if (practicePhase === 'done' && report) {
+    const bandColor = BAND_COLOR[report.band];
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+          <button onClick={onBack} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>Practice Results</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{topic}</div>
+          </div>
+          <button onClick={() => void runGenerate()}
+            style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 10, background: 'var(--brand)', border: 'none', color: 'white', fontSize: 12, fontWeight: 700, cursor: 'pointer' }}>
+            🔄 New Quiz
+          </button>
+        </div>
+
+        <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px 32px' : '28px 28px 40px' }}>
+          <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 24 }}>
+
+            {/* Score circle + overall feedback */}
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14, padding: '28px 20px', borderRadius: 20, background: 'var(--card)', border: `2px solid ${bandColor}33`, boxShadow: '0 4px 20px rgba(0,0,0,0.06)' }}>
+              <div style={{ width: 100, height: 100, borderRadius: '50%', border: `6px solid ${bandColor}`, display: 'grid', placeItems: 'center', boxShadow: `0 0 0 6px ${bandColor}22` }}>
+                <span style={{ fontSize: 28, fontWeight: 900, color: bandColor, fontFamily: 'var(--font-mono)' }}>{report.percentage}%</span>
+              </div>
+              <div style={{ fontSize: 16, fontWeight: 700, color: 'var(--ink)', textAlign: 'center' }}>{report.overallFeedback}</div>
+              <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>{report.totalScore} / {report.maxScore} points</div>
+            </div>
+
+            {/* Topic breakdown */}
+            <div style={{ borderRadius: 16, background: 'var(--card)', border: '1px solid var(--line)', overflow: 'hidden' }}>
+              <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--line)', background: 'var(--bg-tint)' }}>
+                <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-2)' }}>Topic Breakdown</div>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+                {report.topicBreakdown.map((t, i) => {
+                  const tColor = t.percentage >= 80 ? '#10B981' : t.percentage >= 60 ? '#F59E0B' : '#EF4444';
+                  return (
+                    <div key={t.topicId} style={{ padding: '12px 18px', borderBottom: i < report.topicBreakdown.length - 1 ? '1px solid var(--line)' : 'none' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 7 }}>
+                        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', flex: 1, marginRight: 12 }}>{t.topicTitle}</div>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: tColor, fontFamily: 'var(--font-mono)', flexShrink: 0 }}>{t.percentage}%</div>
+                      </div>
+                      <div style={{ height: 6, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
+                        <div style={{ width: `${t.percentage}%`, height: '100%', background: tColor, borderRadius: 999, transition: 'width 0.8s ease' }} />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Suggestions */}
+            <div style={{ borderRadius: 16, background: 'var(--card)', border: '1px solid var(--line)', overflow: 'hidden' }}>
+              <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--line)', background: 'var(--bg-tint)' }}>
+                <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-2)' }}>📋 What to focus on</div>
+              </div>
+              <div style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {report.suggestions.map((s, i) => (
+                  <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    <span style={{ fontSize: 14, flexShrink: 0, marginTop: 1 }}>{report.band === 'excellent' ? '✨' : '→'}</span>
+                    <span style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.55 }}>{s}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button onClick={onBack}
+                style={{ flex: 1, padding: '12px 0', borderRadius: 12, border: '1.5px solid var(--line)', background: 'var(--card)', color: 'var(--ink-2)', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                ← Back to Reading
+              </button>
+              <button onClick={() => void runGenerate()}
+                style={{ flex: 1, padding: '12px 0', borderRadius: 12, border: 'none', background: 'var(--brand)', color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                🔄 New Quiz
+              </button>
+            </div>
+
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Quiz question ───────────────────────────────────────────
+  if (!currentQuestion || !quiz) return null;
+  const meta     = Q_TYPE_META[currentQuestion.type];
+  const progress = ((currentQ + 1) / quiz.questions.length) * 100;
+  const canSubmit = currentQuestion.type === 'mcq'
+    ? selectedOption !== null
+    : textInput.trim().length >= 2;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ padding: '12px 20px', borderBottom: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+        <button onClick={onBack} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>Practice Quiz</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{topic}</div>
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)', fontFamily: 'var(--font-mono)' }}>{currentQ + 1} / {quiz.questions.length}</div>
+      </div>
+
+      {/* Progress bar */}
+      <div style={{ height: 4, background: 'var(--bg-tint)', flexShrink: 0 }}>
+        <div style={{ height: '100%', width: `${progress}%`, background: 'var(--brand)', borderRadius: '0 2px 2px 0', transition: 'width 0.4s ease' }} />
+      </div>
+
+      {/* Scrollable question area */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px 14px 24px' : '24px 28px 32px' }}>
+        <div style={{ maxWidth: 640, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+          {/* Type + topic badges */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{ padding: '4px 10px', borderRadius: 999, background: meta.bg, color: meta.color, fontSize: 11, fontWeight: 800, border: `1px solid ${meta.color}33` }}>
+              {meta.label}
+            </span>
+            <span style={{ padding: '4px 10px', borderRadius: 999, background: 'var(--bg-tint)', color: 'var(--ink-3)', fontSize: 11, fontWeight: 700, border: '1px solid var(--line)' }}>
+              {currentQuestion.topicTitle}
+            </span>
+          </div>
+
+          {/* Question card */}
+          <div style={{ borderRadius: 18, border: `2px solid ${meta.color}33`, background: 'var(--card)', overflow: 'hidden', boxShadow: '0 4px 20px rgba(0,0,0,0.06)' }}>
+
+            {/* Question text */}
+            <div style={{ padding: isMobile ? '18px 18px 14px' : '22px 24px 16px', borderBottom: `1px solid ${meta.color}22` }}>
+              <p style={{ margin: 0, fontSize: isMobile ? 15 : 17, fontWeight: 700, color: 'var(--ink)', lineHeight: 1.5 }}>
+                {currentQuestion.type === 'fill'
+                  ? currentQuestion.question.split('___').map((part, pi, arr) => (
+                      <span key={pi}>
+                        {part}
+                        {pi < arr.length - 1 && (
+                          <span style={{ display: 'inline-block', minWidth: 80, borderBottom: `2px solid ${meta.color}`, margin: '0 4px', fontStyle: 'italic', color: meta.color, fontSize: '0.85em' }}>
+                            {submitted ? currentQuestion.blank : '        '}
+                          </span>
+                        )}
+                      </span>
+                    ))
+                  : currentQuestion.question}
+              </p>
+            </div>
+
+            {/* Answer area */}
+            <div style={{ padding: isMobile ? '14px 18px' : '18px 24px' }}>
+              {/* MCQ options */}
+              {currentQuestion.type === 'mcq' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {(currentQuestion.options ?? []).map((opt, oi) => {
+                    const isSelected = selectedOption === oi;
+                    const isCorrect  = submitted && oi === currentQuestion.answer;
+                    const isWrong    = submitted && isSelected && oi !== currentQuestion.answer;
+                    const bgColor    = isCorrect ? '#D1FAE5' : isWrong ? '#FEE2E2' : isSelected ? meta.color + '15' : 'var(--bg-tint)';
+                    const borderColor = isCorrect ? '#10B981' : isWrong ? '#EF4444' : isSelected ? meta.color : 'var(--line)';
+                    const textColor  = isCorrect ? '#065F46' : isWrong ? '#991B1B' : isSelected ? meta.color : 'var(--ink-2)';
+                    return (
+                      <button
+                        key={oi}
+                        onClick={() => !submitted && setSelectedOption(oi)}
+                        disabled={submitted}
+                        style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '11px 16px', borderRadius: 12, border: `1.5px solid ${borderColor}`, background: bgColor, cursor: submitted ? 'default' : 'pointer', textAlign: 'left', transition: 'all 0.15s', width: '100%' }}>
+                        <span style={{ width: 24, height: 24, borderRadius: '50%', border: `2px solid ${borderColor}`, display: 'grid', placeItems: 'center', fontSize: 11, fontWeight: 800, color: textColor, flexShrink: 0, background: isCorrect ? '#10B981' : isWrong ? '#EF4444' : isSelected ? meta.color : 'transparent' }}>
+                          <span style={{ color: isCorrect || isWrong || isSelected ? 'white' : textColor }}>{String.fromCharCode(65 + oi)}</span>
+                        </span>
+                        <span style={{ fontSize: 14, color: textColor, fontWeight: isSelected || isCorrect ? 600 : 400, lineHeight: 1.4 }}>{opt}</span>
+                        {isCorrect && <span style={{ marginLeft: 'auto', fontSize: 16 }}>✓</span>}
+                        {isWrong  && <span style={{ marginLeft: 'auto', fontSize: 16 }}>✗</span>}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Fill in blank input */}
+              {currentQuestion.type === 'fill' && !submitted && (
+                <input
+                  type="text"
+                  value={textInput}
+                  onChange={e => setTextInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && !submitted && void handleSubmit()}
+                  placeholder="Type the missing term…"
+                  autoFocus
+                  style={{ width: '100%', padding: '11px 14px', borderRadius: 10, border: `1.5px solid ${meta.color}66`, background: 'var(--bg-tint)', fontSize: 15, color: 'var(--ink)', outline: 'none', boxSizing: 'border-box' }}
+                />
+              )}
+
+              {/* Written textarea */}
+              {currentQuestion.type === 'written' && !submitted && (
+                <textarea
+                  value={textInput}
+                  onChange={e => setTextInput(e.target.value)}
+                  placeholder="Write your answer here… (2–4 sentences)"
+                  rows={5}
+                  autoFocus
+                  style={{ width: '100%', padding: '11px 14px', borderRadius: 10, border: `1.5px solid ${meta.color}66`, background: 'var(--bg-tint)', fontSize: 14, color: 'var(--ink)', outline: 'none', resize: 'vertical', lineHeight: 1.6, boxSizing: 'border-box', fontFamily: 'inherit' }}
+                />
+              )}
+
+              {/* Feedback panel (after submit) */}
+              {submitted && qFeedback && (
+                <div style={{ marginTop: currentQuestion.type === 'mcq' ? 12 : 0, padding: '12px 16px', borderRadius: 12, background: qFeedback.score > 0 ? '#D1FAE522' : '#FEE2E222', border: `1.5px solid ${qFeedback.score > 0 ? '#10B981' : '#EF4444'}44` }}>
+                  {currentQuestion.type === 'written' && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+                      <span style={{ fontSize: 12, fontWeight: 800, color: qFeedback.score === 2 ? '#065F46' : qFeedback.score === 1 ? '#92400E' : '#991B1B' }}>
+                        {qFeedback.score === 2 ? '⭐ Full marks' : qFeedback.score === 1 ? '½ Partial credit' : '✗ Needs work'}
+                      </span>
+                      <span style={{ fontSize: 11, color: 'var(--ink-4)', marginLeft: 'auto' }}>{qFeedback.score} / 2</span>
+                    </div>
+                  )}
+                  <p style={{ margin: 0, fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.55 }}>{qFeedback.feedback}</p>
+                </div>
+              )}
+
+              {/* Evaluating state for written */}
+              {evaluating && (
+                <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-3)', fontSize: 13 }}>
+                  <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2.5px solid var(--brand)', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                  Claude is reading your answer…
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Submit / Next button */}
+          {!submitted ? (
+            <button
+              onClick={() => void handleSubmit()}
+              disabled={!canSubmit || evaluating}
+              style={{ padding: '13px 0', borderRadius: 12, border: 'none', background: canSubmit ? meta.color : 'var(--bg-tint)', color: canSubmit ? 'white' : 'var(--ink-4)', fontSize: 14, fontWeight: 700, cursor: canSubmit ? 'pointer' : 'default', transition: 'all 0.2s', width: '100%' }}>
+              {evaluating ? 'Evaluating…' : currentQuestion.type === 'written' ? 'Submit answer' : 'Check answer'}
+            </button>
+          ) : (
+            <button
+              onClick={handleNext}
+              style={{ padding: '13px 0', borderRadius: 12, border: 'none', background: 'var(--brand)', color: 'white', fontSize: 14, fontWeight: 700, cursor: 'pointer', width: '100%', transition: 'all 0.2s' }}>
+              {currentQ + 1 >= quiz.questions.length ? 'See results →' : 'Next question →'}
+            </button>
+          )}
+
         </div>
       </div>
     </div>

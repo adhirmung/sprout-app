@@ -720,3 +720,122 @@ Return ONLY valid JSON — no markdown fences:
 
   return parsed;
 }
+
+// ── Practice quiz ─────────────────────────────────────────────
+
+export interface PracticeQuestion {
+  id:           string;
+  type:         'mcq' | 'fill' | 'written';
+  topicId:      string;
+  topicTitle:   string;
+  question:     string;
+  options?:     string[];    // MCQ only — exactly 3
+  answer?:      number;      // MCQ only — 0-based index
+  blank?:       string;      // fill only — the correct term
+  sampleAnswer?: string;     // written only — for grading
+  explanation:  string;
+}
+
+export interface PracticeQuiz {
+  questions: PracticeQuestion[];
+}
+
+export interface WrittenEvaluation {
+  score:    0 | 1 | 2;
+  feedback: string;
+}
+
+export async function generatePracticeQuiz(
+  documentReading: DocumentReading,
+  topic: string,
+): Promise<PracticeQuiz> {
+  const client = getClient();
+
+  const topicCount   = documentReading.topics.length;
+  const mcqCount     = Math.max(topicCount + 2, 6);
+  const fillCount    = Math.max(topicCount, 4);
+  const writtenCount = Math.max(Math.ceil(topicCount * 0.75), 3);
+
+  const contentSummary = documentReading.topics.map(t =>
+    `TOPIC "${t.title}" (topicId: "${t.topicId}"):\n` +
+    t.subtopics.map(s => `  - ${s.title}: ${s.content}`).join('\n') +
+    `\n  Key terms: ${t.keyTerms.map(k => k.term).join(', ')}`
+  ).join('\n\n');
+
+  const prompt = `Create a comprehensive practice quiz on: "${topic}".
+
+STUDY CONTENT:
+${contentSummary}
+
+Generate ${mcqCount + fillCount + writtenCount} questions total:
+- ${mcqCount} multiple-choice (type "mcq"): 3 options, one correct (0-based answer index), plausible distractors
+- ${fillCount} fill-in-the-blank (type "fill"): sentence with ___ where a key term belongs, "blank" field = the correct term
+- ${writtenCount} written explanation (type "written"): requires a short paragraph, "sampleAnswer" field for grading
+
+Rules:
+- Spread proportionally across ALL topics — every topicId must appear at least once.
+- Explanations are 1-2 sentences shown after answering.
+- Written questions test deeper understanding, not just recall.
+
+Return ONLY valid JSON — no markdown:
+{
+  "questions": [
+    { "id": "q1", "type": "mcq", "topicId": "t1", "topicTitle": "...", "question": "...", "options": ["A","B","C"], "answer": 0, "explanation": "..." },
+    { "id": "q2", "type": "fill", "topicId": "t1", "topicTitle": "...", "question": "The ___ converts light into energy.", "blank": "chloroplast", "explanation": "..." },
+    { "id": "q3", "type": "written", "topicId": "t2", "topicTitle": "...", "question": "Explain why...", "sampleAnswer": "A complete answer would mention...", "explanation": "Key points: ..." }
+  ]
+}`;
+
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 8000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: prompt }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Failed to generate quiz. Please retry.');
+
+  let parsed: PracticeQuiz;
+  try   { parsed = JSON.parse(raw.slice(start, end + 1)); }
+  catch { parsed = JSON.parse(repairJson(raw.slice(start))); }
+
+  if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+    throw new Error('Invalid quiz response. Please retry.');
+  }
+  return parsed;
+}
+
+export async function evaluateWrittenAnswer(
+  question:     string,
+  sampleAnswer: string,
+  userAnswer:   string,
+  topic:        string,
+): Promise<WrittenEvaluation> {
+  const client = getClient();
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 200,
+    system:     'You are a precise JSON generator. Output only valid JSON.',
+    messages: [{
+      role: 'user',
+      content: `Grade this student answer on "${topic}".
+
+QUESTION: ${question}
+SAMPLE ANSWER: ${sampleAnswer}
+STUDENT ANSWER: ${userAnswer}
+
+Score: 2 = comprehensive & correct, 1 = partially correct, 0 = incorrect or missing key ideas.
+Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`,
+    }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) return { score: 1, feedback: 'Partial credit — keep going!' };
+  try   { return JSON.parse(raw.slice(start, end + 1)) as WrittenEvaluation; }
+  catch { return { score: 1, feedback: 'Partial credit — keep going!' }; }
+}
