@@ -309,7 +309,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onBack={onBack}
             onGenerate={(mode) => generate(false, mode)}
             onRegenerate={() => generate(true, 'activities')}
-            onOpenTutor={() => setShowTutor(true)}
             onStartLearning={startLearning}
           />
         )}
@@ -414,12 +413,12 @@ function StatPill({ icon, color, value, label }: { icon: string; color: string; 
 
 function DocIdleView({
   source, topic, breadcrumb, isLargeDoc, fromCache, audit, hasMap, error, retryRef, profile,
-  onBack, onGenerate, onRegenerate, onOpenTutor, onStartLearning,
+  onBack, onGenerate, onRegenerate, onStartLearning,
 }: {
   source: FeedSource | null; topic: string; breadcrumb: string;
   isLargeDoc: boolean; fromCache: boolean; audit: FeedAudit | null; hasMap: boolean; error: string;
   retryRef: React.RefObject<HTMLButtonElement | null>; profile: LearnerProfile | null;
-  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onOpenTutor: () => void; onStartLearning: () => void;
+  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onStartLearning: () => void;
 }) {
   const isMobile = useIsMobile();
   const [hoveredMode, setHoveredMode] = useState<string | null>(null);
@@ -489,18 +488,15 @@ function DocIdleView({
     : '📚';
 
   const MODES = [
-    { id: 'tutor',      emoji: '🎓', bg: '#FFF8EC', title: 'Tutor me',   desc: 'Chat with an AI tutor about this content' },
     { id: 'flashcards', emoji: '🃏', bg: '#EEF6FF', title: 'Flashcards', desc: 'AI-generated flip cards to test your memory' },
     { id: 'activities', emoji: '🎮', bg: '#EDFAF3', title: 'Activities',  desc: 'Interactive learning components', recommended: true },
-    { id: 'quiz',       emoji: '🧠', bg: '#FFF7ED', title: 'Quiz me',     desc: 'Multiple-choice questions from the content' },
     { id: 'podcast',    emoji: '🎙️', bg: '#F5F0FF', title: 'Podcast',     desc: 'AI-generated audio lesson', soon: true },
   ];
 
   const handleMode = (id: string, soon?: boolean) => {
     if (soon) return;
-    if (id === 'tutor') { onOpenTutor(); return; }
     const mode: 'activities' | 'flashcards' | 'quiz' =
-      id === 'flashcards' ? 'flashcards' : id === 'quiz' ? 'quiz' : 'activities';
+      id === 'flashcards' ? 'flashcards' : 'activities';
     onGenerate(mode);
   };
 
