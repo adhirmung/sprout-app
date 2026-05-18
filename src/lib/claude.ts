@@ -157,6 +157,26 @@ export type FeedCard =
   | { type: 'animation';      title: string; steps: { icon: string; title: string; description: string }[] }
   | { type: 'quiz';           question: string; options: string[]; correctIndex: number; explanation: string };
 
+// ── Streaming text helper ─────────────────────────────────────
+// Accumulates a full streamed response so JSON-generating functions
+// don't sit idle waiting for a complete message (avoids proxy timeouts).
+async function streamToText(
+  client: ReturnType<typeof getClient>,
+  params: Parameters<typeof client.messages.create>[0],
+): Promise<string> {
+  let text = '';
+  const stream = await client.messages.create({ ...params, stream: true });
+  for await (const event of stream) {
+    if (
+      event.type === 'content_block_delta' &&
+      event.delta.type === 'text_delta'
+    ) {
+      text += event.delta.text;
+    }
+  }
+  return text;
+}
+
 function sourceBlock(contentText: string | null, hasPdf: boolean): string {
   return hasPdf
     ? 'The full document (text + images) is attached above.'
@@ -402,14 +422,13 @@ export async function generateFeed(
       ] as MsgContent)
     : promptFn(topic, contentText, false);
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:    'claude-haiku-4-5-20251001',
     max_tokens: maxTokens,
     system:   'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages: [{ role: 'user', content: userContent }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Failed to generate content. Please retry.');
@@ -475,14 +494,13 @@ Score 0-100 on each dimension:
 Return ONLY valid JSON:
 { "coverageScore": <0-100>, "accuracyScore": <0-100>, "depthScore": <0-100>, "overallScore": <integer>, "missedTopics": [] }`;
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 300,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: prompt }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) return null;
@@ -524,14 +542,13 @@ Rules:
 Return ONLY valid JSON — no markdown fences:
 { "cards": [{ "type": "flashcard", "question": "...", "answer": "..." }] }`;
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 1500,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: prompt }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) return [];
@@ -589,14 +606,13 @@ Return ONLY valid JSON — no markdown fences:
       ] as MsgContent)
     : prompt;
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 4000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Failed to generate topic map. Please retry.');
@@ -695,14 +711,13 @@ Return ONLY valid JSON — no markdown fences:
       ] as MsgContent)
     : prompt;
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 12000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Failed to generate reading material. Please retry.');
@@ -785,14 +800,13 @@ Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
       ] as MsgContent)
     : prompt;
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 16000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Failed to generate visual components. Please retry.');
@@ -873,14 +887,13 @@ Return ONLY valid JSON — no markdown:
   ]
 }`;
 
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 8000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: prompt }],
   });
 
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('Failed to generate quiz. Please retry.');
@@ -902,7 +915,7 @@ export async function evaluateWrittenAnswer(
   topic:        string,
 ): Promise<WrittenEvaluation> {
   const client = getClient();
-  const msg = await client.messages.create({
+  const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
     max_tokens: 200,
     system:     'You are a precise JSON generator. Output only valid JSON.',
@@ -918,8 +931,6 @@ Score: 2 = comprehensive & correct, 1 = partially correct, 0 = incorrect or miss
 Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`,
     }],
   });
-
-  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) return { score: 1, feedback: 'Partial credit — keep going!' };
