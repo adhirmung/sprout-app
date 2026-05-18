@@ -911,23 +911,75 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onR
         </div>
       </div>
 
-      {/* CTA bar: Step 2 primary, practice secondary */}
-      <div style={{ flexShrink: 0, padding: '10px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button onClick={onRead} style={{ flex: 1, padding: '9px 14px', borderRadius: 10, background: 'var(--brand)', color: 'white', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, whiteSpace: 'nowrap' }}>
-          Step 2: Read {hasReading && <span style={{ fontSize: 10, background: 'rgba(255,255,255,0.25)', padding: '1px 6px', borderRadius: 4 }}>READY</span>}
-          <Icon name="chevron-right" size={14} stroke="white" />
-        </button>
-        <div style={{ width: 1, height: 28, background: 'var(--line)' }} />
-        <button onClick={() => onPractice('activities')} style={{ padding: '8px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>
-          🎮
-        </button>
-        <button onClick={() => onPractice('flashcards')} style={{ padding: '8px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>
-          🃏
-        </button>
-        <button onClick={() => onPractice('quiz')} style={{ padding: '8px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap' }}>
-          🧠
-        </button>
+      {/* Step nav bar */}
+      <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 320, width: '100%' }}>
+          {/* Step 1 — Map (active) */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>1</div>
+            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Map</span>
+          </div>
+
+          {/* Line 1→2 */}
+          <div style={{ flex: 1, height: 2.5, background: hasReading ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
+
+          {/* Step 2 — Read (clickable) */}
+          <button onClick={onRead} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasReading ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasReading ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: hasReading ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: hasReading ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>
+              {hasReading ? '✓' : '2'}
+            </div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: hasReading ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Read</span>
+          </button>
+
+          {/* Line 2→3 */}
+          <div style={{ flex: 1, height: 2.5, background: 'var(--line)', borderRadius: 2, marginBottom: 18 }} />
+
+          {/* Step 3 — Practice (clickable) */}
+          <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Practice</span>
+          </button>
+        </div>
       </div>
+    </div>
+  );
+}
+
+// ── Focus view helpers ────────────────────────────────────────
+
+function FocusTerms({ terms, color }: { terms: { term: string; definition: string }[]; color: string }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={{ borderRadius: 12, border: `1px solid ${color}33`, overflow: 'hidden' }}>
+      <button onClick={() => setOpen(o => !o)} style={{ width: '100%', padding: '9px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: color + '0d', border: 'none', cursor: 'pointer' }}>
+        <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color }}>📖 Key Terms</span>
+        <span style={{ fontSize: 13, color, display: 'inline-block', transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>›</span>
+      </button>
+      {open && terms.map((kt, ki) => (
+        <div key={kt.term} style={{ padding: '9px 14px', borderTop: `1px solid ${color}22`, background: ki % 2 === 0 ? 'transparent' : color + '04' }}>
+          <span style={{ fontWeight: 700, fontSize: 13, color }}>{kt.term}</span>
+          <span style={{ fontSize: 13, color: 'var(--ink-3)', marginLeft: 6 }}>— {kt.definition}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FocusChatInput({ color, streaming, onSend }: { color: string; streaming: boolean; onSend: (text: string) => void }) {
+  const [val, setVal] = useState('');
+  const submit = () => { const t = val.trim(); if (!t || streaming) return; setVal(''); onSend(t); };
+  return (
+    <div style={{ display: 'flex', gap: 8, padding: '8px 14px', borderTop: `1px solid ${color}22` }}>
+      <input
+        value={val} onChange={e => setVal(e.target.value)}
+        onKeyDown={e => e.key === 'Enter' && !e.shiftKey && submit()}
+        placeholder="Ask a question…"
+        style={{ flex: 1, padding: '7px 12px', borderRadius: 10, border: '1.5px solid var(--line)', background: 'var(--bg)', fontSize: 13, color: 'var(--ink)', outline: 'none' }}
+      />
+      <button onClick={submit} disabled={streaming || !val.trim()}
+        style={{ padding: '7px 14px', borderRadius: 10, background: val.trim() && !streaming ? color : 'var(--bg-tint)', color: val.trim() && !streaming ? 'white' : 'var(--ink-4)', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 700, transition: 'all 0.2s' }}>
+        {streaming ? '…' : '↑'}
+      </button>
     </div>
   );
 }
@@ -1148,100 +1200,155 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
     </div>
   );
 
+  // ── Focus card chat state ─────────────────────────────────────
+  const [focusChatOpen,     setFocusChatOpen]     = useState(false);
+  const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
+  const [focusChatStreaming, setFocusChatStreaming] = useState(false);
+  const focusChatBottomRef = useRef<HTMLDivElement>(null);
+
+  // Reset chat when card changes
+  useEffect(() => {
+    setFocusChatOpen(false);
+    setFocusChatMessages([]);
+  }, [safeCardIdx]);
+
+  useEffect(() => {
+    if (focusChatOpen) focusChatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [focusChatMessages, focusChatOpen]);
+
+  const handleFocusChat = async (text: string) => {
+    if (!allCards[safeCardIdx]) return;
+    const { sub, topic: ct } = allCards[safeCardIdx];
+    const cardDesc = `Subtopic: "${sub.title}"\nContent: ${sub.content}`;
+    const sys = buildChatSystemPrompt(topic, null, cardDesc, profile);
+    const userMsg: ChatMessage = { role: 'user', content: text };
+    const history = [...focusChatMessages, userMsg];
+    setFocusChatMessages([...history, { role: 'assistant', content: '' }]);
+    setFocusChatStreaming(true);
+    let out = '';
+    try {
+      await streamCardChat(history, sys, chunk => {
+        out += chunk;
+        setFocusChatMessages(prev => { const u = [...prev]; u[u.length - 1] = { role: 'assistant', content: out }; return u; });
+      });
+    } catch { setFocusChatMessages(prev => prev.slice(0, -1)); }
+    finally { setFocusChatStreaming(false); void ct; }
+  };
+
   // ── Card view (one subtopic at a time) ────────────────────────
   const cardView = (() => {
     if (allCards.length === 0) return null;
-    const { sub, key, topic, color, si } = allCards[safeCardIdx];
+    const { sub, key, color, si, topic: ct } = allCards[safeCardIdx];
     const isRead   = subStatuses[key] === 'read' || subStatuses[key] === 'learnt';
     const isLearnt = subStatuses[key] === 'learnt';
-    const termsPerSub = Math.ceil(topic.keyTerms.length / (topic.subtopics ?? []).length);
-    const subTerms = topic.keyTerms.slice(si * termsPerSub, (si + 1) * termsPerSub);
-    const [termsOpen, setTermsOpen] = useState(false); // eslint-disable-line react-hooks/rules-of-hooks
+    const termsPerSub = Math.ceil(ct.keyTerms.length / Math.max(1, (ct.subtopics ?? []).length));
+    const subTerms = ct.keyTerms.slice(si * termsPerSub, (si + 1) * termsPerSub);
 
     return (
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, gap: 12 }}>
+
         {/* Progress strip */}
-        <div style={{ marginBottom: 16 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)' }}>{safeCardIdx + 1} of {allCards.length}</span>
-            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)' }}>{progressPct}% complete</span>
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6 }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)' }}>{safeCardIdx + 1} / {allCards.length}</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)' }}>{progressPct}% complete</span>
           </div>
-          <div style={{ height: 4, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
-            <div style={{ width: `${((safeCardIdx + 1) / allCards.length) * 100}%`, height: '100%', background: `linear-gradient(90deg, ${color}, ${color}99)`, borderRadius: 999, transition: 'width 0.4s ease' }} />
+          <div style={{ height: 5, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
+            <div style={{ width: `${((safeCardIdx + 1) / allCards.length) * 100}%`, height: '100%', background: `linear-gradient(90deg, ${color}, ${color}88)`, borderRadius: 999, transition: 'width 0.4s ease' }} />
           </div>
         </div>
 
-        {/* Card */}
-        <div style={{ flex: 1, overflowY: 'auto', borderRadius: 18, border: `2px solid ${color}44`, background: 'var(--card)', display: 'flex', flexDirection: 'column' }}>
+        {/* Card — fills remaining height */}
+        <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', borderRadius: isMobile ? 16 : 20, border: `2px solid ${color}44`, background: 'var(--card)', overflow: 'hidden' }}>
+
           {/* Card header */}
-          <div style={{ padding: '16px 20px 12px', borderBottom: `1px solid ${color}22` }}>
-            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color, marginBottom: 4 }}>
-              {topic.title}
-            </div>
-            <h2 style={{ fontSize: 20, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.3, margin: 0 }}>{sub.title}</h2>
+          <div style={{ padding: isMobile ? '14px 16px 10px' : '18px 24px 14px', borderBottom: `1px solid ${color}22`, flexShrink: 0 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color, marginBottom: 5 }}>{ct.title}</div>
+            <h2 style={{ fontSize: isMobile ? 18 : 22, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.25, margin: 0 }}>{sub.title}</h2>
           </div>
 
-          {/* Card body */}
-          <div style={{ flex: 1, padding: '18px 20px', overflowY: 'auto' }}>
-            <p style={{ margin: '0 0 20px', fontSize: 16, lineHeight: 1.9, color: 'var(--ink-2)' }}>{sub.content}</p>
+          {/* Card body — scrolls internally */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '14px 16px' : '20px 24px', display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <p style={{ margin: 0, fontSize: isMobile ? 15 : 17, lineHeight: 1.85, color: 'var(--ink-2)' }}>{sub.content}</p>
 
             {/* Key terms */}
             {subTerms.length > 0 && (
-              <div style={{ borderRadius: 12, border: `1px solid ${color}33`, overflow: 'hidden' }}>
-                <button
-                  onClick={() => setTermsOpen(o => !o)}
-                  style={{ width: '100%', padding: '9px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: color + '0d', border: 'none', cursor: 'pointer' }}
-                >
-                  <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color }}>📖 Key Terms</span>
-                  <span style={{ fontSize: 11, color, transform: termsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', display: 'inline-block' }}>›</span>
-                </button>
-                {termsOpen && subTerms.map((kt, ki) => (
-                  <div key={kt.term} style={{ padding: '9px 14px', borderTop: `1px solid ${color}22`, background: ki % 2 === 0 ? 'transparent' : color + '04' }}>
-                    <span style={{ fontWeight: 700, fontSize: 13, color }}>{kt.term}</span>
-                    <span style={{ fontSize: 13, color: 'var(--ink-3)', marginLeft: 6 }}>— {kt.definition}</span>
-                  </div>
-                ))}
+              <FocusTerms terms={subTerms} color={color} />
+            )}
+
+            {/* Ask chat panel */}
+            {focusChatOpen && (
+              <div style={{ borderRadius: 14, border: `1.5px solid ${color}44`, overflow: 'hidden' }}>
+                <div style={{ padding: '8px 14px', background: color + '0d', display: 'flex', alignItems: 'center', gap: 7, borderBottom: `1px solid ${color}22` }}>
+                  <span style={{ fontSize: 14 }}>✨</span>
+                  <span style={{ fontSize: 12, fontWeight: 800, color }}>Ask about this</span>
+                </div>
+                <div style={{ maxHeight: 220, overflowY: 'auto', padding: '10px 14px', display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {focusChatMessages.length === 0 && (
+                    <div style={{ fontSize: 12, color: 'var(--ink-4)', textAlign: 'center', padding: '12px 0' }}>Ask anything about this subtopic</div>
+                  )}
+                  {focusChatMessages.map((m, mi) => (
+                    <div key={mi} style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+                      <div style={{ maxWidth: '85%', padding: '8px 12px', borderRadius: m.role === 'user' ? '12px 12px 2px 12px' : '12px 12px 12px 2px', background: m.role === 'user' ? color : 'var(--bg-tint)', color: m.role === 'user' ? 'white' : 'var(--ink-2)', fontSize: 13, lineHeight: 1.5 }}>
+                        {m.content || <span style={{ opacity: 0.5 }}>…</span>}
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={focusChatBottomRef} />
+                </div>
+                <FocusChatInput color={color} streaming={focusChatStreaming} onSend={handleFocusChat} />
               </div>
             )}
+            <div ref={focusChatBottomRef} />
           </div>
 
-          {/* Card footer: Read / Test Me / Learnt */}
-          <div style={{ padding: '12px 16px', borderTop: `1px solid ${color}22`, display: 'flex', gap: 7 }}>
-            <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'read' ? 'unread' : 'read' }))}
-              style={{ flex: 1, padding: '8px 10px', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`, background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)', color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)', transition: 'all 0.2s' }}>
-              ✓ Read
-            </button>
-            {sub.quiz && (
-              <button onClick={() => setActiveQuiz({ key, quiz: sub.quiz!, color, selected: null, revealed: false })}
-                style={{ flex: 1, padding: '8px 10px', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${color}66`, background: 'transparent', color, transition: 'all 0.2s' }}>
-                🧪 Test Me
+          {/* Card footer */}
+          <div style={{ flexShrink: 0, borderTop: `1px solid ${color}22` }}>
+            {/* Ask button row */}
+            <div style={{ padding: '8px 16px', borderBottom: `1px solid ${color}11` }}>
+              <button
+                onClick={() => setFocusChatOpen(o => !o)}
+                style={{ display: 'flex', alignItems: 'center', gap: 7, background: focusChatOpen ? color + '12' : 'none', border: `1px solid ${focusChatOpen ? color + '44' : 'transparent'}`, borderRadius: 8, cursor: 'pointer', padding: '5px 10px', fontSize: 12, fontWeight: 700, color: focusChatOpen ? color : 'var(--ink-3)', transition: 'all 0.2s' }}
+              >
+                <span style={{ fontSize: 14 }}>✨</span> Ask about this
               </button>
-            )}
-            <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'learnt' ? 'unread' : 'learnt' }))}
-              style={{ flex: 1, padding: '8px 10px', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`, background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)', color: isLearnt ? 'white' : 'var(--ink-3)', transition: 'all 0.2s' }}>
-              🧠 Learnt
-            </button>
+            </div>
+            {/* Status buttons */}
+            <div style={{ padding: '10px 16px', display: 'flex', gap: 7 }}>
+              <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'read' ? 'unread' : 'read' }))}
+                style={{ flex: 1, padding: '9px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`, background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)', color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)', transition: 'all 0.2s' }}>
+                ✓ Read
+              </button>
+              {sub.quiz && (
+                <button onClick={() => setActiveQuiz({ key, quiz: sub.quiz!, color, selected: null, revealed: false })}
+                  style={{ flex: 1, padding: '9px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${color}66`, background: 'transparent', color, transition: 'all 0.2s' }}>
+                  🧪 Test Me
+                </button>
+              )}
+              <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'learnt' ? 'unread' : 'learnt' }))}
+                style={{ flex: 1, padding: '9px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`, background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)', color: isLearnt ? 'white' : 'var(--ink-3)', transition: 'all 0.2s' }}>
+                🧠 Learnt
+              </button>
+            </div>
           </div>
         </div>
 
-        {/* Prev / Next navigation */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, gap: 10 }}>
-          <button
-            onClick={() => setCardIdx(i => Math.max(0, i - 1))}
-            disabled={safeCardIdx === 0}
-            style={{ padding: '9px 20px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === 0 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: safeCardIdx === 0 ? 'var(--ink-4)' : 'var(--ink-2)', opacity: safeCardIdx === 0 ? 0.4 : 1 }}
-          >← Prev</button>
+        {/* Prev / Next */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexShrink: 0 }}>
+          <button onClick={() => setCardIdx(i => Math.max(0, i - 1))} disabled={safeCardIdx === 0}
+            style={{ padding: '9px 22px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === 0 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: 'var(--ink-2)', opacity: safeCardIdx === 0 ? 0.35 : 1, transition: 'opacity 0.2s' }}>
+            ← Prev
+          </button>
           {/* Dot strip */}
-          <div style={{ display: 'flex', gap: 5, overflow: 'hidden', maxWidth: 160 }}>
+          <div style={{ flex: 1, display: 'flex', gap: 5, overflow: 'hidden', justifyContent: 'center' }}>
             {allCards.map((c, di) => (
-              <div key={di} onClick={() => setCardIdx(di)} style={{ width: di === safeCardIdx ? 18 : 6, height: 6, borderRadius: 3, background: subStatuses[c.key] && subStatuses[c.key] !== 'unread' ? c.color : di === safeCardIdx ? 'var(--brand)' : 'var(--line)', transition: 'all 0.25s', cursor: 'pointer', flexShrink: 0 }} />
+              <div key={di} onClick={() => setCardIdx(di)} style={{ width: di === safeCardIdx ? 20 : 7, height: 7, borderRadius: 4, flexShrink: 0, cursor: 'pointer', transition: 'all 0.25s', background: subStatuses[c.key] && subStatuses[c.key] !== 'unread' ? c.color : di === safeCardIdx ? 'var(--brand)' : 'var(--line)' }} />
             ))}
           </div>
-          <button
-            onClick={() => setCardIdx(i => Math.min(allCards.length - 1, i + 1))}
-            disabled={safeCardIdx === allCards.length - 1}
-            style={{ padding: '9px 20px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === allCards.length - 1 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: safeCardIdx === allCards.length - 1 ? 'var(--ink-4)' : 'var(--ink-2)', opacity: safeCardIdx === allCards.length - 1 ? 0.4 : 1 }}
-          >Next →</button>
+          <button onClick={() => setCardIdx(i => Math.min(allCards.length - 1, i + 1))} disabled={safeCardIdx === allCards.length - 1}
+            style={{ padding: '9px 22px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === allCards.length - 1 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: 'var(--ink-2)', opacity: safeCardIdx === allCards.length - 1 ? 0.35 : 1, transition: 'opacity 0.2s' }}>
+            Next →
+          </button>
         </div>
       </div>
     );
@@ -1529,11 +1636,18 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
         )}
       </div>
 
-      {/* Body: main + sidebar */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
-        {mainContent}
-        {showSidebar && sidebar}
-      </div>
+      {/* Body — Focus mode fills full width; List mode has sidebar */}
+      {viewMode === 'cards' ? (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, padding: isMobile ? '14px 14px 10px' : '20px 28px 14px' }}>
+          {subActionBar}
+          {cardView}
+        </div>
+      ) : (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
+          {mainContent}
+          {showSidebar && sidebar}
+        </div>
+      )}
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
