@@ -714,14 +714,6 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
   return 25;
 }
 
-function getMotivationalMessage(pct: number): { emoji: string; text: string } {
-  if (pct === 0)  return { emoji: '🚀', text: "Let's go! Take your time." };
-  if (pct < 30)   return { emoji: '⚡', text: 'Great start! Keep building.' };
-  if (pct < 60)   return { emoji: '🔥', text: "Halfway there — you're doing great!" };
-  if (pct < 90)   return { emoji: '🏁', text: 'Almost done — one more push.' };
-  return           { emoji: '🎉', text: "You've covered everything!" };
-}
-
 // ── Map view ──────────────────────────────────────────────────
 
 function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onRead, onPractice, onRegenerate }: {
@@ -1014,22 +1006,6 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
   const toggleSub = (key: string) => setExpandedSubs(prev => {
     const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
   });
-
-  const StepDot = ({ n, active, done }: { n: number; active: boolean; done: boolean }) => (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
-      <div style={{
-        width: 28, height: 28, borderRadius: '50%',
-        background: done || active ? 'var(--brand)' : 'var(--bg-tint)',
-        border: `2px solid ${done || active ? 'var(--brand)' : 'var(--line)'}`,
-        display: 'grid', placeItems: 'center',
-        fontSize: 12, fontWeight: 800,
-        color: done || active ? 'white' : 'var(--ink-4)',
-      }}>{done ? '✓' : n}</div>
-      <div style={{ fontSize: 10, fontWeight: 700, color: done || active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-        {n === 1 ? 'Map' : n === 2 ? 'Read' : 'Practice'}
-      </div>
-    </div>
-  );
 
   // ── Sidebar (desktop) ────────────────────────────────────────
   const sidebar = (
