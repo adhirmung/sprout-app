@@ -179,7 +179,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   const startReading = async (map: ContentMap) => {
     const cached = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
-    if (cached?.topics?.length) {
+    // Only use cache if it has the new subtopic format (not old paragraphs format)
+    if (cached?.topics?.length && cached.topics[0]?.subtopics?.length) {
       setDocumentReading(cached);
       setPhase('read');
       return;
@@ -190,7 +191,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       let resolvedPdf = pdfBase64;
       if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
       if (fileType === 'PDF' && !resolvedPdf) throw new Error('Could not load PDF binary. Try re-uploading the file.');
-      const reading = await generateReading(topic, content, resolvedPdf, map);
+      const wmScore = profile?.workingMemory.score ?? 60;
+      const sentenceTarget = wmScore < 40 ? 2 : wmScore < 55 ? 3 : wmScore < 72 ? 4 : 5;
+      const reading = await generateReading(topic, content, resolvedPdf, map, sentenceTarget);
       Store.set(`reading:${sourceKey}`, reading);
       setDocumentReading(reading);
       setPhase('read');
@@ -693,6 +696,32 @@ function getCognitiveTip(profile: LearnerProfile | null): string | null {
   return 'Study all topics before jumping to practice — build the full picture first.';
 }
 
+function getReadingWpm(profile: LearnerProfile | null): number {
+  if (!profile) return 220;
+  const ps = profile.processingSpeed.score;
+  if (ps < 35) return 150;
+  if (ps < 55) return 190;
+  if (ps < 70) return 220;
+  return 265;
+}
+
+function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
+  if (!profile) return 15;
+  const sa = profile.sustainedAttention.score;
+  if (sa < 35) return 8;
+  if (sa < 55) return 12;
+  if (sa < 70) return 18;
+  return 25;
+}
+
+function getMotivationalMessage(pct: number): { emoji: string; text: string } {
+  if (pct === 0)  return { emoji: '🚀', text: "Let's go! Take your time." };
+  if (pct < 30)   return { emoji: '⚡', text: 'Great start! Keep building.' };
+  if (pct < 60)   return { emoji: '🔥', text: "Halfway there — you're doing great!" };
+  if (pct < 90)   return { emoji: '🏁', text: 'Almost done — one more push.' };
+  return           { emoji: '🎉', text: "You've covered everything!" };
+}
+
 // ── Map view ──────────────────────────────────────────────────
 
 function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onRead, onPractice, onRegenerate }: {
@@ -922,16 +951,60 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
   onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate: () => void;
 }) {
+  const [expandedSubs,  setExpandedSubs]  = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [expandedTerms, setExpandedTerms] = useState<Set<string>>(new Set());
-  const [activeId, setActiveId]           = useState(documentReading.topics[0]?.topicId ?? '');
-  const isMobile  = useIsMobile();
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const cognitiveTip = getCognitiveTip(profile);
+  const [seenTopics,    setSeenTopics]    = useState<Set<string>>(new Set());
+  const [activeId,      setActiveId]      = useState(documentReading.topics[0]?.topicId ?? '');
+  const [elapsedSec,    setElapsedSec]    = useState(0);
+  const [breakDismissed, setBreakDismissed] = useState(false);
+
+  const isMobile    = useIsMobile();
+  const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 820);
+  const scrollRef   = useRef<HTMLDivElement>(null);
+  const startRef    = useRef(Date.now());
 
   useEffect(() => {
+    const fn = () => setShowSidebar(window.innerWidth >= 820);
+    window.addEventListener('resize', fn);
+    return () => window.removeEventListener('resize', fn);
+  }, []);
+
+  const wpm            = getReadingWpm(profile);
+  const breakMinutes   = getBreakIntervalMinutes(profile);
+  const cognitiveTip   = getCognitiveTip(profile);
+
+  // Count total words across all subtopic content
+  const totalWords = documentReading.topics.reduce((sum, t) =>
+    sum + (t.subtopics ?? []).reduce((s, sub) => s + sub.content.split(/\s+/).length, 0), 0);
+  const totalReadMinutes = Math.max(1, Math.ceil(totalWords / wpm));
+
+  // Progress based on seen topics
+  const progressPct = documentReading.topics.length === 0 ? 0
+    : Math.round((seenTopics.size / documentReading.topics.length) * 100);
+  const wordsRead   = Math.round((progressPct / 100) * totalWords);
+  const remainingMinutes = Math.max(0, Math.ceil((totalWords - wordsRead) / wpm));
+  const motivational = getMotivationalMessage(progressPct);
+
+  // Elapsed time ticker (every 30s)
+  useEffect(() => {
+    const id = setInterval(() => setElapsedSec(Math.floor((Date.now() - startRef.current) / 1000)), 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const elapsedMinutes  = Math.floor(elapsedSec / 60);
+  const showBreak       = elapsedMinutes >= breakMinutes && !breakDismissed;
+
+  // IntersectionObserver: track active + seen topics
+  useEffect(() => {
     const obs = new IntersectionObserver(
-      entries => entries.forEach(e => { if (e.isIntersecting) setActiveId(e.target.id.replace('rt-', '')); }),
-      { threshold: 0.35, root: scrollRef.current },
+      entries => entries.forEach(e => {
+        const id = e.target.id.replace('rt-', '');
+        if (e.isIntersecting) {
+          setActiveId(id);
+          setSeenTopics(prev => new Set([...prev, id]));
+        }
+      }),
+      { threshold: 0.25, root: scrollRef.current },
     );
     documentReading.topics.forEach(t => {
       const el = document.getElementById(`rt-${t.topicId}`);
@@ -945,24 +1018,248 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
     setActiveId(topicId);
   };
 
+  const toggleSub   = (key: string) => setExpandedSubs(prev => {
+    const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
+  });
   const toggleTerms = (id: string) => setExpandedTerms(prev => {
-    const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
-    return next;
+    const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n;
   });
 
   const StepDot = ({ n, active, done }: { n: number; active: boolean; done: boolean }) => (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
       <div style={{
-        width: 32, height: 32, borderRadius: '50%',
-        background: done ? 'var(--brand)' : active ? 'var(--brand)' : 'var(--bg-tint)',
-        border: `2px solid ${active || done ? 'var(--brand)' : 'var(--line)'}`,
+        width: 28, height: 28, borderRadius: '50%',
+        background: done || active ? 'var(--brand)' : 'var(--bg-tint)',
+        border: `2px solid ${done || active ? 'var(--brand)' : 'var(--line)'}`,
         display: 'grid', placeItems: 'center',
-        fontSize: 13, fontWeight: 800,
-        color: active || done ? 'white' : 'var(--ink-4)',
+        fontSize: 12, fontWeight: 800,
+        color: done || active ? 'white' : 'var(--ink-4)',
       }}>{done ? '✓' : n}</div>
-      <div style={{ fontSize: 10, fontWeight: 700, color: active ? 'var(--brand)' : done ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: done || active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
         {n === 1 ? 'Map' : n === 2 ? 'Read' : 'Practice'}
+      </div>
+    </div>
+  );
+
+  // ── Sidebar (desktop) ────────────────────────────────────────
+  const sidebar = (
+    <div style={{
+      width: 220, flexShrink: 0,
+      display: 'flex', flexDirection: 'column', gap: 0,
+      borderLeft: '2px solid var(--line)', background: 'var(--card)',
+      overflowY: 'auto', padding: '20px 14px',
+      height: '100%',
+    }}>
+      {/* Progress */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-3)' }}>Progress</span>
+          <span style={{ fontSize: 20, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)' }}>{progressPct}%</span>
+        </div>
+        <div style={{ height: 6, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
+          <div style={{ width: `${progressPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand), #7ed5a0)', transition: 'width 0.6s ease' }} />
+        </div>
+      </div>
+
+      {/* Time */}
+      <div style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--bg-tint)', marginBottom: 16 }}>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 5 }}>Reading time</div>
+        <div style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 600 }}>
+          {remainingMinutes > 0 ? `~${remainingMinutes} min left` : 'Done!'}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 3 }}>
+          ~{totalReadMinutes} min total
+        </div>
+      </div>
+
+      {/* Topic checklist */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-3)', marginBottom: 8 }}>Topics</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {documentReading.topics.map((t, i) => {
+            const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
+            const isSeen  = seenTopics.has(t.topicId);
+            const isActive = activeId === t.topicId;
+            return (
+              <button key={t.topicId} onClick={() => scrollTo(t.topicId)} style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', borderRadius: 8,
+                background: isActive ? color + '15' : 'none',
+                border: isActive ? `1px solid ${color}44` : '1px solid transparent',
+                cursor: 'pointer', textAlign: 'left',
+              }}>
+                <div style={{ width: 18, height: 18, borderRadius: '50%', background: isSeen ? color : 'var(--bg-tint)', border: `1.5px solid ${isSeen ? color : 'var(--line)'}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 9, color: isSeen ? 'white' : 'var(--ink-4)', fontWeight: 800 }}>
+                  {isSeen ? '✓' : i + 1}
+                </div>
+                <span style={{ fontSize: 12, fontWeight: isActive ? 700 : 500, color: isActive ? color : isSeen ? 'var(--ink-2)' : 'var(--ink-3)', lineHeight: 1.3 }}>
+                  {t.title.split(' ').slice(0, 4).join(' ')}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Motivational message */}
+      <div style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 16 }}>
+        <div style={{ fontSize: 18, marginBottom: 4 }}>{motivational.emoji}</div>
+        <div style={{ fontSize: 12, color: 'var(--brand-2)', lineHeight: 1.5, fontWeight: 600 }}>{motivational.text}</div>
+      </div>
+
+      {/* Break reminder */}
+      {showBreak ? (
+        <div style={{ padding: '10px 12px', borderRadius: 10, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.5)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
+            <span style={{ fontSize: 14 }}>⏸</span>
+            <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 10, color: 'var(--ink-4)', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕</button>
+          </div>
+          <div style={{ fontSize: 11, fontWeight: 800, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 3 }}>Take a break</div>
+          <div style={{ fontSize: 12, color: '#78350F', lineHeight: 1.5 }}>You've been reading for {elapsedMinutes} min. A short break will help retention.</div>
+        </div>
+      ) : (
+        <div style={{ padding: '10px 12px', borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 3 }}>⏱ Next break</div>
+          <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>After {breakMinutes} min of reading</div>
+          {cognitiveTip && <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 5, lineHeight: 1.4, fontStyle: 'italic' }}>{cognitiveTip}</div>}
+        </div>
+      )}
+    </div>
+  );
+
+  // ── Main content ─────────────────────────────────────────────
+  const mainContent = (
+    <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
+      <div style={{ maxWidth: 680, margin: '0 auto', padding: isMobile ? '20px 16px 32px' : '24px 28px 40px' }}>
+
+        {/* Step progress */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0, marginBottom: 18 }}>
+          <StepDot n={1} active={false} done={true} />
+          <div style={{ width: isMobile ? 36 : 56, height: 2, background: 'var(--brand)', margin: '0 4px', marginBottom: 18 }} />
+          <StepDot n={2} active={true} done={false} />
+          <div style={{ width: isMobile ? 36 : 56, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 18 }} />
+          <StepDot n={3} active={false} done={false} />
+        </div>
+
+        {/* Mobile progress bar */}
+        {isMobile && (
+          <div style={{ marginBottom: 16, padding: '10px 14px', borderRadius: 12, background: 'var(--card)', border: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ height: 6, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
+                <div style={{ width: `${progressPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand), #7ed5a0)', transition: 'width 0.6s' }} />
+              </div>
+            </div>
+            <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>{progressPct}%</span>
+            <span style={{ fontSize: 12, color: 'var(--ink-3)', whiteSpace: 'nowrap' }}>~{remainingMinutes}m left</span>
+          </div>
+        )}
+
+        {/* Mobile break reminder */}
+        {isMobile && showBreak && (
+          <div style={{ marginBottom: 14, padding: '10px 14px', borderRadius: 12, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.5)', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <span style={{ fontSize: 16 }}>⏸</span>
+            <div style={{ flex: 1, fontSize: 12, color: '#78350F' }}>You've been reading {elapsedMinutes} min. Consider a short break.</div>
+            <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 12, color: 'var(--ink-4)', background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
+          </div>
+        )}
+
+        {/* Topic pills nav */}
+        <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
+          {documentReading.topics.map((t, i) => {
+            const color    = TOPIC_COLORS[i % TOPIC_COLORS.length];
+            const isActive = activeId === t.topicId;
+            const isSeen   = seenTopics.has(t.topicId);
+            return (
+              <button key={t.topicId} onClick={() => scrollTo(t.topicId)} style={{
+                whiteSpace: 'nowrap', padding: '5px 11px', borderRadius: 999,
+                background: isActive ? color : isSeen ? color + '18' : 'var(--bg-tint)',
+                color: isActive ? 'white' : isSeen ? color : 'var(--ink-3)',
+                border: `1.5px solid ${isActive ? color : isSeen ? color + '55' : 'var(--line)'}`,
+                cursor: 'pointer', fontSize: 12, fontWeight: 700, transition: 'all 0.2s',
+              }}>
+                {isSeen && !isActive ? '✓ ' : ''}{i + 1} · {t.title.split(' ').slice(0, 3).join(' ')}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Topic sections */}
+        {documentReading.topics.map((t, i) => {
+          const color     = TOPIC_COLORS[i % TOPIC_COLORS.length];
+          const termsOpen = expandedTerms.has(t.topicId);
+          const subs      = t.subtopics ?? [];
+          return (
+            <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12 }}>
+              {/* Topic heading */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>
+                  {i + 1}
+                </div>
+                <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
+              </div>
+              <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
+
+              {/* Subtopic accordions */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 16 }}>
+                {subs.map((sub, si) => {
+                  const key    = `${t.topicId}-${si}`;
+                  const isOpen = expandedSubs.has(key);
+                  return (
+                    <div key={key} style={{ borderRadius: 12, border: `1.5px solid ${isOpen ? color + '55' : 'var(--line)'}`, overflow: 'hidden', transition: 'border-color 0.2s' }}>
+                      <button
+                        onClick={() => toggleSub(key)}
+                        style={{ width: '100%', padding: '12px 14px', display: 'flex', alignItems: 'center', gap: 10, background: isOpen ? color + '08' : 'var(--card)', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                      >
+                        <div style={{ width: 20, height: 20, borderRadius: 6, background: isOpen ? color : color + '20', border: `1.5px solid ${color}`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, fontWeight: 800, color: isOpen ? 'white' : color, transition: 'all 0.2s' }}>
+                          {si + 1}
+                        </div>
+                        <span style={{ flex: 1, fontWeight: 700, fontSize: 14, color: 'var(--ink)' }}>{sub.title}</span>
+                        <div style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}>
+                          <Icon name="chevron-right" size={15} stroke={isOpen ? color : 'var(--ink-4)'} />
+                        </div>
+                      </button>
+                      {isOpen && (
+                        <div style={{ padding: '4px 14px 14px 44px', borderTop: `1px solid ${color}22` }}>
+                          <p style={{ margin: 0, fontSize: 15, lineHeight: 1.85, color: 'var(--ink-2)' }}>{sub.content}</p>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Key terms (collapsible) */}
+              <div style={{ borderRadius: 12, border: '1px solid var(--line)', overflow: 'hidden', marginBottom: 14 }}>
+                <button
+                  onClick={() => toggleTerms(t.topicId)}
+                  style={{ width: '100%', padding: '10px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: color + '0d', border: 'none', cursor: 'pointer' }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color }}>Key Terms · {t.keyTerms.length}</span>
+                  <div style={{ transform: termsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
+                    <Icon name="chevron-right" size={13} stroke={color} />
+                  </div>
+                </button>
+                {termsOpen && (
+                  <div>
+                    {t.keyTerms.map((kt, ki) => (
+                      <div key={kt.term} style={{ padding: '11px 14px', borderTop: '1px solid var(--line)', background: ki % 2 === 0 ? 'var(--card)' : 'var(--bg)' }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color, marginBottom: 3 }}>{kt.term}</div>
+                        <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.65 }}>{kt.definition}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Why it matters */}
+              <div style={{ padding: '12px 14px', borderRadius: 12, background: color + '0d', border: `1px solid ${color}33`, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <span style={{ fontSize: 15, flexShrink: 0 }}>💡</span>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color, marginBottom: 4 }}>Why it matters</div>
+                  <div style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7 }}>{t.whyItMatters}</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -985,130 +1282,24 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
         )}
       </div>
 
-      {/* Scrollable content */}
-      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
-        <div style={{ maxWidth: 720, margin: '0 auto', padding: isMobile ? '20px 16px' : '24px 32px' }}>
-
-          {/* Step progress */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0, marginBottom: 20 }}>
-            <StepDot n={1} active={false} done={true} />
-            <div style={{ width: isMobile ? 40 : 64, height: 2, background: 'var(--brand)', margin: '0 4px', marginBottom: 20 }} />
-            <StepDot n={2} active={true} done={false} />
-            <div style={{ width: isMobile ? 40 : 64, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
-            <StepDot n={3} active={false} done={false} />
-          </div>
-
-          {/* Understanding meter */}
-          <div style={{ padding: '14px 18px', borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 600 }}>After reading all topics</div>
-              <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)' }}>65%</div>
-            </div>
-            <div style={{ height: 8, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden', marginBottom: 6 }}>
-              <div style={{ width: '65%', height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand) 0%, #7ed5a0 100%)' }} />
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>content understanding · complete Step 3 for 90%+</div>
-          </div>
-
-          {/* Cognitive tip */}
-          {cognitiveTip && (
-            <div style={{ padding: '12px 16px', borderRadius: 12, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.4)', marginBottom: 20, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 16, flexShrink: 0 }}>🧠</span>
-              <div>
-                <div style={{ fontSize: 10, fontWeight: 800, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>Your cognitive profile suggests</div>
-                <div style={{ fontSize: 13, color: '#78350F', lineHeight: 1.6 }}>{cognitiveTip}</div>
-              </div>
-            </div>
-          )}
-
-          {/* Topic pills nav */}
-          <div style={{ display: 'flex', gap: 8, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
-            {documentReading.topics.map((t, i) => {
-              const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
-              const isActive = activeId === t.topicId;
-              return (
-                <button key={t.topicId} onClick={() => scrollTo(t.topicId)} style={{
-                  whiteSpace: 'nowrap', padding: '6px 12px', borderRadius: 999,
-                  background: isActive ? color : 'var(--bg-tint)',
-                  color: isActive ? 'white' : 'var(--ink-3)',
-                  border: `1.5px solid ${isActive ? color : 'var(--line)'}`,
-                  cursor: 'pointer', fontSize: 12, fontWeight: 700, transition: 'all 0.2s',
-                }}>
-                  {i + 1} · {t.title.split(' ').slice(0, 3).join(' ')}
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Topic sections */}
-          {documentReading.topics.map((t, i) => {
-            const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
-            const termsOpen = expandedTerms.has(t.topicId);
-            return (
-              <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 48, scrollMarginTop: 16 }}>
-                {/* Topic heading */}
-                <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14 }}>
-                  <div style={{ width: 30, height: 30, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 13, fontWeight: 800, color: 'white', flexShrink: 0 }}>
-                    {i + 1}
-                  </div>
-                  <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}88, transparent)`, borderRadius: 2 }} />
-                </div>
-                <h2 style={{ fontSize: 20, fontWeight: 800, color, marginBottom: 16, lineHeight: 1.3 }}>{t.title}</h2>
-
-                {/* Paragraphs */}
-                {t.paragraphs.map((p, pi) => (
-                  <p key={pi} style={{ fontSize: 16, lineHeight: 1.85, color: 'var(--ink-2)', marginBottom: 16 }}>{p}</p>
-                ))}
-
-                {/* Key terms (collapsible) */}
-                <div style={{ borderRadius: 12, border: '1px solid var(--line)', overflow: 'hidden', marginBottom: 16 }}>
-                  <button
-                    onClick={() => toggleTerms(t.topicId)}
-                    style={{ width: '100%', padding: '11px 16px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: color + '0d', border: 'none', cursor: 'pointer' }}
-                  >
-                    <span style={{ fontSize: 12, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color }}>
-                      Key Terms · {t.keyTerms.length}
-                    </span>
-                    <div style={{ transform: termsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
-                      <Icon name="chevron-right" size={14} stroke={color} />
-                    </div>
-                  </button>
-                  {termsOpen && (
-                    <div>
-                      {t.keyTerms.map((kt, ki) => (
-                        <div key={kt.term} style={{ padding: '12px 16px', borderTop: '1px solid var(--line)', background: ki % 2 === 0 ? 'var(--card)' : 'var(--bg)' }}>
-                          <div style={{ fontWeight: 700, fontSize: 14, color, marginBottom: 4 }}>{kt.term}</div>
-                          <div style={{ fontSize: 14, color: 'var(--ink-3)', lineHeight: 1.65 }}>{kt.definition}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Why it matters */}
-                <div style={{ padding: '14px 16px', borderRadius: 12, background: color + '0d', border: `1px solid ${color}33`, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                  <span style={{ fontSize: 16, flexShrink: 0 }}>💡</span>
-                  <div>
-                    <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color, marginBottom: 5 }}>Why it matters</div>
-                    <div style={{ fontSize: 15, color: 'var(--ink-2)', lineHeight: 1.7 }}>{t.whyItMatters}</div>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+      {/* Body: main + sidebar */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
+        {mainContent}
+        {showSidebar && sidebar}
       </div>
 
-      {/* Bottom CTA */}
-      <div style={{ flexShrink: 0, padding: '10px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 8 }}>
-        <button onClick={onBack} style={{ padding: '8px 12px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
-          <Icon name="arrow-left" size={13} stroke="var(--ink-3)" /> Map
-        </button>
-        <button onClick={() => onPractice('activities')} style={{ flex: 1, padding: '9px 14px', borderRadius: 10, background: 'var(--brand)', color: 'white', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-          Step 3: Practice <Icon name="chevron-right" size={14} stroke="white" />
-        </button>
-        <button onClick={() => onPractice('flashcards')} style={{ padding: '8px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>🃏</button>
-        <button onClick={() => onPractice('quiz')} style={{ padding: '8px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>🧠</button>
+      {/* Floating bottom bar */}
+      <div style={{ flexShrink: 0, padding: '8px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 480, width: '100%' }}>
+          <button onClick={onBack} style={{ padding: '7px 12px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
+            <Icon name="arrow-left" size={13} stroke="var(--ink-3)" /> Map
+          </button>
+          <button onClick={() => onPractice('activities')} style={{ flex: 1, padding: '8px 14px', borderRadius: 10, background: 'var(--brand)', color: 'white', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
+            Step 3: Practice <Icon name="chevron-right" size={14} stroke="white" />
+          </button>
+          <button onClick={() => onPractice('flashcards')} style={{ padding: '7px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>🃏</button>
+          <button onClick={() => onPractice('quiz')} style={{ padding: '7px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>🧠</button>
+        </div>
       </div>
     </div>
   );

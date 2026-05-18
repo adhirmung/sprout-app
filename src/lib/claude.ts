@@ -114,11 +114,11 @@ export interface TopicKeyTerm {
 }
 
 export interface TopicReading {
-  topicId:       string;
-  title:         string;
-  paragraphs:    string[];
-  keyTerms:      TopicKeyTerm[];
-  whyItMatters:  string;
+  topicId:      string;
+  title:        string;
+  subtopics:    { title: string; content: string }[];
+  keyTerms:     TopicKeyTerm[];
+  whyItMatters: string;
 }
 
 export interface DocumentReading {
@@ -611,35 +611,44 @@ Return ONLY valid JSON — no markdown fences:
 // ── Document reading generator ────────────────────────────────
 
 export async function generateReading(
-  topic:       string,
-  contentText: string | null,
-  pdfBase64:   string | null,
-  contentMap:  ContentMap,
+  topic:          string,
+  contentText:    string | null,
+  pdfBase64:      string | null,
+  contentMap:     ContentMap,
+  sentenceTarget: number = 3,
 ): Promise<DocumentReading> {
   const client = getClient();
   const hasPdf = !!pdfBase64;
 
   const mapOutline = contentMap.topics.map(t =>
-    `- id: "${t.id}" | "${t.title}": ${t.subtopics.map(s => s.title).join(', ')}`
+    `- topicId: "${t.id}" | "${t.title}"\n${t.subtopics.map(s => `    • "${s.title}"`).join('\n')}`
   ).join('\n');
 
-  const prompt = `You are an expert educational content writer. Write a detailed study guide for each topic listed below.
+  const sentenceInstruction = sentenceTarget <= 2
+    ? '2 concise sentences — one main idea, one supporting detail'
+    : sentenceTarget <= 3
+      ? '3 sentences — clear and focused, one key fact per sentence'
+      : sentenceTarget <= 4
+        ? '4 sentences — include elaboration and a concrete example'
+        : '4–5 sentences — include nuance, examples, and connections to other topics';
+
+  const prompt = `You are an expert educational content writer. Write a structured study guide for each topic and subtopic listed below.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-TOPICS TO COVER (use these exact topicId values):
+TOPICS AND SUBTOPICS TO COVER (use these exact topicId values):
 ${mapOutline}
 
 For EACH topic write:
-1. paragraphs: 2–3 paragraphs (4–6 sentences each). Each paragraph covers a distinct subtopic or aspect. Use specific facts, figures, and named concepts from the source. Grade 9–10 reading level — clear and precise.
+1. subtopics: for each subtopic listed above, write EXACTLY ${sentenceInstruction}. Use specific facts, figures, and named concepts from the source. Grade 9–10 reading level.
 2. keyTerms: 3–5 important terms from this topic with concise, accurate definitions (1–2 sentences each).
-3. whyItMatters: one sentence explaining why this topic is significant in the broader context.
+3. whyItMatters: one sentence explaining why this topic matters in the broader context.
 
 Rules:
 - Ground everything in the source — no invented facts
-- Key terms must appear naturally in the paragraphs
-- Cover every subtopic listed for each topic across the paragraphs
+- Key terms must appear naturally in the subtopic content
+- The subtopic titles in your output must match the titles listed above exactly
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -647,7 +656,10 @@ Return ONLY valid JSON — no markdown fences:
     {
       "topicId": "t1",
       "title": "...",
-      "paragraphs": ["paragraph 1...", "paragraph 2...", "paragraph 3..."],
+      "subtopics": [
+        { "title": "Subtopic name from outline", "content": "..." },
+        { "title": "Another subtopic name", "content": "..." }
+      ],
       "keyTerms": [
         { "term": "...", "definition": "..." },
         { "term": "...", "definition": "..." },
