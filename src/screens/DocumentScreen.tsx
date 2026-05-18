@@ -951,7 +951,9 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
   const [elapsedSec,        setElapsedSec]        = useState(0);
   const [breakDismissed,    setBreakDismissed]    = useState(false);
   type ActiveQuiz = { key: string; quiz: import('../lib/claude').SubtopicQuiz; color: string; selected: number | null; revealed: boolean } | null;
-  const [activeQuiz, setActiveQuiz] = useState<ActiveQuiz>(null);
+  const [activeQuiz,  setActiveQuiz]  = useState<ActiveQuiz>(null);
+  const [viewMode,    setViewMode]    = useState<'list' | 'cards'>('list');
+  const [cardIdx,     setCardIdx]     = useState(0);
 
   const isMobile    = useIsMobile();
   const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 820);
@@ -979,6 +981,15 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
   const totalSubs   = allSubKeys.length;
   const doneCount   = allSubKeys.filter(k => subStatuses[k] && subStatuses[k] !== 'unread').length;
   const progressPct = totalSubs === 0 ? 0 : Math.round((doneCount / totalSubs) * 100);
+
+  // Flattened subtopics for card view
+  const allCards = documentReading.topics.flatMap((t, ti) =>
+    (t.subtopics ?? []).map((sub, si) => ({
+      sub, key: `${t.topicId}-${si}`, topic: t,
+      color: TOPIC_COLORS[ti % TOPIC_COLORS.length], si,
+    }))
+  );
+  const safeCardIdx = Math.min(cardIdx, Math.max(0, allCards.length - 1));
 
   // Celebrate milestone nodes as they're reached
   useEffect(() => {
@@ -1108,19 +1119,142 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
     </div>
   );
 
+  // ── Sub-action bar shared by both views ──────────────────────
+  const subActionBar = (
+    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
+      {/* View toggle */}
+      <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
+        {(['list', 'cards'] as const).map(m => (
+          <button key={m} onClick={() => setViewMode(m)} style={{
+            padding: '5px 14px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
+            background: viewMode === m ? 'var(--card)' : 'transparent',
+            color: viewMode === m ? 'var(--ink)' : 'var(--ink-4)',
+            boxShadow: viewMode === m ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+            transition: 'all 0.18s',
+          }}>
+            {m === 'list' ? '≡ List' : '▣ Focus'}
+          </button>
+        ))}
+      </div>
+
+      {/* Break reminder chip (mobile + desktop when no sidebar) */}
+      {showBreak && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', borderRadius: 20, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.5)' }}>
+          <span style={{ fontSize: 13 }}>⏸</span>
+          <span style={{ fontSize: 11, color: '#78350F', fontWeight: 600 }}>Take a break</span>
+          <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 11, color: '#78350F', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕</button>
+        </div>
+      )}
+    </div>
+  );
+
+  // ── Card view (one subtopic at a time) ────────────────────────
+  const cardView = (() => {
+    if (allCards.length === 0) return null;
+    const { sub, key, topic, color, si } = allCards[safeCardIdx];
+    const isRead   = subStatuses[key] === 'read' || subStatuses[key] === 'learnt';
+    const isLearnt = subStatuses[key] === 'learnt';
+    const termsPerSub = Math.ceil(topic.keyTerms.length / (topic.subtopics ?? []).length);
+    const subTerms = topic.keyTerms.slice(si * termsPerSub, (si + 1) * termsPerSub);
+    const [termsOpen, setTermsOpen] = useState(false); // eslint-disable-line react-hooks/rules-of-hooks
+
+    return (
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+        {/* Progress strip */}
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 5 }}>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)' }}>{safeCardIdx + 1} of {allCards.length}</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)' }}>{progressPct}% complete</span>
+          </div>
+          <div style={{ height: 4, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden' }}>
+            <div style={{ width: `${((safeCardIdx + 1) / allCards.length) * 100}%`, height: '100%', background: `linear-gradient(90deg, ${color}, ${color}99)`, borderRadius: 999, transition: 'width 0.4s ease' }} />
+          </div>
+        </div>
+
+        {/* Card */}
+        <div style={{ flex: 1, overflowY: 'auto', borderRadius: 18, border: `2px solid ${color}44`, background: 'var(--card)', display: 'flex', flexDirection: 'column' }}>
+          {/* Card header */}
+          <div style={{ padding: '16px 20px 12px', borderBottom: `1px solid ${color}22` }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color, marginBottom: 4 }}>
+              {topic.title}
+            </div>
+            <h2 style={{ fontSize: 20, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.3, margin: 0 }}>{sub.title}</h2>
+          </div>
+
+          {/* Card body */}
+          <div style={{ flex: 1, padding: '18px 20px', overflowY: 'auto' }}>
+            <p style={{ margin: '0 0 20px', fontSize: 16, lineHeight: 1.9, color: 'var(--ink-2)' }}>{sub.content}</p>
+
+            {/* Key terms */}
+            {subTerms.length > 0 && (
+              <div style={{ borderRadius: 12, border: `1px solid ${color}33`, overflow: 'hidden' }}>
+                <button
+                  onClick={() => setTermsOpen(o => !o)}
+                  style={{ width: '100%', padding: '9px 14px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', background: color + '0d', border: 'none', cursor: 'pointer' }}
+                >
+                  <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color }}>📖 Key Terms</span>
+                  <span style={{ fontSize: 11, color, transform: termsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', display: 'inline-block' }}>›</span>
+                </button>
+                {termsOpen && subTerms.map((kt, ki) => (
+                  <div key={kt.term} style={{ padding: '9px 14px', borderTop: `1px solid ${color}22`, background: ki % 2 === 0 ? 'transparent' : color + '04' }}>
+                    <span style={{ fontWeight: 700, fontSize: 13, color }}>{kt.term}</span>
+                    <span style={{ fontSize: 13, color: 'var(--ink-3)', marginLeft: 6 }}>— {kt.definition}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Card footer: Read / Test Me / Learnt */}
+          <div style={{ padding: '12px 16px', borderTop: `1px solid ${color}22`, display: 'flex', gap: 7 }}>
+            <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'read' ? 'unread' : 'read' }))}
+              style={{ flex: 1, padding: '8px 10px', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`, background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)', color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)', transition: 'all 0.2s' }}>
+              ✓ Read
+            </button>
+            {sub.quiz && (
+              <button onClick={() => setActiveQuiz({ key, quiz: sub.quiz!, color, selected: null, revealed: false })}
+                style={{ flex: 1, padding: '8px 10px', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${color}66`, background: 'transparent', color, transition: 'all 0.2s' }}>
+                🧪 Test Me
+              </button>
+            )}
+            <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'learnt' ? 'unread' : 'learnt' }))}
+              style={{ flex: 1, padding: '8px 10px', borderRadius: 9, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`, background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)', color: isLearnt ? 'white' : 'var(--ink-3)', transition: 'all 0.2s' }}>
+              🧠 Learnt
+            </button>
+          </div>
+        </div>
+
+        {/* Prev / Next navigation */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 14, gap: 10 }}>
+          <button
+            onClick={() => setCardIdx(i => Math.max(0, i - 1))}
+            disabled={safeCardIdx === 0}
+            style={{ padding: '9px 20px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === 0 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: safeCardIdx === 0 ? 'var(--ink-4)' : 'var(--ink-2)', opacity: safeCardIdx === 0 ? 0.4 : 1 }}
+          >← Prev</button>
+          {/* Dot strip */}
+          <div style={{ display: 'flex', gap: 5, overflow: 'hidden', maxWidth: 160 }}>
+            {allCards.map((c, di) => (
+              <div key={di} onClick={() => setCardIdx(di)} style={{ width: di === safeCardIdx ? 18 : 6, height: 6, borderRadius: 3, background: subStatuses[c.key] && subStatuses[c.key] !== 'unread' ? c.color : di === safeCardIdx ? 'var(--brand)' : 'var(--line)', transition: 'all 0.25s', cursor: 'pointer', flexShrink: 0 }} />
+            ))}
+          </div>
+          <button
+            onClick={() => setCardIdx(i => Math.min(allCards.length - 1, i + 1))}
+            disabled={safeCardIdx === allCards.length - 1}
+            style={{ padding: '9px 20px', borderRadius: 12, fontSize: 13, fontWeight: 700, cursor: safeCardIdx === allCards.length - 1 ? 'default' : 'pointer', border: '1.5px solid var(--line)', background: 'var(--card)', color: safeCardIdx === allCards.length - 1 ? 'var(--ink-4)' : 'var(--ink-2)', opacity: safeCardIdx === allCards.length - 1 ? 0.4 : 1 }}
+          >Next →</button>
+        </div>
+      </div>
+    );
+  })();
+
   // ── Main content ─────────────────────────────────────────────
   const mainContent = (
     <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto' }}>
       <div style={{ maxWidth: 680, margin: '0 auto', padding: isMobile ? '20px 16px 32px' : '24px 28px 40px' }}>
 
-        {/* Mobile break reminder */}
-        {isMobile && showBreak && (
-          <div style={{ marginBottom: 14, padding: '10px 14px', borderRadius: 12, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.5)', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <span style={{ fontSize: 16 }}>⏸</span>
-            <div style={{ flex: 1, fontSize: 12, color: '#78350F' }}>You've been reading {elapsedMinutes} min. Consider a short break.</div>
-            <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 12, color: 'var(--ink-4)', background: 'none', border: 'none', cursor: 'pointer' }}>✕</button>
-          </div>
-        )}
+        {subActionBar}
+
+        {viewMode === 'cards' ? cardView : (<>
 
         {/* Topic pills nav */}
         <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
@@ -1269,6 +1403,7 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
             </div>
           );
         })}
+        </>)}
       </div>
     </div>
   );
@@ -1400,17 +1535,32 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
         {showSidebar && sidebar}
       </div>
 
-      {/* Floating bottom bar */}
-      <div style={{ flexShrink: 0, padding: '8px 16px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, maxWidth: 480, width: '100%' }}>
-          <button onClick={onBack} style={{ padding: '7px 12px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 12, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 5, whiteSpace: 'nowrap' }}>
-            <Icon name="arrow-left" size={13} stroke="var(--ink-3)" /> Map
+      {/* Step nav bar */}
+      <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 320, width: '100%' }}>
+          {/* Step 1 — Map (done, clickable) */}
+          <button onClick={onBack} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', display: 'grid', placeItems: 'center', fontSize: 14, color: 'white', fontWeight: 800, boxShadow: '0 2px 8px rgba(47,158,94,0.3)' }}>✓</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)', letterSpacing: '0.02em' }}>Map</span>
           </button>
-          <button onClick={() => onPractice('activities')} style={{ flex: 1, padding: '8px 14px', borderRadius: 10, background: 'var(--brand)', color: 'white', border: 'none', cursor: 'pointer', fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}>
-            Step 3: Practice <Icon name="chevron-right" size={14} stroke="white" />
+
+          {/* Line 1→2 */}
+          <div style={{ flex: 1, height: 2.5, background: 'var(--brand)', borderRadius: 2, marginBottom: 18 }} />
+
+          {/* Step 2 — Read (active, not clickable) */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>2</div>
+            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Read</span>
+          </div>
+
+          {/* Line 2→3 (fills green when 100% done) */}
+          <div style={{ flex: 1, height: 2.5, background: progressPct >= 100 ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
+
+          {/* Step 3 — Practice (upcoming, clickable) */}
+          <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: progressPct >= 100 ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${progressPct >= 100 ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: progressPct >= 100 ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: progressPct >= 100 ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>3</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: progressPct >= 100 ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Practice</span>
           </button>
-          <button onClick={() => onPractice('flashcards')} style={{ padding: '7px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>🃏</button>
-          <button onClick={() => onPractice('quiz')} style={{ padding: '7px 10px', borderRadius: 10, background: 'var(--bg-tint)', color: 'var(--ink-2)', border: '1px solid var(--line)', cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>🧠</button>
         </div>
       </div>
     </div>
