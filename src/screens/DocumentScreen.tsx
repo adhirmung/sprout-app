@@ -10,11 +10,12 @@ import {
   generateFeed,
   generatePracticeQuiz,
   generateReading,
+  generateVisualComponents,
   hasApiKey,
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
-import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, WrittenEvaluation } from '../lib/claude';
+import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
 import { dbLoadGeneratedCards, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -43,7 +44,8 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals'>('idle');
+  const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
@@ -95,14 +97,36 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   }, [userId, sourceKey]);
 
   const generate = async (force = false, mode: 'activities' | 'flashcards' | 'quiz' = 'activities') => {
-    const modeKey = `${sourceKey}:feed:${mode}`;
     setPhase('loading');
     setError('');
     setFromCache(false);
-    setScore(0);
-    setStreak(0);
-    setQuizCorrect(0);
-    setQuizTotal(0);
+
+    // ── Activities → rich HTML5 visual components ──────────────
+    if (mode === 'activities') {
+      try {
+        const cacheKey = `visuals:${sourceKey}`;
+        if (!force) {
+          const cached = Store.get<VisualSet | null>(cacheKey, null);
+          if (cached && Array.isArray(cached.components) && cached.components.length > 0) {
+            setVisualSet(cached); setFromCache(true); setPhase('visuals'); return;
+          }
+        }
+        let resolvedPdf = pdfBase64;
+        if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+        if (fileType === 'PDF' && !resolvedPdf) throw new Error('Could not load PDF binary. Try re-uploading the file.');
+        const vs = await generateVisualComponents(topic, content, resolvedPdf);
+        Store.set(cacheKey, vs);
+        setVisualSet(vs); setPhase('visuals');
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
+        setPhase('idle');
+      }
+      return;
+    }
+
+    // ── Flashcards / Quiz → existing card feed ─────────────────
+    const modeKey = `${sourceKey}:feed:${mode}`;
+    setScore(0); setStreak(0); setQuizCorrect(0); setQuizTotal(0);
     try {
       if (!force) {
         if (userId) {
@@ -259,6 +283,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
+  if (phase === 'visuals' && visualSet) return (
+    <VisualsView
+      visualSet={visualSet}
+      topic={topic}
+      hasCache={!!Store.get<VisualSet | null>(`visuals:${sourceKey}`, null)}
+      onBack={() => setPhase('idle')}
+      onRegenerate={() => { Store.del(`visuals:${sourceKey}`); setVisualSet(null); void generate(true, 'activities'); }}
+    />
+  );
+
   if (phase === 'read' && documentReading && contentMap) return (
     <ReadView
       documentReading={documentReading}
@@ -405,6 +439,131 @@ function StatPill({ icon, color, value, label }: { icon: string; color: string; 
       <Icon name={icon} size={14} stroke={`var(--${color})`} />
       <span style={{ fontWeight: 700, fontSize: 13, color: `var(--${color})`, fontFamily: 'var(--font-mono)' }}>{value}</span>
       {label && <span style={{ fontSize: 11, color: 'var(--ink-3)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 700 }}>{label}</span>}
+    </div>
+  );
+}
+
+// ── Visual learning components view ──────────────────────────
+
+const VISUAL_TYPE_META: Record<VisualComponent['type'], { label: string; color: string; bg: string; emoji: string }> = {
+  diagram:     { label: 'Diagram',     color: '#3B82F6', bg: '#EFF6FF', emoji: '🔬' },
+  chart:       { label: 'Chart',       color: '#10B981', bg: '#ECFDF5', emoji: '📊' },
+  timeline:    { label: 'Timeline',    color: '#F59E0B', bg: '#FFFBEB', emoji: '📅' },
+  process:     { label: 'Process',     color: '#8B5CF6', bg: '#F5F3FF', emoji: '⚙️' },
+  interactive: { label: 'Interactive', color: '#EF4444', bg: '#FEF2F2', emoji: '✦' },
+};
+
+function VisualsView({
+  visualSet, topic, hasCache, onBack, onRegenerate,
+}: {
+  visualSet:    VisualSet;
+  topic:        string;
+  hasCache:     boolean;
+  onBack:       () => void;
+  onRegenerate: () => void;
+}) {
+  const isMobile = useIsMobile();
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [regenerating, setRegenerating] = useState(false);
+
+  const handleRegenerate = () => {
+    setRegenerating(true);
+    onRegenerate();
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+        <button onClick={onBack} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>Visual Learning</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{topic}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>{visualSet.components.length} visuals</span>
+          {hasCache && (
+            <button
+              onClick={handleRegenerate}
+              disabled={regenerating}
+              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 13px', borderRadius: 10, background: 'var(--brand)', border: 'none', color: 'white', fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: regenerating ? 0.6 : 1 }}>
+              🔄 {regenerating ? 'Generating…' : 'Regenerate'}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Scrollable grid */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px 12px 32px' : '24px 28px 40px' }}>
+        <div style={{
+          display: 'grid',
+          gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)',
+          gap: isMobile ? 16 : 22,
+          maxWidth: 1100,
+          margin: '0 auto',
+        }}>
+          {visualSet.components.map((c, i) => {
+            const meta = VISUAL_TYPE_META[c.type] ?? VISUAL_TYPE_META.diagram;
+            const isExpanded = expandedIdx === i;
+            const isLast = i === visualSet.components.length - 1;
+            const isSolo = !isMobile && isLast && visualSet.components.length % 2 === 1;
+
+            return (
+              <div key={i} style={{
+                borderRadius: 18,
+                border: `1.5px solid ${meta.color}33`,
+                background: 'var(--card)',
+                overflow: 'hidden',
+                boxShadow: '0 4px 24px rgba(0,0,0,0.06)',
+                gridColumn: isSolo ? '1 / -1' : undefined,
+                maxWidth: isSolo ? 640 : undefined,
+                justifySelf: isSolo ? 'center' : undefined,
+                width: isSolo ? '100%' : undefined,
+              }}>
+                {/* Card header */}
+                <div style={{ padding: '14px 18px', background: meta.bg, borderBottom: `1px solid ${meta.color}22` }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
+                    <span style={{ fontSize: 13 }}>{meta.emoji}</span>
+                    <span style={{ padding: '3px 9px', borderRadius: 999, background: meta.color, color: 'white', fontSize: 10, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                      {meta.label}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.3, marginBottom: 4 }}>{c.title}</div>
+                  <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.5 }}>{c.concept}</div>
+                </div>
+
+                {/* iframe */}
+                <div style={{ position: 'relative', background: '#fff' }}>
+                  <iframe
+                    srcDoc={c.html}
+                    sandbox="allow-scripts"
+                    style={{
+                      width: '100%',
+                      height: isExpanded ? 560 : isMobile ? 260 : 360,
+                      border: 'none',
+                      display: 'block',
+                      transition: 'height 0.35s ease',
+                    }}
+                    title={c.title}
+                  />
+                  {/* Expand toggle */}
+                  <button
+                    onClick={() => setExpandedIdx(isExpanded ? null : i)}
+                    style={{
+                      position: 'absolute', bottom: 10, right: 10,
+                      padding: '4px 10px', borderRadius: 8,
+                      background: 'rgba(0,0,0,0.55)', color: 'white',
+                      fontSize: 11, fontWeight: 700, border: 'none',
+                      cursor: 'pointer', backdropFilter: 'blur(4px)',
+                    }}>
+                    {isExpanded ? '↑ Collapse' : '⤢ Expand'}
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }

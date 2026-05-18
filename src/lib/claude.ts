@@ -721,6 +721,93 @@ Return ONLY valid JSON — no markdown fences:
   return parsed;
 }
 
+// ── Visual learning components ────────────────────────────────
+
+export interface VisualComponent {
+  title:   string;
+  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive';
+  concept: string;
+  html:    string;
+}
+
+export interface VisualSet {
+  components: VisualComponent[];
+}
+
+export async function generateVisualComponents(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+): Promise<VisualSet> {
+  const client = getClient();
+  const hasPdf = !!pdfBase64;
+
+  const prompt = `You are an expert educational multimedia designer. Analyze the content and generate exactly 5 self-contained HTML5 visual learning components that teach the key concepts visually.
+
+Topic: "${topic}"
+${sourceBlock(contentText, hasPdf)}
+
+Pick the most impactful visualization type for each concept — use a variety across the 5 components:
+- "diagram": SVG anatomical or structural diagram with labeled parts and callouts
+- "chart": SVG bar chart, pie chart, or line graph using real data/values from the source
+- "timeline": horizontal or vertical timeline of stages, events, or phases
+- "process": animated step-by-step flow showing how something works (CSS/SVG animation)
+- "interactive": hoverable or clickable SVG diagram that reveals details on interaction
+
+EVERY component HTML must:
+- Be a complete standalone document (<!DOCTYPE html> to </html>)
+- Have ZERO external resources — no CDN, no external fonts, no images by URL
+- Use only: inline SVG, Canvas API, CSS animations, vanilla JS
+- Be designed for a 600×380px viewport (use width/height or viewBox accordingly)
+- Have a clean white or #FAFAF9 background, dark readable labels
+- Include smooth CSS animations (fade-in, draw, slide, pulse) where appropriate
+- Be visually polished — proper spacing, colour, legible type
+
+Keep each HTML concise (under 80 lines) — efficient SVG, short class names, no redundancy.
+
+Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
+{
+  "components": [
+    {
+      "title": "Short descriptive title",
+      "type": "diagram",
+      "concept": "One sentence: what concept this visual teaches",
+      "html": "<!DOCTYPE html><html lang=\\"en\\"><head>...</head><body>...</body></html>"
+    }
+  ]
+}`;
+
+  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
+  const userContent: MsgContent = pdfBase64
+    ? ([
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'text', text: prompt },
+      ] as MsgContent)
+    : prompt;
+
+  const msg = await client.messages.create({
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 16000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: userContent }],
+  });
+
+  const raw   = msg.content.find(b => b.type === 'text')?.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Failed to generate visual components. Please retry.');
+
+  let parsed: VisualSet;
+  try   { parsed = JSON.parse(raw.slice(start, end + 1)); }
+  catch { parsed = JSON.parse(repairJson(raw.slice(start))); }
+
+  if (!Array.isArray(parsed.components) || parsed.components.length === 0) {
+    throw new Error('Invalid visual components response. Please retry.');
+  }
+
+  return { components: parsed.components.slice(0, 5) };
+}
+
 // ── Practice quiz ─────────────────────────────────────────────
 
 export interface PracticeQuestion {
