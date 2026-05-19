@@ -52,7 +52,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
   const [auditLoading,    setAuditLoading]    = useState(false);
-  const [gapLoading,      setGapLoading]      = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
   const [mapEnhancing,      setMapEnhancing]      = useState(false);
   const [readEnhancing,     setReadEnhancing]     = useState(false);
@@ -447,30 +446,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     } catch { /* non-fatal — gap cards are an enhancement */ }
   };
 
-  /** Generate one targeted flashcard per missed concept and launch the card feed */
-  const generateGaps = async (missedConcepts: string[]) => {
-    if (missedConcepts.length === 0 || gapLoading) return;
-    setGapLoading(true);
-    try {
-      const gapCards = await generateBoosterCards(topic, missedConcepts, content);
-      if (gapCards.length === 0) return;
-      // Launch straight into the card feed with only the gap cards
-      setCards(gapCards);
-      setAudit(null);
-      setIdx(0);
-      setScore(0);
-      setStreak(0);
-      setQuizCorrect(0);
-      setQuizTotal(0);
-      setStartTime(Date.now());
-      setPhase('running');
-    } catch (e) {
-      console.error('Gap generation failed:', e);
-    } finally {
-      setGapLoading(false);
-    }
-  };
-
   const startReading = async (map: ContentMap) => {
     // Only use cache if it has the new subtopic format (not old paragraphs format)
     const cached = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
@@ -537,8 +512,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       auditLoading={auditLoading}
       mapEnhancing={mapEnhancing}
       enhancementSummary={enhancementSummary}
-      gapLoading={gapLoading}
-      onGenerateGaps={generateGaps}
       onBack={() => setPhase('idle')}
       onRead={() => startReading(contentMap)}
       onPractice={() => setPhase('practice')}
@@ -594,6 +567,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       profile={profile}
       readEnhancing={readEnhancing}
       enhancementSummary={enhancementSummary}
+      contentAudit={contentAudit}
       onBack={() => setPhase('map')}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
@@ -1195,93 +1169,146 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
   return 25;
 }
 
-// ── Enhancement Summary panel ─────────────────────────────────
+// ── Coverage Stats overlay (map + read) ──────────────────────
 
-function EnhancementSummaryPanel({
-  addedConcepts,
-  originalScore,
+function CoverageStatsOverlay({
+  contentAudit,
+  auditLoading,
+  enhancing,
+  enhancementSummary,
   context,
+  onClose,
 }: {
-  addedConcepts: string[];
-  originalScore: number;
-  context: 'map' | 'reading';
+  contentAudit:       ContentAudit | null;
+  auditLoading:       boolean;
+  enhancing:          boolean;
+  enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
+  context:            'map' | 'reading';
+  onClose:            () => void;
 }) {
-  const [open, setOpen] = useState(false);
-  const label = context === 'map' ? 'map' : 'reading';
+  const label       = context === 'map' ? 'map' : 'reading';
+  const score       = contentAudit?.coverageScore ?? 0;
+  const tips        = contentAudit?.suggestions   ?? [];
+  const isActive    = auditLoading || enhancing;
+  const scoreColor  = score >= 85 ? '#16A34A' : score >= 65 ? '#D97706' : '#DC2626';
+  const scoreBg     = score >= 85 ? '#F0FDF4'  : score >= 65 ? '#FFFBEB' : '#FEF2F2';
 
   return (
-    <div style={{
-      borderRadius: 14,
-      border: '1.5px solid #BFDBFE',
-      background: '#EFF6FF',
-      overflow: 'hidden',
-      marginBottom: 16,
-    }}>
-      {/* Header — always visible */}
-      <button
-        onClick={() => setOpen(o => !o)}
+    /* Backdrop */
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 400, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+    >
+      {/* Sheet */}
+      <div
+        onClick={e => e.stopPropagation()}
         style={{
-          width: '100%', padding: '12px 16px',
-          display: 'flex', alignItems: 'center', gap: 10,
-          background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left',
+          background: 'var(--card)', borderRadius: '20px 20px 0 0',
+          width: '100%', maxWidth: 600, maxHeight: '75vh',
+          display: 'flex', flexDirection: 'column',
+          boxShadow: '0 -8px 40px rgba(0,0,0,0.18)',
         }}
       >
-        <span style={{ fontSize: 15, flexShrink: 0 }}>✦</span>
-        <div style={{ flex: 1 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#1D4ED8', marginBottom: 2 }}>
-            Pass 2 Enhancement
-          </div>
-          <div style={{ fontSize: 13, color: '#1E40AF', fontWeight: 600 }}>
-            {addedConcepts.length} concept{addedConcepts.length !== 1 ? 's' : ''} added · coverage improved from {originalScore}% → 100%
-          </div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          <div style={{
-            fontSize: 11, fontWeight: 800, color: '#1D4ED8',
-            background: '#DBEAFE', borderRadius: 6, padding: '2px 8px',
-          }}>
-            +{addedConcepts.length}
-          </div>
-          <div style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
-            <Icon name="chevron-right" size={16} stroke="#1D4ED8" />
+        {/* Handle + title */}
+        <div style={{ padding: '12px 20px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <div style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--line)' }} />
+          <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
+            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)' }}>Coverage Stats</div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 22, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>×</button>
           </div>
         </div>
-      </button>
 
-      {/* Expanded list */}
-      {open && (
-        <div style={{ borderTop: '1px solid #BFDBFE', padding: '12px 16px' }}>
-          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#1D4ED8', marginBottom: 10 }}>
-            Concepts added to {label}
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-            {addedConcepts.map((concept, i) => (
-              <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <div style={{
-                  width: 20, height: 20, borderRadius: '50%',
-                  background: '#DBEAFE', border: '1.5px solid #93C5FD',
-                  display: 'grid', placeItems: 'center', flexShrink: 0,
-                  fontSize: 11, color: '#1D4ED8', fontWeight: 800,
-                }}>✓</div>
-                <div style={{ fontSize: 13, color: '#1E3A8A', lineHeight: 1.6, paddingTop: 1 }}>{concept}</div>
+        {/* Scrollable body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px 24px' }}>
+
+          {/* Status while loading */}
+          {isActive && !contentAudit && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 0', color: 'var(--ink-3)', fontSize: 13, fontWeight: 600 }}>
+              <div style={{ width: 16, height: 16, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+              {auditLoading ? 'Analysing document coverage…' : 'Weaving in missing concepts…'}
+            </div>
+          )}
+
+          {/* Score section */}
+          {contentAudit && (
+            <>
+              <div style={{ borderRadius: 12, background: scoreBg, border: `1px solid ${scoreColor}33`, padding: '14px 16px', marginBottom: 16 }}>
+                {enhancementSummary ? (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 8 }}>Coverage improved</div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 26, fontWeight: 800, color: '#DC2626', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{enhancementSummary.originalScore}%</div>
+                        <div style={{ fontSize: 10, color: 'var(--ink-4)', marginTop: 2 }}>pass 1</div>
+                      </div>
+                      <div style={{ flex: 1, height: 2, background: 'var(--line)', borderRadius: 1 }} />
+                      <div style={{ fontSize: 18, color: scoreColor }}>→</div>
+                      <div style={{ flex: 1, height: 2, background: 'var(--line)', borderRadius: 1 }} />
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 26, fontWeight: 800, color: '#16A34A', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>100%</div>
+                        <div style={{ fontSize: 10, color: 'var(--ink-4)', marginTop: 2 }}>pass 2</div>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 4 }}>Coverage score</div>
+                    <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{score}%</div>
+                    <div style={{ fontSize: 12, color: scoreColor, marginTop: 4, opacity: 0.75 }}>
+                      {score >= 85 ? 'Excellent — all key concepts covered' : score >= 65 ? 'Good — minor gaps found' : 'Partial — notable gaps found'}
+                    </div>
+                  </>
+                )}
               </div>
-            ))}
-          </div>
-          <div style={{
-            marginTop: 14, padding: '8px 12px', borderRadius: 8,
-            background: '#DBEAFE', fontSize: 12, color: '#1D4ED8', fontWeight: 600,
-          }}>
-            These concepts were identified as missing from the first-pass {label} and explicitly incorporated into the enhanced version above.
-          </div>
+
+              {/* Concepts added in pass 2 */}
+              {enhancementSummary && enhancementSummary.addedConcepts.length > 0 && (
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#1D4ED8', marginBottom: 10 }}>
+                    Added to {label} in pass 2
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                    {enhancementSummary.addedConcepts.map((concept, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                        <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#DBEAFE', border: '1.5px solid #93C5FD', display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, color: '#1D4ED8', fontWeight: 800 }}>✓</div>
+                        <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6, paddingTop: 1 }}>{concept}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Suggestions */}
+              {tips.length > 0 && (
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-3)', marginBottom: 8 }}>Suggestions</div>
+                  {tips.map((tip, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
+                      <span style={{ color: 'var(--brand)', fontSize: 13, flexShrink: 0 }}>→</span>
+                      <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{tip}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {/* Still enhancing (audit already done, pass 2 running) */}
+          {enhancing && contentAudit && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', color: 'var(--brand)', fontSize: 13, fontWeight: 600 }}>
+              <div style={{ width: 14, height: 14, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+              Enhancing {label} — weaving in {contentAudit?.missedConcepts?.length ?? ''} missing concepts…
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, gapLoading, onGenerateGaps, onBack, onRead, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onRead, onPractice, onRegenerate }: {
   contentMap:         ContentMap;
   topic:              string;
   hasCache:           boolean;
@@ -1291,15 +1318,13 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
   auditLoading:       boolean;
   mapEnhancing:       boolean;
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
-  gapLoading:         boolean;
-  onGenerateGaps:     (missed: string[]) => void;
   onBack:             () => void;
   onRead:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:       () => void;
 }) {
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
-  const [auditOpen,    setAuditOpen]    = useState(true);
+  const [statsOpen,    setStatsOpen]    = useState(false);
   const isMobile = useIsMobile();
 
   const toggle = (id: string) => setExpanded(prev => {
@@ -1339,12 +1364,57 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
           <div className="label-eyebrow" style={{ marginBottom: 1 }}>Learning Guide</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
-        {hasCache && (
-          <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
-            <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
-          </button>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {/* Coverage stats icon */}
+          {(auditLoading || mapEnhancing || contentAudit) && (
+            <button
+              onClick={() => setStatsOpen(true)}
+              aria-label="Coverage stats"
+              title="Coverage stats"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 10px', borderRadius: 20,
+                background: enhancementSummary ? '#DBEAFE' : auditLoading || mapEnhancing ? 'var(--bg-tint)' : 'var(--bg-tint)',
+                border: `1.5px solid ${enhancementSummary ? '#93C5FD' : 'var(--line)'}`,
+                cursor: 'pointer', fontSize: 11, fontWeight: 800,
+                color: enhancementSummary ? '#1D4ED8' : 'var(--ink-3)',
+              }}
+            >
+              {auditLoading || mapEnhancing
+                ? <div style={{ width: 11, height: 11, border: '1.5px solid currentColor', borderTop: '1.5px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                : <span>📊</span>
+              }
+              <span>
+                {auditLoading && !contentAudit
+                  ? 'Auditing…'
+                  : mapEnhancing
+                    ? 'Enhancing…'
+                    : enhancementSummary
+                      ? `${enhancementSummary.originalScore}%→100%`
+                      : `${contentAudit?.coverageScore ?? 0}%`
+                }
+              </span>
+            </button>
+          )}
+          {hasCache && (
+            <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
+              <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Coverage stats overlay */}
+      {statsOpen && (
+        <CoverageStatsOverlay
+          contentAudit={contentAudit}
+          auditLoading={auditLoading}
+          enhancing={mapEnhancing}
+          enhancementSummary={enhancementSummary}
+          context="map"
+          onClose={() => setStatsOpen(false)}
+        />
+      )}
 
       {/* Enhancing banner — visible while pass 2 regenerates the map */}
       {mapEnhancing && (
@@ -1495,123 +1565,6 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
             })}
           </div>
 
-          {/* ── Coverage Audit panel ── */}
-          {(auditLoading || contentAudit) && (() => {
-            const score  = contentAudit?.coverageScore ?? 0;
-            const missed = contentAudit?.missedConcepts ?? [];
-            const tips   = contentAudit?.suggestions ?? [];
-            const scoreColor = score >= 85 ? '#16A34A' : score >= 65 ? '#D97706' : '#DC2626';
-            const scoreBg    = score >= 85 ? '#F0FDF4' : score >= 65 ? '#FFFBEB' : '#FEF2F2';
-            const scoreBorder= score >= 85 ? '#86EFAC' : score >= 65 ? '#FDE68A' : '#FECACA';
-
-            return (
-              <div style={{ borderRadius: 16, border: `1.5px solid ${scoreBorder}`, background: scoreBg, overflow: 'hidden', marginBottom: 20 }}>
-                {/* Audit header */}
-                <button
-                  onClick={() => setAuditOpen(o => !o)}
-                  style={{ width: '100%', padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
-                >
-                  <span style={{ fontSize: 16, flexShrink: 0 }}>🔍</span>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 2 }}>
-                      Coverage Audit
-                    </div>
-                    <div style={{ fontSize: 13, color: scoreColor, fontWeight: 600 }}>
-                      {auditLoading && !contentAudit
-                        ? 'Analysing document coverage…'
-                        : missed.length === 0
-                          ? 'Excellent — no significant gaps found'
-                          : `${missed.length} item${missed.length !== 1 ? 's' : ''} not covered by this map`}
-                    </div>
-                  </div>
-                  {contentAudit && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                      <div style={{ textAlign: 'right' }}>
-                        <div style={{ fontSize: 22, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{score}%</div>
-                        <div style={{ fontSize: 10, color: scoreColor, fontWeight: 600, opacity: 0.7 }}>covered</div>
-                      </div>
-                      <div style={{ transform: auditOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
-                        <Icon name="chevron-right" size={16} stroke={scoreColor} />
-                      </div>
-                    </div>
-                  )}
-                  {auditLoading && !contentAudit && (
-                    <div style={{ width: 20, height: 20, border: `2px solid ${scoreColor}44`, borderTop: `2px solid ${scoreColor}`, borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-                  )}
-                </button>
-
-                {/* Expanded body */}
-                {auditOpen && contentAudit && missed.length > 0 && (
-                  <div style={{ borderTop: `1px solid ${scoreBorder}`, padding: '14px 18px' }}>
-                    <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 10 }}>
-                      Missed from document
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginBottom: tips.length ? 14 : 0 }}>
-                      {missed.map((item, i) => (
-                        <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                          <div style={{ width: 20, height: 20, borderRadius: '50%', background: scoreColor + '18', border: `1.5px solid ${scoreColor}44`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)' }}>
-                            {i + 1}
-                          </div>
-                          <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6, paddingTop: 1 }}>{item}</div>
-                        </div>
-                      ))}
-                    </div>
-
-                    {/* Study gaps button */}
-                    <button
-                      onClick={() => onGenerateGaps(missed)}
-                      disabled={gapLoading}
-                      style={{
-                        display: 'flex', alignItems: 'center', gap: 8,
-                        marginTop: 14, padding: '10px 16px', borderRadius: 12,
-                        background: scoreColor, color: 'white', border: 'none',
-                        fontSize: 13, fontWeight: 700, cursor: gapLoading ? 'not-allowed' : 'pointer',
-                        opacity: gapLoading ? 0.7 : 1, width: '100%', justifyContent: 'center',
-                      }}
-                    >
-                      {gapLoading ? (
-                        <>
-                          <div style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.4)', borderTop: '2px solid white', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-                          Generating gap cards…
-                        </>
-                      ) : (
-                        <>📚 Study {missed.length} missed item{missed.length !== 1 ? 's' : ''} →</>
-                      )}
-                    </button>
-
-                    {tips.length > 0 && (
-                      <>
-                        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 8, marginTop: 16 }}>
-                          Suggestions
-                        </div>
-                        {tips.map((tip, i) => (
-                          <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
-                            <span style={{ color: scoreColor, fontSize: 13, flexShrink: 0 }}>→</span>
-                            <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{tip}</div>
-                          </div>
-                        ))}
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {auditOpen && contentAudit && missed.length === 0 && (
-                  <div style={{ borderTop: `1px solid ${scoreBorder}`, padding: '12px 18px', fontSize: 13, color: scoreColor, lineHeight: 1.6 }}>
-                    {tips.length > 0 ? tips[0] : 'The generated map covers all major concepts in this document.'}
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-
-          {/* ── Enhancement Summary panel ── */}
-          {enhancementSummary && enhancementSummary.addedConcepts.length > 0 && (
-            <EnhancementSummaryPanel
-              addedConcepts={enhancementSummary.addedConcepts}
-              originalScore={enhancementSummary.originalScore}
-              context="map"
-            />
-          )}
         </div>
       </div>
 
@@ -2150,19 +2103,21 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, onBack, onPractice, onRegenerate }: {
   documentReading:    DocumentReading;
   topic:              string;
   hasCache:           boolean;
   profile:            LearnerProfile | null;
   readEnhancing:      boolean;
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
+  contentAudit:       ContentAudit | null;
   onBack:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:       () => void;
 }) {
   type SubStatus = 'unread' | 'read' | 'learnt';
 
+  const [statsOpen,         setStatsOpen]         = useState(false);
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
@@ -2805,12 +2760,54 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
           <div className="label-eyebrow" style={{ marginBottom: 1 }}>Step 2 · Read</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
-        {hasCache && (
-          <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
-            <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
-          </button>
-        )}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
+          {/* Coverage stats icon */}
+          {(readEnhancing || enhancementSummary) && (
+            <button
+              onClick={() => setStatsOpen(true)}
+              aria-label="Coverage stats"
+              title="Coverage stats"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 10px', borderRadius: 20,
+                background: enhancementSummary ? '#DBEAFE' : 'var(--bg-tint)',
+                border: `1.5px solid ${enhancementSummary ? '#93C5FD' : 'var(--line)'}`,
+                cursor: 'pointer', fontSize: 11, fontWeight: 800,
+                color: enhancementSummary ? '#1D4ED8' : 'var(--ink-3)',
+              }}
+            >
+              {readEnhancing && !enhancementSummary
+                ? <div style={{ width: 11, height: 11, border: '1.5px solid currentColor', borderTop: '1.5px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                : <span>📊</span>
+              }
+              <span>
+                {readEnhancing && !enhancementSummary
+                  ? 'Enhancing…'
+                  : enhancementSummary
+                    ? `${enhancementSummary.originalScore}%→100%`
+                    : ''}
+              </span>
+            </button>
+          )}
+          {hasCache && (
+            <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
+              <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
+            </button>
+          )}
+        </div>
       </div>
+
+      {/* Coverage stats overlay */}
+      {statsOpen && (
+        <CoverageStatsOverlay
+          contentAudit={contentAudit}
+          auditLoading={false}
+          enhancing={readEnhancing}
+          enhancementSummary={enhancementSummary}
+          context="reading"
+          onClose={() => setStatsOpen(false)}
+        />
+      )}
 
       {/* Enhancing banner — visible while pass 2 rewrites the reading with gap concepts */}
       {readEnhancing && (
@@ -2836,17 +2833,6 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
         ) : mainContent}
         {showSidebar && sidebar}
       </div>
-
-      {/* Enhancement summary — shown in ReadView after pass 2 completes */}
-      {enhancementSummary && enhancementSummary.addedConcepts.length > 0 && (
-        <div style={{ flexShrink: 0, borderTop: '1px solid var(--line)', padding: '12px 20px', background: 'var(--bg)' }}>
-          <EnhancementSummaryPanel
-            addedConcepts={enhancementSummary.addedConcepts}
-            originalScore={enhancementSummary.originalScore}
-            context="reading"
-          />
-        </div>
-      )}
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
