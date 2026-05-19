@@ -11,7 +11,7 @@ import { LibraryScreen } from './screens/LibraryScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
 import { Store } from './lib/store';
 import { supabase, dbLoadProfile, dbLoadLibrary, dbSaveProfile, dbSaveLibrary } from './lib/supabase';
-import { saveApiKey } from './lib/claude';
+import { saveApiKey, setCurrentUserId } from './lib/claude';
 import type { FeedSource, LearnerProfile, LibraryItem, LibraryTree, Route, User } from './lib/types';
 
 export default function App() {
@@ -72,6 +72,7 @@ function AppCore() {
           email: session.user.email!,
         };
         setUser(u);
+        setCurrentUserId(session.user.id);
         setRoute(r => (r === 'login' || r === 'register') ? 'home' : r);
         await syncData(session.user.id);
       }
@@ -82,6 +83,7 @@ function AppCore() {
       if (event === 'SIGNED_OUT') {
         setUser(null);
         setProfile(null);
+        setCurrentUserId(null);
         Store.del('profile');
         setRoute('login');
       }
@@ -93,6 +95,7 @@ function AppCore() {
           email: session.user.email!,
         };
         setUser(u);
+        setCurrentUserId(session.user.id);
       }
     });
 

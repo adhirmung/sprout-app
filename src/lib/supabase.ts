@@ -207,3 +207,27 @@ export async function dbSaveLibrary(userId: string, tree: LibraryTree): Promise<
     updated_at: new Date().toISOString(),
   });
 }
+
+// ── API usage logging ─────────────────────────────────────────
+
+/**
+ * Fire-and-forget insert into api_usage.
+ * Called from claude.ts after every streamed response — never throws.
+ */
+export async function dbLogUsage(
+  userId:       string | null,
+  fn:           string,
+  model:        string,
+  inputTokens:  number,
+  outputTokens: number,
+): Promise<void> {
+  try {
+    await supabase.from('api_usage').insert({
+      user_id:       userId,
+      fn,
+      model,
+      input_tokens:  inputTokens,
+      output_tokens: outputTokens,
+    });
+  } catch { /* non-fatal — never block generation on logging */ }
+}

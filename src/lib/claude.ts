@@ -1,5 +1,10 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { LearnerProfile } from './types';
+import { dbLogUsage } from './supabase';
+
+// ── Current user (set once on auth, used for usage logging) ──────
+let _currentUserId: string | null = null;
+export function setCurrentUserId(id: string | null): void { _currentUserId = id; }
 
 // ── API key helpers ───────────────────────────────────────────
 
@@ -79,11 +84,18 @@ export async function streamCardChat(
     messages:   history,
     stream:     true,
   });
+  let inputTokens  = 0;
+  let outputTokens = 0;
   for await (const event of stream) {
-    if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+    if (event.type === 'message_start') {
+      inputTokens = event.message.usage.input_tokens;
+    } else if (event.type === 'message_delta' && event.usage) {
+      outputTokens = event.usage.output_tokens;
+    } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
       onChunk(event.delta.text);
     }
   }
+  void dbLogUsage(_currentUserId, 'streamCardChat', 'claude-haiku-4-5-20251001', inputTokens, outputTokens);
 }
 
 // ── Content map ───────────────────────────────────────────────
@@ -160,20 +172,29 @@ export type FeedCard =
 // ── Streaming text helper ─────────────────────────────────────
 // Accumulates a full streamed response so JSON-generating functions
 // don't sit idle waiting for a complete message (avoids proxy timeouts).
+// Also captures input/output token counts from the stream events and
+// logs them to api_usage (fire-and-forget) for cost tracking.
 async function streamToText(
-  client: ReturnType<typeof getClient>,
-  params: Parameters<typeof client.messages.create>[0],
+  client:  ReturnType<typeof getClient>,
+  params:  Parameters<typeof client.messages.create>[0],
+  fnName:  string,
 ): Promise<string> {
-  let text = '';
+  let text         = '';
+  let inputTokens  = 0;
+  let outputTokens = 0;
+
   const stream = await client.messages.create({ ...params, stream: true });
   for await (const event of stream) {
-    if (
-      event.type === 'content_block_delta' &&
-      event.delta.type === 'text_delta'
-    ) {
+    if (event.type === 'message_start') {
+      inputTokens = event.message.usage.input_tokens;
+    } else if (event.type === 'message_delta' && event.usage) {
+      outputTokens = event.usage.output_tokens;
+    } else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
       text += event.delta.text;
     }
   }
+
+  void dbLogUsage(_currentUserId, fnName, params.model as string, inputTokens, outputTokens);
   return text;
 }
 
@@ -427,7 +448,7 @@ export async function generateFeed(
     max_tokens: maxTokens,
     system:   'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages: [{ role: 'user', content: userContent }],
-  });
+  }, 'generateFeed');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -499,7 +520,7 @@ Return ONLY valid JSON:
     max_tokens: 300,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: prompt }],
-  });
+  }, 'reauditCards');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -547,7 +568,7 @@ Return ONLY valid JSON — no markdown fences:
     max_tokens: 1500,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: prompt }],
-  });
+  }, 'generateBoosterCards');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -616,7 +637,7 @@ Return ONLY valid JSON — no markdown fences:
     max_tokens: 4000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
-  });
+  }, 'generateContentMap');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -726,7 +747,7 @@ Return ONLY valid JSON — no markdown fences:
     max_tokens: 8000,   // ~40s at Haiku streaming speed — safe within Netlify's 50s limit
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
-  });
+  }, 'generateReading');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -821,7 +842,7 @@ Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
       max_tokens: 2000,   // ~3–10s per call — comfortably within Netlify's 50s limit
       system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
       messages:   [{ role: 'user', content: userContent }],
-    });
+    }, 'generateVisualComponents');
 
     const start = raw.indexOf('{');
     const end   = raw.lastIndexOf('}');
@@ -943,7 +964,7 @@ Return ONLY valid JSON — no markdown:
     max_tokens: 2000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
-  });
+  }, 'generateContentAudit');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -1029,7 +1050,7 @@ Return ONLY valid JSON — no markdown:
     max_tokens: 8000,
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: prompt }],
-  });
+  }, 'generatePracticeQuiz');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
@@ -1067,7 +1088,7 @@ STUDENT ANSWER: ${userAnswer}
 Score: 2 = comprehensive & correct, 1 = partially correct, 0 = incorrect or missing key ideas.
 Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`,
     }],
-  });
+  }, 'evaluateWrittenAnswer');
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) return { score: 1, feedback: 'Partial credit — keep going!' };
