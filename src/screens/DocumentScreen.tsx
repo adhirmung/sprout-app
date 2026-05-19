@@ -6,6 +6,7 @@ import { ProgressBar } from '../components/ProgressBar';
 import {
   buildChatSystemPrompt,
   evaluateWrittenAnswer,
+  generateContentAudit,
   generateContentMap,
   generateFeed,
   generatePracticeQuiz,
@@ -15,7 +16,7 @@ import {
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
-import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
+import type { ChatMessage, ContentAudit, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -48,6 +49,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
+  const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
+  const [auditLoading,    setAuditLoading]    = useState(false);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
@@ -91,6 +94,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     } else if (userId) {
       dbLoadContent<DocumentReading>(userId, sourceKey, 'reading')
         .then(data => { if (data?.topics?.length && data.topics[0]?.subtopics?.length) { Store.set(`reading:${sourceKey}`, data); setDocumentReading(data); } })
+        .catch(() => {});
+    }
+
+    const cachedAudit = Store.get<ContentAudit | null>(`audit:${sourceKey}`, null);
+    if (cachedAudit && typeof cachedAudit.coverageScore === 'number') {
+      setContentAudit(cachedAudit);
+    } else if (userId) {
+      dbLoadContent<ContentAudit>(userId, sourceKey, 'audit')
+        .then(data => { if (data && typeof data.coverageScore === 'number') { Store.set(`audit:${sourceKey}`, data); setContentAudit(data); } })
         .catch(() => {});
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,10 +242,27 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
       setContentMap(map);
       setPhase('map');
+
+      // Run audit in background — doesn't block the user
+      void runAudit(map, resolvedPdf);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate topic map. Please retry.');
       setPhase('idle');
     }
+  };
+
+  const runAudit = async (map: ContentMap, resolvedPdf: string | null) => {
+    const auditKey = `audit:${sourceKey}`;
+    const cached = Store.get<ContentAudit | null>(auditKey, null);
+    if (cached && typeof cached.coverageScore === 'number') { setContentAudit(cached); return; }
+    setAuditLoading(true);
+    try {
+      const audit = await generateContentAudit(topic, content, resolvedPdf, map);
+      Store.set(auditKey, audit);
+      if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
+      setContentAudit(audit);
+    } catch { /* non-fatal — audit is enhancement only */ }
+    finally { setAuditLoading(false); }
   };
 
   const startReading = async (map: ContentMap) => {
@@ -295,12 +324,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
       hasReading={!!documentReading}
       profile={profile}
+      contentAudit={contentAudit}
+      auditLoading={auditLoading}
       onBack={() => setPhase('idle')}
       onRead={() => startReading(contentMap)}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
         Store.del(`map:${sourceKey}`);
+        Store.del(`audit:${sourceKey}`);
         setContentMap(null);
+        setContentAudit(null);
         setPhase('mapping');
         setError('');
         try {
@@ -308,8 +341,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
           const map = await generateContentMap(topic, content, resolvedPdf);
           Store.set(`map:${sourceKey}`, map);
+          if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
           setContentMap(map);
           setPhase('map');
+          void runAudit(map, resolvedPdf);
         } catch (e) {
           setError(e instanceof Error ? e.message : 'Failed to generate topic map.');
           setPhase('idle');
@@ -926,18 +961,21 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onRead, onPractice, onRegenerate }: {
-  contentMap: ContentMap;
-  topic: string;
-  hasCache: boolean;
-  hasReading: boolean;
-  profile: LearnerProfile | null;
-  onBack: () => void;
-  onRead: () => void;
-  onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate: () => void;
+function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, onBack, onRead, onPractice, onRegenerate }: {
+  contentMap:    ContentMap;
+  topic:         string;
+  hasCache:      boolean;
+  hasReading:    boolean;
+  profile:       LearnerProfile | null;
+  contentAudit:  ContentAudit | null;
+  auditLoading:  boolean;
+  onBack:        () => void;
+  onRead:        () => void;
+  onPractice:    (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:  () => void;
 }) {
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
+  const [auditOpen,    setAuditOpen]    = useState(true);
   const isMobile = useIsMobile();
 
   const toggle = (id: string) => setExpanded(prev => {
@@ -1042,7 +1080,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onR
           <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--ink-3)', textTransform: 'uppercase', marginBottom: 12 }}>
             Topics · {contentMap.topics.length}
           </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 20 }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: (auditLoading || contentAudit) ? 16 : 20 }}>
             {contentMap.topics.map((t, i) => {
               const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
               const isOpen = expanded.has(t.id);
@@ -1118,6 +1156,93 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, onBack, onR
               );
             })}
           </div>
+
+          {/* ── Coverage Audit panel ── */}
+          {(auditLoading || contentAudit) && (() => {
+            const score  = contentAudit?.coverageScore ?? 0;
+            const missed = contentAudit?.missedConcepts ?? [];
+            const tips   = contentAudit?.suggestions ?? [];
+            const scoreColor = score >= 85 ? '#16A34A' : score >= 65 ? '#D97706' : '#DC2626';
+            const scoreBg    = score >= 85 ? '#F0FDF4' : score >= 65 ? '#FFFBEB' : '#FEF2F2';
+            const scoreBorder= score >= 85 ? '#86EFAC' : score >= 65 ? '#FDE68A' : '#FECACA';
+
+            return (
+              <div style={{ borderRadius: 16, border: `1.5px solid ${scoreBorder}`, background: scoreBg, overflow: 'hidden', marginBottom: 20 }}>
+                {/* Audit header */}
+                <button
+                  onClick={() => setAuditOpen(o => !o)}
+                  style={{ width: '100%', padding: '14px 18px', display: 'flex', alignItems: 'center', gap: 12, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
+                >
+                  <span style={{ fontSize: 16, flexShrink: 0 }}>🔍</span>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 2 }}>
+                      Coverage Audit
+                    </div>
+                    <div style={{ fontSize: 13, color: scoreColor, fontWeight: 600 }}>
+                      {auditLoading && !contentAudit
+                        ? 'Analysing document coverage…'
+                        : missed.length === 0
+                          ? 'Excellent — no significant gaps found'
+                          : `${missed.length} item${missed.length !== 1 ? 's' : ''} not covered by this map`}
+                    </div>
+                  </div>
+                  {contentAudit && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                      <div style={{ textAlign: 'right' }}>
+                        <div style={{ fontSize: 22, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{score}%</div>
+                        <div style={{ fontSize: 10, color: scoreColor, fontWeight: 600, opacity: 0.7 }}>covered</div>
+                      </div>
+                      <div style={{ transform: auditOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
+                        <Icon name="chevron-right" size={16} stroke={scoreColor} />
+                      </div>
+                    </div>
+                  )}
+                  {auditLoading && !contentAudit && (
+                    <div style={{ width: 20, height: 20, border: `2px solid ${scoreColor}44`, borderTop: `2px solid ${scoreColor}`, borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+                  )}
+                </button>
+
+                {/* Expanded body */}
+                {auditOpen && contentAudit && missed.length > 0 && (
+                  <div style={{ borderTop: `1px solid ${scoreBorder}`, padding: '14px 18px' }}>
+                    <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 10 }}>
+                      Missed from document
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, marginBottom: tips.length ? 14 : 0 }}>
+                      {missed.map((item, i) => (
+                        <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                          <div style={{ width: 20, height: 20, borderRadius: '50%', background: scoreColor + '18', border: `1.5px solid ${scoreColor}44`, display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)' }}>
+                            {i + 1}
+                          </div>
+                          <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6, paddingTop: 1 }}>{item}</div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {tips.length > 0 && (
+                      <>
+                        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 8, marginTop: 4 }}>
+                          Suggestions
+                        </div>
+                        {tips.map((tip, i) => (
+                          <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
+                            <span style={{ color: scoreColor, fontSize: 13, flexShrink: 0 }}>→</span>
+                            <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{tip}</div>
+                          </div>
+                        ))}
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {auditOpen && contentAudit && missed.length === 0 && (
+                  <div style={{ borderTop: `1px solid ${scoreBorder}`, padding: '12px 18px', fontSize: 13, color: scoreColor, lineHeight: 1.6 }}>
+                    {tips.length > 0 ? tips[0] : 'The generated map covers all major concepts in this document.'}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
         </div>
       </div>
 

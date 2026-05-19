@@ -822,6 +822,93 @@ Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
   return { components: parsed.components.slice(0, 5) };
 }
 
+// ── Content audit ─────────────────────────────────────────────
+
+export interface ContentAudit {
+  coverageScore:  number;   // 0–100
+  missedConcepts: string[]; // specific named items, dates, facts not in the map
+  suggestions:    string[]; // 1–3 actionable tips
+}
+
+/**
+ * Audits a generated content map against the original document.
+ * Returns a coverage score and an exhaustive list of specific missed concepts.
+ */
+export async function generateContentAudit(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+  contentMap:  ContentMap,
+): Promise<ContentAudit> {
+  const client = getClient();
+  const hasPdf = !!pdfBase64;
+
+  const mapSummary = contentMap.topics.map(t =>
+    `• ${t.title}\n${t.subtopics.map(s => `  – ${s.title}: ${s.summary}`).join('\n')}`
+  ).join('\n');
+
+  const prompt = `You are a curriculum quality auditor. Compare the original document to the generated topic map and identify exactly what was missed.
+
+Topic: "${topic}"
+${sourceBlock(contentText, hasPdf)}
+
+GENERATED TOPIC MAP:
+Synthesis: ${contentMap.synthesis}
+
+Topics covered:
+${mapSummary}
+
+Task: List EVERY important concept, named entity, specific date, named person/mission/device, specific statistic, key process, or testable fact from the original document that is NOT represented in the topic map above.
+
+Be very specific — not "more detail on rovers" but "Lunokhod 2 (1970) — Russia's first remote-controlled robotic rover on the Moon".
+Include important supporting facts even if the parent topic is present (e.g. if "Blood Vessels" is in the map but the valve mechanism is missing, list it).
+If nothing is missed, return an empty array.
+
+Give a coverageScore 0–100: what percentage of the document's important, testable content is represented in the map.
+Give 1–3 concrete suggestions for what the map should add or emphasise.
+
+Return ONLY valid JSON — no markdown:
+{
+  "coverageScore": <0–100>,
+  "missedConcepts": [
+    "Specific missed item with brief context",
+    "..."
+  ],
+  "suggestions": [
+    "Actionable suggestion",
+    "..."
+  ]
+}`;
+
+  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
+  const userContent: MsgContent = pdfBase64
+    ? ([
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
+        { type: 'text', text: prompt },
+      ] as MsgContent)
+    : prompt;
+
+  const raw = await streamToText(client, {
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 2000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: userContent }],
+  });
+
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Failed to generate audit.');
+
+  let parsed: ContentAudit;
+  try   { parsed = JSON.parse(raw.slice(start, end + 1)); }
+  catch { parsed = JSON.parse(repairJson(raw.slice(start))); }
+
+  if (typeof parsed.coverageScore !== 'number' || !Array.isArray(parsed.missedConcepts)) {
+    throw new Error('Invalid audit response.');
+  }
+  return parsed;
+}
+
 // ── Practice quiz ─────────────────────────────────────────────
 
 export interface PracticeQuestion {
