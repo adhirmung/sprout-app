@@ -54,8 +54,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapLoading,      setGapLoading]      = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
-  const [mapEnhancing,    setMapEnhancing]    = useState(false);
-  const [readEnhancing,   setReadEnhancing]   = useState(false);
+  const [mapEnhancing,      setMapEnhancing]      = useState(false);
+  const [readEnhancing,     setReadEnhancing]     = useState(false);
+  const [enhancementSummary, setEnhancementSummary] = useState<{
+    addedConcepts: string[];
+    originalScore: number;
+  } | null>(null);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
@@ -298,6 +302,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (userId) dbSaveContent(userId, sourceKey, 'map', enhanced).catch(console.error);
       setContentMap(enhanced);
 
+      // Record what was added so the Enhancement Summary panel can display it
+      setEnhancementSummary({
+        addedConcepts: audit.missedConcepts,
+        originalScore: audit.coverageScore,
+      });
+
       // Gaps are now baked into the map — clear the missed-items list so the
       // audit panel doesn't keep showing items that have already been incorporated.
       const resolvedAudit: ContentAudit = {
@@ -336,6 +346,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       Store.set(`reading:${sourceKey}`, enhanced);
       if (userId) dbSaveContent(userId, sourceKey, 'reading', enhanced).catch(console.error);
       setDocumentReading(enhanced);
+
+      // Record what was incorporated (may already be set by map enhancement, that's fine)
+      setEnhancementSummary(prev => prev ?? {
+        addedConcepts: audit.missedConcepts,
+        originalScore: audit.coverageScore,
+      });
 
       // Gaps are now in the reading — clear the stale missed-items list
       const resolvedAudit: ContentAudit = {
@@ -506,6 +522,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       contentAudit={contentAudit}
       auditLoading={auditLoading}
       mapEnhancing={mapEnhancing}
+      enhancementSummary={enhancementSummary}
       gapLoading={gapLoading}
       onGenerateGaps={generateGaps}
       onBack={() => setPhase('idle')}
@@ -516,6 +533,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         Store.del(`audit:${sourceKey}`);
         setContentMap(null);
         setContentAudit(null);
+        setEnhancementSummary(null);
         setPhase('mapping');
         setError('');
         try {
@@ -561,6 +579,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       hasCache={!!Store.get<DocumentReading | null>(`reading:${sourceKey}`, null)}
       profile={profile}
       readEnhancing={readEnhancing}
+      enhancementSummary={enhancementSummary}
       onBack={() => setPhase('map')}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
@@ -1162,23 +1181,108 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
   return 25;
 }
 
+// ── Enhancement Summary panel ─────────────────────────────────
+
+function EnhancementSummaryPanel({
+  addedConcepts,
+  originalScore,
+  context,
+}: {
+  addedConcepts: string[];
+  originalScore: number;
+  context: 'map' | 'reading';
+}) {
+  const [open, setOpen] = useState(false);
+  const label = context === 'map' ? 'map' : 'reading';
+
+  return (
+    <div style={{
+      borderRadius: 14,
+      border: '1.5px solid #BFDBFE',
+      background: '#EFF6FF',
+      overflow: 'hidden',
+      marginBottom: 16,
+    }}>
+      {/* Header — always visible */}
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          width: '100%', padding: '12px 16px',
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left',
+        }}
+      >
+        <span style={{ fontSize: 15, flexShrink: 0 }}>✦</span>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#1D4ED8', marginBottom: 2 }}>
+            Pass 2 Enhancement
+          </div>
+          <div style={{ fontSize: 13, color: '#1E40AF', fontWeight: 600 }}>
+            {addedConcepts.length} concept{addedConcepts.length !== 1 ? 's' : ''} added · coverage improved from {originalScore}% → 100%
+          </div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          <div style={{
+            fontSize: 11, fontWeight: 800, color: '#1D4ED8',
+            background: '#DBEAFE', borderRadius: 6, padding: '2px 8px',
+          }}>
+            +{addedConcepts.length}
+          </div>
+          <div style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
+            <Icon name="chevron-right" size={16} stroke="#1D4ED8" />
+          </div>
+        </div>
+      </button>
+
+      {/* Expanded list */}
+      {open && (
+        <div style={{ borderTop: '1px solid #BFDBFE', padding: '12px 16px' }}>
+          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#1D4ED8', marginBottom: 10 }}>
+            Concepts added to {label}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+            {addedConcepts.map((concept, i) => (
+              <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                <div style={{
+                  width: 20, height: 20, borderRadius: '50%',
+                  background: '#DBEAFE', border: '1.5px solid #93C5FD',
+                  display: 'grid', placeItems: 'center', flexShrink: 0,
+                  fontSize: 11, color: '#1D4ED8', fontWeight: 800,
+                }}>✓</div>
+                <div style={{ fontSize: 13, color: '#1E3A8A', lineHeight: 1.6, paddingTop: 1 }}>{concept}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{
+            marginTop: 14, padding: '8px 12px', borderRadius: 8,
+            background: '#DBEAFE', fontSize: 12, color: '#1D4ED8', fontWeight: 600,
+          }}>
+            These concepts were identified as missing from the first-pass {label} and explicitly incorporated into the enhanced version above.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, mapEnhancing, gapLoading, onGenerateGaps, onBack, onRead, onPractice, onRegenerate }: {
-  contentMap:      ContentMap;
-  topic:           string;
-  hasCache:        boolean;
-  hasReading:      boolean;
-  profile:         LearnerProfile | null;
-  contentAudit:    ContentAudit | null;
-  auditLoading:    boolean;
-  mapEnhancing:    boolean;
-  gapLoading:      boolean;
-  onGenerateGaps:  (missed: string[]) => void;
-  onBack:          () => void;
-  onRead:          () => void;
-  onPractice:      (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate:    () => void;
+function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, gapLoading, onGenerateGaps, onBack, onRead, onPractice, onRegenerate }: {
+  contentMap:         ContentMap;
+  topic:              string;
+  hasCache:           boolean;
+  hasReading:         boolean;
+  profile:            LearnerProfile | null;
+  contentAudit:       ContentAudit | null;
+  auditLoading:       boolean;
+  mapEnhancing:       boolean;
+  enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
+  gapLoading:         boolean;
+  onGenerateGaps:     (missed: string[]) => void;
+  onBack:             () => void;
+  onRead:             () => void;
+  onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:       () => void;
 }) {
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
   const [auditOpen,    setAuditOpen]    = useState(true);
@@ -1485,6 +1589,15 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
               </div>
             );
           })()}
+
+          {/* ── Enhancement Summary panel ── */}
+          {enhancementSummary && enhancementSummary.addedConcepts.length > 0 && (
+            <EnhancementSummaryPanel
+              addedConcepts={enhancementSummary.addedConcepts}
+              originalScore={enhancementSummary.originalScore}
+              context="map"
+            />
+          )}
         </div>
       </div>
 
@@ -2023,15 +2136,16 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, onBack, onPractice, onRegenerate }: {
-  documentReading: DocumentReading;
-  topic: string;
-  hasCache: boolean;
-  profile: LearnerProfile | null;
-  readEnhancing: boolean;
-  onBack: () => void;
-  onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate: () => void;
+function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, onBack, onPractice, onRegenerate }: {
+  documentReading:    DocumentReading;
+  topic:              string;
+  hasCache:           boolean;
+  profile:            LearnerProfile | null;
+  readEnhancing:      boolean;
+  enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
+  onBack:             () => void;
+  onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:       () => void;
 }) {
   type SubStatus = 'unread' | 'read' | 'learnt';
 
@@ -2708,6 +2822,17 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, on
         ) : mainContent}
         {showSidebar && sidebar}
       </div>
+
+      {/* Enhancement summary — shown in ReadView after pass 2 completes */}
+      {enhancementSummary && enhancementSummary.addedConcepts.length > 0 && (
+        <div style={{ flexShrink: 0, borderTop: '1px solid var(--line)', padding: '12px 20px', background: 'var(--bg)' }}>
+          <EnhancementSummaryPanel
+            addedConcepts={enhancementSummary.addedConcepts}
+            originalScore={enhancementSummary.originalScore}
+            context="reading"
+          />
+        </div>
+      )}
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
