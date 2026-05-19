@@ -53,6 +53,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapLoading,      setGapLoading]      = useState(false);
+  const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
@@ -122,6 +123,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
+
+  // Auto-dismiss the gap-cards toast after 5 s
+  useEffect(() => {
+    if (gapCardsAdded <= 0) return;
+    const t = setTimeout(() => setGapCardsAdded(0), 5000);
+    return () => clearTimeout(t);
+  }, [gapCardsAdded]);
 
   const generate = async (force = false, mode: 'activities' | 'flashcards' | 'quiz' = 'activities') => {
     setPhase('loading');
@@ -204,6 +212,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         Store.set(`feed:${modeKey}`, finalResult);
       }
       setCards(result.cards); setAudit(result.audit); setIdx(0); setStartTime(Date.now()); setPhase('running');
+      // Pass 2: background audit → auto-append gap cards
+      void runTwoPassBoost(resolvedPdf, modeKey, result.cards);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
       setPhase('idle');
@@ -269,6 +279,72 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       setContentAudit(audit);
     } catch { /* non-fatal — audit is enhancement only */ }
     finally { setAuditLoading(false); }
+  };
+
+  /**
+   * Two-pass boost: runs silently after fresh card generation.
+   * 1. Ensures a content map exists (generates one if needed).
+   * 2. Runs a coverage audit against that map (with full caching).
+   * 3. Generates one targeted flashcard per missed concept and appends
+   *    them to the live card feed — the learner sees them seamlessly after
+   *    the first-pass cards.
+   */
+  const runTwoPassBoost = async (
+    resolvedPdf: string | null,
+    modeKey: string,
+    firstPassCards: FeedCard[],
+  ) => {
+    // ── Step 1: get or generate map (needed for audit) ────────
+    let map: ContentMap | null = Store.get<ContentMap | null>(`map:${sourceKey}`, null);
+    if (!map?.synthesis && userId) {
+      map = await dbLoadContent<ContentMap>(userId, sourceKey, 'map').catch(() => null);
+    }
+    if (!map?.synthesis) {
+      try {
+        map = await generateContentMap(topic, content, content ? null : resolvedPdf);
+        Store.set(`map:${sourceKey}`, map);
+        setContentMap(map);
+        if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
+      } catch { return; /* can't audit without a map */ }
+    }
+
+    // ── Step 2: get or run coverage audit ────────────────────
+    let audit: ContentAudit | null = Store.get<ContentAudit | null>(`audit:${sourceKey}`, null);
+    if (!audit && userId) {
+      audit = await dbLoadContent<ContentAudit>(userId, sourceKey, 'audit').catch(() => null);
+    }
+    if (!audit) {
+      try {
+        setAuditLoading(true);
+        audit = await generateContentAudit(topic, content, content ? null : resolvedPdf, map);
+        Store.set(`audit:${sourceKey}`, audit);
+        setContentAudit(audit);
+        if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
+      } catch { return; }
+      finally { setAuditLoading(false); }
+    } else {
+      // Populate the map-view audit panel if not already set
+      setContentAudit(audit);
+    }
+
+    if (!audit || audit.missedConcepts.length === 0) return;
+
+    // ── Step 3: generate gap cards and append to feed ─────────
+    try {
+      const gapCards = await generateBoosterCards(topic, audit.missedConcepts, content);
+      if (gapCards.length === 0) return;
+
+      setCards(prev => [...prev, ...gapCards]);
+      setGapCardsAdded(gapCards.length);
+
+      // Persist combined set so the next load already has gap cards baked in
+      const combined = [...firstPassCards, ...gapCards];
+      if (userId) {
+        dbSaveGeneratedCards(userId, modeKey, topic, { cards: combined, audit: null }, contentLen).catch(console.error);
+      } else {
+        Store.set(`feed:${modeKey}`, { cards: combined, audit: null });
+      }
+    } catch { /* non-fatal — gap cards are an enhancement */ }
   };
 
   /** Generate one targeted flashcard per missed concept and launch the card feed */
@@ -482,6 +558,26 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           </div>
         )}
       </div>
+
+      {/* Gap-cards toast — appears when pass 2 appends bonus cards */}
+      {gapCardsAdded > 0 && (
+        <div style={{
+          position: 'fixed', bottom: 90, left: '50%', transform: 'translateX(-50%)',
+          background: 'var(--ink)', color: 'white', borderRadius: 14,
+          padding: '10px 18px', fontSize: 13, fontWeight: 700,
+          display: 'flex', alignItems: 'center', gap: 10,
+          boxShadow: '0 6px 28px rgba(0,0,0,0.28)', zIndex: 200, whiteSpace: 'nowrap',
+          animation: 'slideUp 0.35s ease',
+        }}>
+          <span>📚</span>
+          <span>+{gapCardsAdded} gap card{gapCardsAdded !== 1 ? 's' : ''} added for missed concepts</span>
+          <button
+            onClick={() => setGapCardsAdded(0)}
+            aria-label="Dismiss"
+            style={{ background: 'none', border: 'none', color: 'rgba(255,255,255,0.55)', cursor: 'pointer', padding: 0, fontSize: 20, lineHeight: 1, marginLeft: 4 }}
+          >×</button>
+        </div>
+      )}
 
       {/* Tutor FAB */}
       {(phase === 'running' || phase === 'done') && (
