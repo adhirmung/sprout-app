@@ -778,7 +778,7 @@ EVERY component HTML must:
 - Include smooth CSS animations (fade-in, draw, slide, pulse) where appropriate
 - Be visually polished — proper spacing, colour, legible type
 
-Keep each HTML concise (under 80 lines) — efficient SVG, short class names, no redundancy.
+Keep each HTML concise (under 60 lines) — efficient SVG, short class names, minimal inline styles, no redundancy. Prioritise clarity over animation complexity.
 
 Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
 {
@@ -802,7 +802,7 @@ Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
 
   const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 16000,
+    max_tokens: 12000,   // 5 compact HTML components; 16k caused edge-function timeouts
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   });

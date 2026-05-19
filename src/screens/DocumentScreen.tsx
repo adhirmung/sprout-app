@@ -257,7 +257,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     if (cached && typeof cached.coverageScore === 'number') { setContentAudit(cached); return; }
     setAuditLoading(true);
     try {
-      const audit = await generateContentAudit(topic, content, resolvedPdf, map);
+      // Use text content for the audit — no need to re-send the PDF binary
+      // (the map comparison only needs extractable text, not images).
+      // Only fall back to PDF if there is no extracted text at all.
+      const auditPdf = content ? null : resolvedPdf;
+      const audit = await generateContentAudit(topic, content, auditPdf, map);
       Store.set(auditKey, audit);
       if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
       setContentAudit(audit);
