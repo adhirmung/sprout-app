@@ -6,6 +6,7 @@ import { ProgressBar } from '../components/ProgressBar';
 import {
   buildChatSystemPrompt,
   evaluateWrittenAnswer,
+  generateBoosterCards,
   generateContentAudit,
   generateContentMap,
   generateFeed,
@@ -51,6 +52,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
   const [auditLoading,    setAuditLoading]    = useState(false);
+  const [gapLoading,      setGapLoading]      = useState(false);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
@@ -269,6 +271,30 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     finally { setAuditLoading(false); }
   };
 
+  /** Generate one targeted flashcard per missed concept and launch the card feed */
+  const generateGaps = async (missedConcepts: string[]) => {
+    if (missedConcepts.length === 0 || gapLoading) return;
+    setGapLoading(true);
+    try {
+      const gapCards = await generateBoosterCards(topic, missedConcepts, content);
+      if (gapCards.length === 0) return;
+      // Launch straight into the card feed with only the gap cards
+      setCards(gapCards);
+      setAudit(null);
+      setIdx(0);
+      setScore(0);
+      setStreak(0);
+      setQuizCorrect(0);
+      setQuizTotal(0);
+      setStartTime(Date.now());
+      setPhase('running');
+    } catch (e) {
+      console.error('Gap generation failed:', e);
+    } finally {
+      setGapLoading(false);
+    }
+  };
+
   const startReading = async (map: ContentMap) => {
     // Only use cache if it has the new subtopic format (not old paragraphs format)
     const cached = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
@@ -330,6 +356,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       profile={profile}
       contentAudit={contentAudit}
       auditLoading={auditLoading}
+      gapLoading={gapLoading}
+      onGenerateGaps={generateGaps}
       onBack={() => setPhase('idle')}
       onRead={() => startReading(contentMap)}
       onPractice={() => setPhase('practice')}
@@ -965,18 +993,20 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, onBack, onRead, onPractice, onRegenerate }: {
-  contentMap:    ContentMap;
-  topic:         string;
-  hasCache:      boolean;
-  hasReading:    boolean;
-  profile:       LearnerProfile | null;
-  contentAudit:  ContentAudit | null;
-  auditLoading:  boolean;
-  onBack:        () => void;
-  onRead:        () => void;
-  onPractice:    (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate:  () => void;
+function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, gapLoading, onGenerateGaps, onBack, onRead, onPractice, onRegenerate }: {
+  contentMap:      ContentMap;
+  topic:           string;
+  hasCache:        boolean;
+  hasReading:      boolean;
+  profile:         LearnerProfile | null;
+  contentAudit:    ContentAudit | null;
+  auditLoading:    boolean;
+  gapLoading:      boolean;
+  onGenerateGaps:  (missed: string[]) => void;
+  onBack:          () => void;
+  onRead:          () => void;
+  onPractice:      (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:    () => void;
 }) {
   const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
   const [auditOpen,    setAuditOpen]    = useState(true);
@@ -1223,9 +1253,31 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
                       ))}
                     </div>
 
+                    {/* Study gaps button */}
+                    <button
+                      onClick={() => onGenerateGaps(missed)}
+                      disabled={gapLoading}
+                      style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        marginTop: 14, padding: '10px 16px', borderRadius: 12,
+                        background: scoreColor, color: 'white', border: 'none',
+                        fontSize: 13, fontWeight: 700, cursor: gapLoading ? 'not-allowed' : 'pointer',
+                        opacity: gapLoading ? 0.7 : 1, width: '100%', justifyContent: 'center',
+                      }}
+                    >
+                      {gapLoading ? (
+                        <>
+                          <div style={{ width: 14, height: 14, border: '2px solid rgba(255,255,255,0.4)', borderTop: '2px solid white', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                          Generating gap cards…
+                        </>
+                      ) : (
+                        <>📚 Study {missed.length} missed item{missed.length !== 1 ? 's' : ''} →</>
+                      )}
+                    </button>
+
                     {tips.length > 0 && (
                       <>
-                        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 8, marginTop: 4 }}>
+                        <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 8, marginTop: 16 }}>
                           Suggestions
                         </div>
                         {tips.map((tip, i) => (
