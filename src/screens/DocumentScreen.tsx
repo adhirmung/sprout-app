@@ -163,7 +163,21 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         let resolvedPdf = pdfBase64;
         if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
         if (fileType === 'PDF' && !resolvedPdf) throw new Error('Could not load PDF binary. Try re-uploading the file.');
-        const vs = await generateVisualComponents(topic, content, resolvedPdf);
+
+        // Prefer text over the PDF binary for visual generation — the HTML components
+        // are concept diagrams that only need the map's structured knowledge, not
+        // the raw PDF. Sending 3 parallel 2MB PDF payloads was the cause of the
+        // 500 edge-function timeouts.
+        const mapSummary = contentMap
+          ? `${contentMap.synthesis}\n\n` +
+            contentMap.topics.map(t =>
+              `${t.title}: ${t.summary}\n` +
+              t.subtopics.map(s => `- ${s.title}: ${s.summary}`).join('\n'),
+            ).join('\n\n')
+          : null;
+        const visualContent = content ?? mapSummary;       // text always wins
+        const visualPdf     = visualContent ? null : resolvedPdf; // PDF only as last resort
+        const vs = await generateVisualComponents(topic, visualContent, visualPdf);
         Store.set(cacheKey, vs);
         if (userId) dbSaveContent(userId, sourceKey, 'visuals', vs).catch(console.error);
         setVisualSet(vs); setPhase('visuals');

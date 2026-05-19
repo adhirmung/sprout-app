@@ -818,7 +818,7 @@ Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
   try {
     const raw = await streamToText(client, {
       model:      'claude-haiku-4-5-20251001',
-      max_tokens: 3000,   // ~5–15s per call — safe within Netlify's 50s limit
+      max_tokens: 2000,   // ~3–10s per call — comfortably within Netlify's 50s limit
       system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
       messages:   [{ role: 'user', content: userContent }],
     });
@@ -848,11 +848,13 @@ export async function generateVisualComponents(
   contentText: string | null,
   pdfBase64:   string | null,
 ): Promise<VisualSet> {
-  // Use all 4 types for text docs; limit to 3 for PDFs to avoid re-uploading
-  // the binary 4 times (diagram, chart, process are highest value for most topics)
+  // 4 types for text content (small request bodies, parallel is fast).
+  // For PDF-only (no extracted text, no map) limit to 2 to avoid uploading
+  // the full binary 4x in parallel — the primary fix is passing map text
+  // from the call site instead of the PDF wherever possible.
   const types: VisualComponent['type'][] = contentText
     ? ['diagram', 'chart', 'timeline', 'process']
-    : ['diagram', 'chart', 'process'];
+    : ['diagram', 'chart'];
 
   const results = await Promise.allSettled(
     types.map(type => generateOneVisual(topic, contentText, pdfBase64, type)),
