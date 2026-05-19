@@ -54,6 +54,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapLoading,      setGapLoading]      = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
+  const [mapEnhancing,    setMapEnhancing]    = useState(false);
+  const [readEnhancing,   setReadEnhancing]   = useState(false);
   const [cards,      setCards]      = useState<FeedCard[]>([]);
   const [audit,     setAudit]     = useState<FeedAudit | null>(null);
   const [idx,       setIdx]       = useState(0);
@@ -255,30 +257,76 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       setContentMap(map);
       setPhase('map');
 
-      // Run audit in background — doesn't block the user
-      void runAudit(map, resolvedPdf);
+      // Pass 2: audit → enhanced map (runs in background while user reads pass 1)
+      void runMapEnhancement(map, resolvedPdf);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate topic map. Please retry.');
       setPhase('idle');
     }
   };
 
-  const runAudit = async (map: ContentMap, resolvedPdf: string | null) => {
+  /**
+   * Pass 2 for Map: audit the first-pass map, then regenerate it with every
+   * missed concept explicitly forced into the prompt. The improved map swaps
+   * in place — the user sees the first pass while pass 2 runs in the background.
+   */
+  const runMapEnhancement = async (initialMap: ContentMap, resolvedPdf: string | null) => {
     const auditKey = `audit:${sourceKey}`;
-    const cached = Store.get<ContentAudit | null>(auditKey, null);
-    if (cached && typeof cached.coverageScore === 'number') { setContentAudit(cached); return; }
+    const mapKey   = `map:${sourceKey}`;
+
+    // Step 1: run coverage audit on the first-pass map
     setAuditLoading(true);
+    let audit: ContentAudit | null = null;
     try {
-      // Use text content for the audit — no need to re-send the PDF binary
-      // (the map comparison only needs extractable text, not images).
-      // Only fall back to PDF if there is no extracted text at all.
       const auditPdf = content ? null : resolvedPdf;
-      const audit = await generateContentAudit(topic, content, auditPdf, map);
+      audit = await generateContentAudit(topic, content, auditPdf, initialMap);
       Store.set(auditKey, audit);
-      if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
       setContentAudit(audit);
-    } catch { /* non-fatal — audit is enhancement only */ }
+      if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
+    } catch { return; /* non-fatal */ }
     finally { setAuditLoading(false); }
+
+    if (!audit || audit.missedConcepts.length === 0) return; // map already complete
+
+    // Step 2: regenerate map with gap concepts forced in
+    setMapEnhancing(true);
+    try {
+      const enhanced = await generateContentMap(
+        topic, content, content ? null : resolvedPdf, audit.missedConcepts,
+      );
+      Store.set(mapKey, enhanced);
+      if (userId) dbSaveContent(userId, sourceKey, 'map', enhanced).catch(console.error);
+      setContentMap(enhanced);
+    } catch { /* non-fatal — first-pass map stays visible */ }
+    finally { setMapEnhancing(false); }
+  };
+
+  /**
+   * Pass 2 for Reading: use the cached audit's missed concepts to regenerate
+   * the reading with every gap explicitly woven into the content.
+   */
+  const runReadingEnhancement = async (
+    map: ContentMap,
+    resolvedPdf: string | null,
+    sentenceTarget: number,
+  ) => {
+    // Grab the audit — should already be cached from map enhancement
+    let audit: ContentAudit | null = Store.get<ContentAudit | null>(`audit:${sourceKey}`, null);
+    if (!audit && userId) {
+      audit = await dbLoadContent<ContentAudit>(userId, sourceKey, 'audit').catch(() => null);
+    }
+    if (!audit || audit.missedConcepts.length === 0) return;
+
+    setReadEnhancing(true);
+    try {
+      const enhanced = await generateReading(
+        topic, content, content ? null : resolvedPdf, map, sentenceTarget, audit.missedConcepts,
+      );
+      Store.set(`reading:${sourceKey}`, enhanced);
+      if (userId) dbSaveContent(userId, sourceKey, 'reading', enhanced).catch(console.error);
+      setDocumentReading(enhanced);
+    } catch { /* non-fatal — first-pass reading stays visible */ }
+    finally { setReadEnhancing(false); }
   };
 
   /**
@@ -402,6 +450,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (userId) dbSaveContent(userId, sourceKey, 'reading', reading).catch(console.error);
       setDocumentReading(reading);
       setPhase('read');
+
+      // Pass 2: weave in missed concepts from the audit (background)
+      void runReadingEnhancement(map, resolvedPdf, sentenceTarget);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate reading material. Please retry.');
       setPhase('map');
@@ -432,6 +483,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       profile={profile}
       contentAudit={contentAudit}
       auditLoading={auditLoading}
+      mapEnhancing={mapEnhancing}
       gapLoading={gapLoading}
       onGenerateGaps={generateGaps}
       onBack={() => setPhase('idle')}
@@ -452,7 +504,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
           setContentMap(map);
           setPhase('map');
-          void runAudit(map, resolvedPdf);
+          void runMapEnhancement(map, resolvedPdf);
         } catch (e) {
           setError(e instanceof Error ? e.message : 'Failed to generate topic map.');
           setPhase('idle');
@@ -486,6 +538,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       topic={topic}
       hasCache={!!Store.get<DocumentReading | null>(`reading:${sourceKey}`, null)}
       profile={profile}
+      readEnhancing={readEnhancing}
       onBack={() => setPhase('map')}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
@@ -1089,7 +1142,7 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, gapLoading, onGenerateGaps, onBack, onRead, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, mapEnhancing, gapLoading, onGenerateGaps, onBack, onRead, onPractice, onRegenerate }: {
   contentMap:      ContentMap;
   topic:           string;
   hasCache:        boolean;
@@ -1097,6 +1150,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
   profile:         LearnerProfile | null;
   contentAudit:    ContentAudit | null;
   auditLoading:    boolean;
+  mapEnhancing:    boolean;
   gapLoading:      boolean;
   onGenerateGaps:  (missed: string[]) => void;
   onBack:          () => void;
@@ -1151,6 +1205,20 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
           </button>
         )}
       </div>
+
+      {/* Enhancing banner — visible while pass 2 regenerates the map */}
+      {mapEnhancing && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '9px 20px', background: 'var(--brand-tint)',
+          borderBottom: '1px solid var(--brand-soft)', flexShrink: 0,
+        }}>
+          <div style={{ width: 14, height: 14, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)' }}>
+            ✦ Enhancing coverage — weaving in missing concepts…
+          </span>
+        </div>
+      )}
 
       {/* Scrollable content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '24px 24px' }}>
@@ -1933,11 +2001,12 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, onBack, onPractice, onRegenerate }: {
   documentReading: DocumentReading;
   topic: string;
   hasCache: boolean;
   profile: LearnerProfile | null;
+  readEnhancing: boolean;
   onBack: () => void;
   onPractice: (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate: () => void;
@@ -2592,6 +2661,20 @@ function ReadView({ documentReading, topic, hasCache, profile, onBack, onPractic
           </button>
         )}
       </div>
+
+      {/* Enhancing banner — visible while pass 2 rewrites the reading with gap concepts */}
+      {readEnhancing && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: 10,
+          padding: '9px 20px', background: 'var(--brand-tint)',
+          borderBottom: '1px solid var(--brand-soft)', flexShrink: 0,
+        }}>
+          <div style={{ width: 14, height: 14, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)' }}>
+            ✦ Enhancing coverage — weaving in missing concepts…
+          </span>
+        </div>
+      )}
 
       {/* Body — always row layout; sidebar visible in both List and Focus modes */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>

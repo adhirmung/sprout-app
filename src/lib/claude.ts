@@ -570,14 +570,19 @@ export async function generateContentMap(
   topic:       string,
   contentText: string | null,
   pdfBase64:   string | null,
+  gapFill?:    string[],      // pass-2: concepts that must be explicitly included
 ): Promise<ContentMap> {
   const client = getClient();
   const hasPdf = !!pdfBase64;
 
+  const gapBlock = gapFill?.length
+    ? `\n\nCRITICAL GAP-FILL REQUIREMENT:\nA coverage audit identified the following concepts as MISSING from an earlier version of this map.\nYou MUST explicitly include ALL of these in appropriate topics and subtopics — do not skip any:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}\nIf a concept doesn't fit existing topics, add a new subtopic or topic to accommodate it.`
+    : '';
+
   const prompt = `You are an expert educational content analyst. Analyze this document and extract a structured learning map.
 
 Topic: "${topic}"
-${sourceBlock(contentText, hasPdf)}
+${sourceBlock(contentText, hasPdf)}${gapBlock}
 
 Extract a hierarchical topic map. Cover the FULL document proportionally — topics from the beginning, middle, and end.
 Generate 4–8 major topics, each with 2–5 subtopics.
@@ -639,6 +644,7 @@ export async function generateReading(
   pdfBase64:      string | null,
   contentMap:     ContentMap,
   sentenceTarget: number = 3,
+  gapFill?:       string[],   // pass-2: concepts that must appear in the written content
 ): Promise<DocumentReading> {
   const client = getClient();
   const hasPdf = !!pdfBase64;
@@ -655,10 +661,14 @@ export async function generateReading(
         ? '4 sentences — include elaboration and a concrete example'
         : '4–5 sentences — include nuance, examples, and connections to other topics';
 
+  const gapBlock = gapFill?.length
+    ? `\n\nCRITICAL GAP-FILL REQUIREMENT:\nThe following concepts were identified as MISSING from an earlier draft. You MUST weave ALL of them explicitly into the appropriate subtopic content below:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
+    : '';
+
   const prompt = `You are an expert educational content writer. Write a structured study guide for each topic and subtopic listed below.
 
 Topic: "${topic}"
-${sourceBlock(contentText, hasPdf)}
+${sourceBlock(contentText, hasPdf)}${gapBlock}
 
 TOPICS AND SUBTOPICS TO COVER (use these exact topicId values):
 ${mapOutline}
