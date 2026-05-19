@@ -297,6 +297,17 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       Store.set(mapKey, enhanced);
       if (userId) dbSaveContent(userId, sourceKey, 'map', enhanced).catch(console.error);
       setContentMap(enhanced);
+
+      // Gaps are now baked into the map — clear the missed-items list so the
+      // audit panel doesn't keep showing items that have already been incorporated.
+      const resolvedAudit: ContentAudit = {
+        coverageScore:  100,
+        missedConcepts: [],
+        suggestions:    audit.suggestions,
+      };
+      Store.set(auditKey, resolvedAudit);
+      if (userId) dbSaveContent(userId, sourceKey, 'audit', resolvedAudit).catch(console.error);
+      setContentAudit(resolvedAudit);
     } catch { /* non-fatal — first-pass map stays visible */ }
     finally { setMapEnhancing(false); }
   };
@@ -325,6 +336,17 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       Store.set(`reading:${sourceKey}`, enhanced);
       if (userId) dbSaveContent(userId, sourceKey, 'reading', enhanced).catch(console.error);
       setDocumentReading(enhanced);
+
+      // Gaps are now in the reading — clear the stale missed-items list
+      const resolvedAudit: ContentAudit = {
+        coverageScore:  100,
+        missedConcepts: [],
+        suggestions:    audit.suggestions,
+      };
+      const auditKey = `audit:${sourceKey}`;
+      Store.set(auditKey, resolvedAudit);
+      if (userId) dbSaveContent(userId, sourceKey, 'audit', resolvedAudit).catch(console.error);
+      setContentAudit(resolvedAudit);
     } catch { /* non-fatal — first-pass reading stays visible */ }
     finally { setReadEnhancing(false); }
   };
