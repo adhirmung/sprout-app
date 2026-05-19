@@ -723,7 +723,7 @@ Return ONLY valid JSON — no markdown fences:
 
   const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 12000,
+    max_tokens: 8000,   // ~40s at Haiku streaming speed — safe within Netlify's 50s limit
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   });
@@ -759,47 +759,52 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-export async function generateVisualComponents(
+// Type-specific generation instructions — each parallel call gets exactly one
+const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
+  diagram:     'SVG anatomical or structural diagram with labeled parts, arrows, and callouts.',
+  chart:       'SVG bar chart, pie chart, or line graph using real data/values from the source.',
+  timeline:    'Horizontal or vertical timeline of key stages, events, or phases.',
+  process:     'Animated step-by-step flow showing how a key process works (CSS/SVG animation).',
+  interactive: 'Hoverable or clickable SVG that reveals additional detail on interaction.',
+};
+
+/**
+ * Generates one visual component in its own API call.
+ * Kept to max_tokens:3000 so each request completes well within Netlify's
+ * 50-second edge-function wall-clock limit.
+ */
+async function generateOneVisual(
   topic:       string,
   contentText: string | null,
   pdfBase64:   string | null,
-): Promise<VisualSet> {
+  visualType:  VisualComponent['type'],
+): Promise<VisualComponent | null> {
   const client = getClient();
   const hasPdf = !!pdfBase64;
 
-  const prompt = `You are an expert educational multimedia designer. Analyze the content and generate exactly 5 self-contained HTML5 visual learning components that teach the key concepts visually.
+  const prompt = `You are an expert educational multimedia designer. Create ONE self-contained HTML5 visual learning component.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-Pick the most impactful visualization type for each concept — use a variety across the 5 components:
-- "diagram": SVG anatomical or structural diagram with labeled parts and callouts
-- "chart": SVG bar chart, pie chart, or line graph using real data/values from the source
-- "timeline": horizontal or vertical timeline of stages, events, or phases
-- "process": animated step-by-step flow showing how something works (CSS/SVG animation)
-- "interactive": hoverable or clickable SVG diagram that reveals details on interaction
+Visual type: "${visualType}"
+Instruction: ${VISUAL_TYPE_GUIDE[visualType]}
 
-EVERY component HTML must:
-- Be a complete standalone document (<!DOCTYPE html> to </html>)
-- Have ZERO external resources — no CDN, no external fonts, no images by URL
-- Use only: inline SVG, Canvas API, CSS animations, vanilla JS
-- Be designed for a 600×380px viewport (use width/height or viewBox accordingly)
-- Have a clean white or #FAFAF9 background, dark readable labels
-- Include smooth CSS animations (fade-in, draw, slide, pulse) where appropriate
-- Be visually polished — proper spacing, colour, legible type
+Requirements:
+- Complete standalone document (<!DOCTYPE html> to </html>)
+- ZERO external resources — no CDN, no external fonts, no image URLs
+- Only: inline SVG, Canvas API, CSS animations, vanilla JS
+- 600×380px viewport
+- White or #FAFAF9 background, dark readable labels
+- Smooth CSS animations where they add clarity
+- Under 50 lines — efficient SVG, short class names, no redundancy
 
-Keep each HTML concise (under 60 lines) — efficient SVG, short class names, minimal inline styles, no redundancy. Prioritise clarity over animation complexity.
-
-Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
+Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
 {
-  "components": [
-    {
-      "title": "Short descriptive title",
-      "type": "diagram",
-      "concept": "One sentence: what concept this visual teaches",
-      "html": "<!DOCTYPE html><html lang=\\"en\\"><head>...</head><body>...</body></html>"
-    }
-  ]
+  "title": "Short descriptive title",
+  "type": "${visualType}",
+  "concept": "One sentence: what concept this visual teaches",
+  "html": "<!DOCTYPE html>..."
 }`;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
@@ -810,26 +815,59 @@ Return ONLY valid JSON. Escape all double-quotes inside HTML as \\\":
       ] as MsgContent)
     : prompt;
 
-  const raw = await streamToText(client, {
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 12000,   // 5 compact HTML components; 16k caused edge-function timeouts
-    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    messages:   [{ role: 'user', content: userContent }],
-  });
+  try {
+    const raw = await streamToText(client, {
+      model:      'claude-haiku-4-5-20251001',
+      max_tokens: 3000,   // ~5–15s per call — safe within Netlify's 50s limit
+      system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      messages:   [{ role: 'user', content: userContent }],
+    });
 
-  const start = raw.indexOf('{');
-  const end   = raw.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('Failed to generate visual components. Please retry.');
+    const start = raw.indexOf('{');
+    const end   = raw.lastIndexOf('}');
+    if (start === -1 || end === -1) return null;
 
-  let parsed: VisualSet;
-  try   { parsed = JSON.parse(raw.slice(start, end + 1)); }
-  catch { parsed = JSON.parse(repairJson(raw.slice(start))); }
+    let parsed: VisualComponent;
+    try   { parsed = JSON.parse(raw.slice(start, end + 1)) as VisualComponent; }
+    catch { parsed = JSON.parse(repairJson(raw.slice(start))) as VisualComponent; }
 
-  if (!Array.isArray(parsed.components) || parsed.components.length === 0) {
-    throw new Error('Invalid visual components response. Please retry.');
+    return parsed?.html && parsed?.title ? parsed : null;
+  } catch {
+    return null; // individual failures are non-fatal — other components still show
+  }
+}
+
+/**
+ * Generates 4 visual learning components in parallel.
+ * Each component is its own bounded API call (~5–15s each) so no single
+ * request can hit Netlify's 50-second edge-function wall-clock limit.
+ * Total wall time: ~10–20s regardless of document size.
+ */
+export async function generateVisualComponents(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+): Promise<VisualSet> {
+  // Use all 4 types for text docs; limit to 3 for PDFs to avoid re-uploading
+  // the binary 4 times (diagram, chart, process are highest value for most topics)
+  const types: VisualComponent['type'][] = contentText
+    ? ['diagram', 'chart', 'timeline', 'process']
+    : ['diagram', 'chart', 'process'];
+
+  const results = await Promise.allSettled(
+    types.map(type => generateOneVisual(topic, contentText, pdfBase64, type)),
+  );
+
+  const components = results
+    .filter((r): r is PromiseFulfilledResult<VisualComponent> =>
+      r.status === 'fulfilled' && r.value !== null)
+    .map(r => r.value);
+
+  if (components.length === 0) {
+    throw new Error('Failed to generate visual components. Please retry.');
   }
 
-  return { components: parsed.components.slice(0, 5) };
+  return { components };
 }
 
 // ── Content audit ─────────────────────────────────────────────
