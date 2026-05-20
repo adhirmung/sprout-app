@@ -780,14 +780,18 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-// Shared responsive CSS requirement injected into every generated document
+// Shared layout requirements injected into every generated document.
 const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html> to </html>)
 - ZERO external resources — no CDN, no external fonts, no image URLs
 - Only: inline SVG, Canvas API, CSS animations, vanilla JS
-- CRITICAL: html and body must have { margin:0; padding:0; width:100%; height:100%; overflow:hidden }
-- Use percentage widths/heights, vw/vh units — NEVER fixed pixel viewport dimensions
-- White or #FAFAF9 background, dark readable labels (#1a1a1a or similar)
-- All text, labels, and elements must stay within the visible area at any iframe size`;
+- html, body: { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#FAFAF9 }
+- Root SVG or Canvas element must use width='100%' height='100%' so it fills the iframe
+- SVG elements must include a viewBox attribute so they scale at any size
+- Dark readable labels (#111111); avoid light-grey text
+- All content must fit without scrolling
+- CRITICAL FOR JSON: use single quotes for ALL HTML and SVG attributes — never double quotes inside the html field
+  Correct:  <rect x='10' y='10' fill='#3B82F6'/>   <div style='color:red'>
+  Wrong:    <rect x="10" y="10" fill="#3B82F6"/>    <div style="color:red">`;
 
 // Type-specific generation instructions
 const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
@@ -814,8 +818,11 @@ async function generateOneVisual(
   const client      = getClient();
   const hasPdf      = !!pdfBase64;
   const isSimulation = visualType === 'simulation';
-  const model       = isSimulation ? 'claude-sonnet-4-5-20251001' : 'claude-haiku-4-5-20251001';
-  const maxTokens   = isSimulation ? 5000 : 2000;
+  // Simulations use the more capable Sonnet model — verified model ID.
+  // Regular visuals stay on fast Haiku with 3000 tokens (up from 2000 — the
+  // longer responsive prompt + richer SVG were truncating at 2000).
+  const model     = isSimulation ? 'claude-3-5-sonnet-20241022' : 'claude-haiku-4-5-20251001';
+  const maxTokens = isSimulation ? 5000 : 3000;
 
   const prompt = isSimulation
     ? `You are an expert educational simulation developer. Create ONE interactive simulation that accurately models a key concept from the source material.
@@ -829,18 +836,13 @@ Instruction: ${VISUAL_TYPE_GUIDE.simulation}
 Requirements:
 ${RESPONSIVE_REQUIREMENTS}
 - requestAnimationFrame animation loop for smooth real-time updates
-- Interactive controls (sliders/buttons) positioned at the bottom or side — never overlapping the simulation area
-- Accurate formulas and constants — ground numbers in the source material
+- Interactive controls (sliders/buttons) positioned at the bottom — never overlapping the simulation area
+- Accurate formulas and constants grounded in the source material
 - Clear axis labels, units, and a legend if applicable
 - A visible Reset button that restores initial state
 
-Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
-{
-  "title": "Short descriptive title",
-  "type": "simulation",
-  "concept": "One sentence: what concept this simulation demonstrates interactively",
-  "html": "<!DOCTYPE html>..."
-}`
+Return ONLY valid JSON — the html value must use single quotes for all attributes:
+{"title":"Short descriptive title","type":"simulation","concept":"One sentence: what this simulation teaches","html":"<!DOCTYPE html>..."}`
     : `You are an expert educational multimedia designer. Create ONE self-contained HTML5 visual learning component.
 
 Topic: "${topic}"
@@ -854,13 +856,8 @@ ${RESPONSIVE_REQUIREMENTS}
 - Smooth CSS animations where they add clarity
 - Concise and efficient — avoid redundant markup
 
-Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
-{
-  "title": "Short descriptive title",
-  "type": "${visualType}",
-  "concept": "One sentence: what concept this visual teaches",
-  "html": "<!DOCTYPE html>..."
-}`;
+Return ONLY valid JSON — the html value must use single quotes for all attributes:
+{"title":"Short descriptive title","type":"${visualType}","concept":"One sentence: what this visual teaches","html":"<!DOCTYPE html>..."}`;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
   const userContent: MsgContent = pdfBase64
@@ -880,14 +877,26 @@ Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
 
     const start = raw.indexOf('{');
     const end   = raw.lastIndexOf('}');
-    if (start === -1 || end === -1) return null;
+    if (start === -1 || end === -1) {
+      console.error(`[generateOneVisual] ${visualType}: no JSON braces found in response (${raw.length} chars)`);
+      return null;
+    }
 
     let parsed: VisualComponent;
-    try   { parsed = JSON.parse(raw.slice(start, end + 1)) as VisualComponent; }
-    catch { parsed = JSON.parse(repairJson(raw.slice(start))) as VisualComponent; }
+    try {
+      parsed = JSON.parse(raw.slice(start, end + 1)) as VisualComponent;
+    } catch {
+      try {
+        parsed = JSON.parse(repairJson(raw.slice(start))) as VisualComponent;
+      } catch (parseErr) {
+        console.error(`[generateOneVisual] ${visualType}: JSON parse failed`, parseErr, '\nRaw (first 300):', raw.slice(0, 300));
+        return null;
+      }
+    }
 
     return parsed?.html && parsed?.title ? parsed : null;
-  } catch {
+  } catch (err) {
+    console.error(`[generateOneVisual] ${visualType} failed:`, err);
     return null; // individual failures are non-fatal — other components still show
   }
 }
