@@ -348,24 +348,41 @@ export function VisualBiology({ payload }: Props) {
     const el = containerRef.current;
     if (!el) return;
 
-    // Destroy previous instance before creating a new one
+    // Tear down any previous p5 instance
     instanceRef.current?.remove();
     instanceRef.current = null;
+    el.innerHTML = '';
 
-    // Read actual container size — p5 default is 100×100 so we must pass it via closure
-    const w = el.offsetWidth  || 400;
-    const h = el.offsetHeight || 300;
+    let mounted = false;
 
-    const factory = SKETCH_FACTORIES[simType] ?? makeCirculatorySketch;
-    const sketch  = factory(w, h);
+    const mount = (w: number, h: number) => {
+      if (mounted || w < 10 || h < 10) return;
+      mounted = true;
+      el.innerHTML = '';
+      const factory = SKETCH_FACTORIES[simType] ?? makeCirculatorySketch;
+      instanceRef.current = new p5(factory(w, h), el);
+    };
 
-    instanceRef.current = new p5(sketch, el);
+    // ResizeObserver fires with accurate contentRect once layout is stable
+    const ro = new ResizeObserver(entries => {
+      for (const e of entries) {
+        mount(e.contentRect.width, e.contentRect.height);
+      }
+    });
+    ro.observe(el);
 
-    return () => { instanceRef.current?.remove(); instanceRef.current = null; };
-  }, [simType]); // re-mount when simulation type changes
+    // Also try immediately (element may already have dimensions after first paint)
+    mount(el.offsetWidth, el.offsetHeight);
+
+    return () => {
+      ro.disconnect();
+      instanceRef.current?.remove();
+      instanceRef.current = null;
+    };
+  }, [simType]);
 
   return (
-    <div style={{ width: '100%', height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* Header */}
       <div style={{
         padding: '12px 20px 10px', borderBottom: '1px solid var(--line)',
@@ -382,7 +399,7 @@ export function VisualBiology({ payload }: Props) {
         </span>
       </div>
 
-      {/* p5 canvas — flex:1 so it fills remaining height */}
+      {/* p5 canvas container — flex:1 fills remaining height */}
       <div ref={containerRef} style={{ flex: 1, overflow: 'hidden', position: 'relative' }} />
     </div>
   );

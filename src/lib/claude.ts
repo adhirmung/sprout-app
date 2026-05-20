@@ -898,16 +898,25 @@ async function generateDynamicVisual(
       : '(No source — use accurate general knowledge for this topic.)';
 
     const prompt = `You are an expert educational content designer.
-Analyse the topic "${topic}" and choose the best interactive visual renderer for a student.
+Choose the best interactive visual for a student studying: "${topic}"
 
 ${sourceCtx}
 
-Choose the domain that best fits:
-- "math":     equations, formulas, proofs, derivations → provide 2-5 LaTeX formula strings (raw LaTeX, no $ delimiters)
-- "graphing": curves, functions, mathematical relationships → provide a math.js equation string e.g. "sin(x)" or "x^2 - 3*x + 2"
-- "biology":  living systems, anatomy, ecology, neuroscience → pick simulationType: circulatory | mitosis | neural | ecosystem
+DOMAIN RULES — read carefully:
 
-Call render_simulation now with the best domain for this topic.`;
+Use "biology" when the topic is about living organisms, body systems, anatomy, physiology, ecology, cells, or neuroscience.
+Examples → Circulatory System = biology/circulatory, Mitosis = biology/mitosis, Nervous System = biology/neural, Food Webs = biology/ecosystem.
+
+Use "math" when the topic is about mathematical formulas, equations, proofs, or named rules.
+Examples → Limits = math (show lim formulas), Derivatives = math, Newton's Laws = math, Chemical Equations = math.
+
+Use "graphing" when the topic is a mathematical function best understood by seeing its curve.
+Examples → Quadratic Functions = graphing (x^2), Sine Wave = graphing (sin(x)), Exponential Growth = graphing (exp(x)).
+
+IMPORTANT: "Circulatory System" → domain MUST be "biology", simulationType "circulatory".
+IMPORTANT: "Limits" or "Continuity" → domain MUST be "math", provide limit formula strings.
+
+Call render_simulation now.`;
 
     const response = await client.messages.create({
       model:      'claude-3-5-sonnet-20241022',

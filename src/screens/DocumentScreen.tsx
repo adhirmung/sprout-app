@@ -830,7 +830,7 @@ function VisualsView({
       </div>
 
       {/* ── Visual content area ── */}
-      <div style={{ flex: 1, overflow: 'hidden', background: 'var(--bg)' }}>
+      <div style={{ flex: 1, overflow: 'hidden', background: 'var(--bg)', display: 'flex', flexDirection: 'column' }}>
         {active && (
           active.chartData    ? <VisualChart    data={active.chartData}    /> :
           active.diagramData  ? <VisualDiagram  data={active.diagramData}  /> :
