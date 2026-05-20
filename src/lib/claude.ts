@@ -1018,9 +1018,13 @@ Call render_simulation now.`;
     );
 
     const toolBlock = response.content.find(b => b.type === 'tool_use');
-    if (!toolBlock || toolBlock.type !== 'tool_use') return null;
+    if (!toolBlock || toolBlock.type !== 'tool_use') {
+      console.warn('[generateDynamicVisual] no tool_use block in response', response.content);
+      return null;
+    }
 
     const payload = toolBlock.input as SimulationPayload;
+    console.info('[generateDynamicVisual] payload:', payload);
     if (!payload?.domain || !payload?.title) return null;
 
     return {
