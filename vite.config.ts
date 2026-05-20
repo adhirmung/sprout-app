@@ -7,6 +7,10 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      workbox: {
+        // KaTeX + p5 + function-plot push the bundle over the default 2 MiB limit
+        maximumFileSizeToCacheInBytes: 4 * 1024 * 1024, // 4 MiB
+      },
       manifest: {
         name: 'Sprout — Learn anything, your way',
         short_name: 'Sprout',

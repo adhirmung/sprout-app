@@ -789,16 +789,33 @@ export interface ProcessData {
   steps: { title: string; description: string }[];
 }
 
+// ── Dynamic simulation payload (client-side render via KaTeX / function-plot / p5) ──
+export interface SimulationPayload {
+  domain:             'math' | 'graphing' | 'biology';
+  title:              string;
+  concept:            string;
+  // math domain → KaTeX renders these
+  latexFormulas?:     string[];
+  // graphing domain → function-plot renders this
+  graphingEquation?:  string;
+  // biology domain → p5 simulation switcher
+  simulationVariables?: {
+    simulationType?: 'circulatory' | 'mitosis' | 'neural' | 'ecosystem';
+    [key: string]: unknown;
+  };
+}
+
 export interface VisualComponent {
   title:   string;
-  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive' | 'simulation' | 'python';
+  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive' | 'simulation' | 'dynamic';
   concept: string;
   // Structured data — rendered by React components (new approach)
-  chartData?:    ChartData;
-  diagramData?:  DiagramData;
-  timelineData?: TimelineData;
-  processData?:  ProcessData;
-  // Raw HTML — simulation, python, + legacy cached visuals
+  chartData?:        ChartData;
+  diagramData?:      DiagramData;
+  timelineData?:     TimelineData;
+  processData?:      ProcessData;
+  simulationPayload?: SimulationPayload;
+  // Raw HTML — simulation + legacy cached visuals
   html?: string;
 }
 
@@ -934,6 +951,91 @@ ${dataInstruction}`;
 }
 
 /**
+ * Generates a dynamic visual using Claude tool_use for schema-constrained JSON output.
+ * Claude picks one of three renderers based on topic:
+ *   math     → KaTeX formula display
+ *   graphing → function-plot equation graph
+ *   biology  → p5.js preset simulation (circulatory / mitosis / neural / ecosystem)
+ */
+async function generateDynamicVisual(
+  topic:       string,
+  contentText: string | null,
+): Promise<VisualComponent | null> {
+  const client = getClient();
+
+  const sourceCtx = contentText
+    ? `SOURCE MATERIAL:\n"""\n${contentText.slice(0, 8000)}\n"""`
+    : '(No source — use accurate general knowledge for this topic.)';
+
+  const prompt = `You are an expert educational content designer.
+Analyse the topic "${topic}" and choose the best interactive visual renderer for a student.
+
+${sourceCtx}
+
+Choose the domain that best fits:
+- "math":     equations, formulas, proofs, derivations → provide 2-5 LaTeX formula strings
+- "graphing": curves, functions, relationships → provide a math.js equation (e.g. "sin(x)", "x^2 - 3*x + 2")
+- "biology":  living systems, anatomy, ecology, neuroscience → pick simulationType: circulatory | mitosis | neural | ecosystem
+
+Call render_simulation now.`;
+
+  try {
+    const response = await client.messages.create({
+      model:      'claude-3-5-sonnet-20241022',
+      max_tokens: 600,
+      tools: [{
+        name:        'render_simulation',
+        description: 'Render an interactive educational visual for a student',
+        input_schema: {
+          type: 'object' as const,
+          properties: {
+            domain:           { type: 'string', enum: ['math', 'graphing', 'biology'] },
+            title:            { type: 'string', description: 'Short descriptive title (≤8 words)' },
+            concept:          { type: 'string', description: 'One sentence explaining what this visual shows' },
+            latexFormulas:    { type: 'array',  items: { type: 'string' }, description: 'LaTeX strings for math domain (no $ delimiters — raw LaTeX only)' },
+            graphingEquation: { type: 'string', description: 'math.js expression for graphing domain, e.g. "sin(x)" or "x^2"' },
+            simulationVariables: {
+              type: 'object',
+              description: 'Parameters for biology domain',
+              properties: {
+                simulationType: { type: 'string', enum: ['circulatory', 'mitosis', 'neural', 'ecosystem'] },
+              },
+            },
+          },
+          required: ['domain', 'title', 'concept'],
+        },
+      }],
+      tool_choice: { type: 'tool', name: 'render_simulation' },
+      messages:    [{ role: 'user', content: prompt }],
+    });
+
+    void dbLogUsage(
+      _currentUserId,
+      'generateDynamicVisual',
+      'claude-3-5-sonnet-20241022',
+      response.usage.input_tokens,
+      response.usage.output_tokens,
+    );
+
+    const toolBlock = response.content.find(b => b.type === 'tool_use');
+    if (!toolBlock || toolBlock.type !== 'tool_use') return null;
+
+    const payload = toolBlock.input as SimulationPayload;
+    if (!payload?.domain || !payload?.title) return null;
+
+    return {
+      type:              'dynamic',
+      title:             payload.title,
+      concept:           payload.concept,
+      simulationPayload: payload,
+    };
+  } catch (err) {
+    console.error('[generateDynamicVisual] failed:', err);
+    return null;
+  }
+}
+
+/**
  * Generates 4 visual learning components in parallel.
  * Each component is its own bounded API call (~5–15s each) so no single
  * request can hit Netlify's 50-second edge-function wall-clock limit.
@@ -944,50 +1046,29 @@ export async function generateVisualComponents(
   contentText: string | null,
   pdfBase64:   string | null,
 ): Promise<VisualSet> {
-  // Text path: 4 standard visuals (Haiku) + 1 simulation (Sonnet), all parallel.
-  // PDF-only path: limit to 2 standard + 1 simulation to avoid large concurrent uploads.
+  // Text path: 4 standard visuals (Haiku) + 1 dynamic (Sonnet), all parallel.
+  // PDF-only path: limit to 2 standard + 1 dynamic to avoid large concurrent uploads.
   const types: VisualComponent['type'][] = contentText
     ? ['diagram', 'chart', 'timeline', 'process', 'simulation']
     : ['diagram', 'chart', 'simulation'];
 
-  const results = await Promise.allSettled(
-    types.map(type => generateOneVisual(topic, contentText, pdfBase64, type)),
-  );
+  const [results, dynamicVisual] = await Promise.all([
+    Promise.allSettled(
+      types.map(type => generateOneVisual(topic, contentText, pdfBase64, type)),
+    ),
+    generateDynamicVisual(topic, contentText),
+  ]);
 
   const components = results
     .filter((r): r is PromiseFulfilledResult<VisualComponent> =>
       r.status === 'fulfilled' && r.value !== null)
     .map(r => r.value);
 
+  // Append dynamic visual last (tab order: static visuals → dynamic)
+  if (dynamicVisual) components.push(dynamicVisual);
+
   if (components.length === 0) {
     throw new Error('Failed to generate visual components. Please retry.');
-  }
-
-  // ── Python visual (Plotly / RDKit / PyMunk) ──────────────────────────────
-  // Runs in parallel with the above, appended when ready.
-  // Skipped silently if VITE_PYTHON_VIZ_URL is not configured.
-  const pythonVizUrl = (import.meta.env.VITE_PYTHON_VIZ_URL as string | undefined) ?? '';
-  if (pythonVizUrl) {
-    try {
-      const res = await fetch(`${pythonVizUrl}/generate`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ topic, content: contentText?.slice(0, 6000) ?? null, api_key: getApiKey() || undefined }),
-      });
-      if (res.ok) {
-        const data = await res.json() as { title: string; concept: string; html: string };
-        if (data.html) {
-          components.push({
-            type:    'python',
-            title:   data.title,
-            concept: data.concept,
-            html:    data.html,
-          });
-        }
-      }
-    } catch {
-      // non-fatal — Python service unavailable, skip silently
-    }
   }
 
   return { components };
