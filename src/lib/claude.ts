@@ -823,158 +823,50 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-// ── Prompts for structured-data visuals (chart / diagram / timeline / process) ──
-// These produce small JSON payloads consumed by React components — no HTML generation.
-const DATA_VISUAL_PROMPTS: Partial<Record<VisualComponent['type'], string>> = {
-  chart:
-    `Identify the most important quantitative comparison, distribution, or trend from the source material.
-Return ONLY this JSON (no markdown, no backticks):
-{"title":"Short chart title","type":"chart","concept":"One sentence explaining what this shows","chartData":{"chartType":"bar","xLabel":"X label","yLabel":"Y label","items":[{"name":"Label","value":42}]}}
-chartType must be "bar" (comparisons), "line" (trends/sequences), or "pie" (proportions that sum to a whole).
-Include 3–8 real data points. Values MUST be real numbers from the source — never invent data.`,
 
-  diagram:
-    `Identify the most important process, system, or cause-effect relationship from the source material.
-Return ONLY this JSON (no markdown, no backticks):
-{"title":"Short diagram title","type":"diagram","concept":"One sentence explaining what this shows","diagramData":{"nodes":[{"id":"1","label":"Start","nodeType":"start"},{"id":"2","label":"Process step","nodeType":"process"},{"id":"3","label":"End","nodeType":"end"}],"edges":[{"from":"1","to":"2"},{"from":"2","to":"3","label":"optional label"}]}}
-nodeType: "start" | "process" | "decision" | "end". Use 4–8 nodes. Every edge from/to must match a node id.`,
-
-  timeline:
-    `Identify the key events, stages, or milestones from the source in chronological order.
-Return ONLY this JSON (no markdown, no backticks):
-{"title":"Short timeline title","type":"timeline","concept":"One sentence explaining what this shows","timelineData":{"events":[{"date":"1905","title":"Event name","description":"Brief description of what happened and why it matters."}]}}
-Include 4–8 events. "date" can be a year, decade, or descriptive stage label. Must be chronological.`,
-
-  process:
-    `Identify the most important step-by-step process or procedure from the source material.
-Return ONLY this JSON (no markdown, no backticks):
-{"title":"Short process title","type":"process","concept":"One sentence explaining what this shows","processData":{"steps":[{"title":"Step name","description":"What happens and why it matters."}]}}
-Include 3–6 steps. Each description 1–2 sentences. Steps must be in order.`,
-};
-
-// ── Simulation instructions (iframe / Canvas — no React component) ───────────
-const SIMULATION_INSTRUCTIONS = `Create a Canvas animation with interactive controls — no external libraries.
-Structure:
-  <div style='display:flex;flex-direction:column;width:100%;height:100%'>
-    <canvas id='c' style='flex:1;display:block'></canvas>
-    <div id='controls' style='padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#fff;border-top:1px solid #e5e7eb'></div>
-  </div>
-In JS: size canvas to its offsetWidth/offsetHeight. requestAnimationFrame for draw loop.
-Add <label>+<input type='range'>+<span> controls to #controls via JS.
-Update simulation state when sliders change. Show current values with ctx.fillText.
-Add a Reset button. Use accurate formulas/constants from the source.
-CRITICAL FOR JSON: use single quotes for ALL HTML attributes in the html field.`;
-
-/**
- * Generates one visual component in its own API call.
- *
- * chart / diagram / timeline / process → Haiku, ~700 tokens (small structured JSON).
- *   These are rendered by React components (Recharts + pure CSS) — no HTML generation.
- * simulation → Sonnet, 5000 tokens (full Canvas HTML document, iframe-rendered).
- */
-async function generateOneVisual(
-  topic:       string,
-  contentText: string | null,
-  pdfBase64:   string | null,
-  visualType:  VisualComponent['type'],
-): Promise<VisualComponent | null> {
-  const client       = getClient();
-  const hasPdf       = !!pdfBase64;
-  const isSimulation = visualType === 'simulation';
-  const model        = isSimulation ? 'claude-3-5-sonnet-20241022' : 'claude-haiku-4-5-20251001';
-  const maxTokens    = isSimulation ? 5000 : 700;
-
-  const dataInstruction = DATA_VISUAL_PROMPTS[visualType];
-
-  const prompt = isSimulation
-    ? `You are an expert educational simulation developer. Create ONE interactive Canvas simulation for a student studying "${topic}".
-
-${sourceBlock(contentText, hasPdf)}
-
-${SIMULATION_INSTRUCTIONS}
-
-Return ONLY valid JSON:
-{"title":"Short title","type":"simulation","concept":"One sentence what this teaches","html":"<!DOCTYPE html>..."}`
-    : `You are an expert educational analyst. Study the source material below and create a "${visualType}" visual for a student learning "${topic}".
-
-${sourceBlock(contentText, hasPdf)}
-
-${dataInstruction}`;
-
-  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
-  const userContent: MsgContent = pdfBase64
-    ? ([
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: prompt },
-      ] as MsgContent)
-    : prompt;
-
-  try {
-    const raw = await streamToText(client, {
-      model,
-      max_tokens: maxTokens,
-      system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no backticks, no extra text.',
-      messages:   [{ role: 'user', content: userContent }],
-    }, 'generateVisualComponents');
-
-    const start = raw.indexOf('{');
-    const end   = raw.lastIndexOf('}');
-    if (start === -1 || end === -1) {
-      console.error(`[generateOneVisual] ${visualType}: no JSON braces in response (${raw.length} chars)`);
-      return null;
-    }
-
-    let parsed: VisualComponent;
-    try {
-      parsed = JSON.parse(raw.slice(start, end + 1)) as VisualComponent;
-    } catch {
-      try {
-        parsed = JSON.parse(repairJson(raw.slice(start))) as VisualComponent;
-      } catch (parseErr) {
-        console.error(`[generateOneVisual] ${visualType}: JSON parse failed`, parseErr, '\nRaw:', raw.slice(0, 300));
-        return null;
-      }
-    }
-
-    if (!parsed?.title) return null;
-
-    // Simulation: needs html field
-    if (isSimulation) return parsed.html ? parsed : null;
-
-    // Data visuals: need the matching data field
-    const hasData = parsed.chartData ?? parsed.diagramData ?? parsed.timelineData ?? parsed.processData;
-    return hasData ? parsed : null;
-  } catch (err) {
-    console.error(`[generateOneVisual] ${visualType} failed:`, err);
-    return null;
-  }
-}
 
 /** Keyword-based fallback when the Claude API call for tool_use fails. */
 function buildFallbackPayload(topic: string): SimulationPayload {
   const t = topic.toLowerCase();
-  // Biology topics
-  if (/\b(blood|heart|circulat|cardio|vascu|artery|vein|plasma)\b/.test(t))
+
+  // ── Biology ──────────────────────────────────────────────────────────────
+  if (/\b(blood|heart|circulat|cardio|vascu|artery|vein|plasma|pulmonary)\b/.test(t))
     return { domain: 'biology', title: 'Circulatory System', concept: 'Animated blood flow through the heart and vessels.', simulationVariables: { simulationType: 'circulatory' } };
-  if (/\b(cell|divis|mitosis|meiosis|chromosome|nucleus|dna|genetic)\b/.test(t))
+  if (/\b(cell|divis|mitosis|meiosis|chromosome|nucleus|dna|rna|genetic|genome|replicat)\b/.test(t))
     return { domain: 'biology', title: 'Cell Division', concept: 'Animated mitosis stages from interphase to cytokinesis.', simulationVariables: { simulationType: 'mitosis' } };
-  if (/\b(neuron|nerve|synapse|action potential|brain|neural|dendrite|axon)\b/.test(t))
+  if (/\b(neuron|nerve|synapse|action.?potential|brain|neural|dendrite|axon|cortex|reflex)\b/.test(t))
     return { domain: 'biology', title: 'Neural Signal', concept: 'Action potential propagating across a neuron chain.', simulationVariables: { simulationType: 'neural' } };
-  if (/\b(ecosystem|predator|prey|population|ecology|species|food web|evolution)\b/.test(t))
+  if (/\b(ecosystem|predator|prey|population|ecology|species|food.web|evolution|natural.select|biome)\b/.test(t))
     return { domain: 'biology', title: 'Ecosystem Dynamics', concept: 'Live predator-prey particle simulation.', simulationVariables: { simulationType: 'ecosystem' } };
-  // Math / graphing topics
-  if (/\b(trigonometr|sine|cosine|tangent|wave|oscillat)\b/.test(t))
-    return { domain: 'graphing', title: 'Trigonometric Function', concept: 'Graph of a sine wave.', graphingEquation: 'sin(x)' };
-  if (/\b(quadratic|parabola|polynomial|algebra)\b/.test(t))
+
+  // ── Graphing ──────────────────────────────────────────────────────────────
+  if (/\b(trigonometr|sine|cosine|tangent|wave|oscillat|periodic)\b/.test(t))
+    return { domain: 'graphing', title: 'Trigonometric Wave', concept: 'Graph of a sine wave.', graphingEquation: 'sin(x)' };
+  if (/\b(quadratic|parabola|polynomial)\b/.test(t))
     return { domain: 'graphing', title: 'Quadratic Function', concept: 'Graph of a quadratic equation.', graphingEquation: 'x^2' };
-  if (/\b(calculus|derivative|integral|differenti|rate of change|gradient)\b/.test(t))
-    return { domain: 'math', title: 'Calculus Fundamentals', concept: 'Core derivative and integral formulas.', latexFormulas: ['\\frac{d}{dx}[x^n] = nx^{n-1}', '\\int x^n\\,dx = \\frac{x^{n+1}}{n+1} + C', '\\frac{d}{dx}[\\sin x] = \\cos x'] };
-  if (/\b(physics|force|energy|momentum|velocity|acceleration|newton|motion)\b/.test(t))
+  if (/\b(exponential|logarithm|log|growth|decay)\b/.test(t))
+    return { domain: 'graphing', title: 'Exponential Function', concept: 'Graph of exponential growth.', graphingEquation: 'exp(x)' };
+
+  // ── Math (LaTeX) ──────────────────────────────────────────────────────────
+  if (/\b(limit|limits|continuity|lim|approaches|epsilon|delta)\b/.test(t))
+    return { domain: 'math', title: 'Limits & Continuity', concept: 'Core limit definitions and rules.', latexFormulas: ['\\lim_{x \\to c} f(x) = L', '\\lim_{x \\to 0} \\frac{\\sin x}{x} = 1', '\\lim_{x \\to \\infty} \\left(1 + \\frac{1}{x}\\right)^x = e', '\\lim_{x \\to 0} \\frac{e^x - 1}{x} = 1'] };
+  if (/\b(derivative|differenti|rate.of.change|gradient|tangent.line|chain.rule|product.rule)\b/.test(t))
+    return { domain: 'math', title: 'Differentiation Rules', concept: 'Core derivative formulas.', latexFormulas: ['\\frac{d}{dx}[x^n] = nx^{n-1}', '\\frac{d}{dx}[\\sin x] = \\cos x', '\\frac{d}{dx}[e^x] = e^x', '\\frac{d}{dx}[\\ln x] = \\frac{1}{x}'] };
+  if (/\b(integral|integrat|antiderivative|area.under|riemann)\b/.test(t))
+    return { domain: 'math', title: 'Integration Rules', concept: 'Core integral formulas.', latexFormulas: ['\\int x^n\\,dx = \\frac{x^{n+1}}{n+1} + C', '\\int \\sin x\\,dx = -\\cos x + C', '\\int e^x\\,dx = e^x + C', '\\int_a^b f(x)\\,dx = F(b) - F(a)'] };
+  if (/\b(calculus)\b/.test(t))
+    return { domain: 'math', title: 'Calculus Essentials', concept: 'Key derivative and integral formulas.', latexFormulas: ['\\frac{d}{dx}[x^n] = nx^{n-1}', '\\int x^n\\,dx = \\frac{x^{n+1}}{n+1} + C', '\\lim_{h \\to 0}\\frac{f(x+h)-f(x)}{h}'] };
+  if (/\b(algebra|equation|linear|simultaneous|matrix|vector|complex.number)\b/.test(t))
+    return { domain: 'math', title: 'Algebra Equations', concept: 'Key algebraic formulas.', latexFormulas: ['ax^2 + bx + c = 0', 'x = \\frac{-b \\pm \\sqrt{b^2 - 4ac}}{2a}', '(a+b)^2 = a^2 + 2ab + b^2'] };
+  if (/\b(statistic|probability|normal.distribution|mean|variance|standard.deviation)\b/.test(t))
+    return { domain: 'math', title: 'Statistics Formulas', concept: 'Core statistical measures.', latexFormulas: ['\\mu = \\frac{1}{n}\\sum_{i=1}^n x_i', '\\sigma^2 = \\frac{1}{n}\\sum(x_i - \\mu)^2', 'P(A \\cup B) = P(A) + P(B) - P(A \\cap B)'] };
+  if (/\b(physics|force|energy|momentum|velocity|acceleration|newton|motion|kinematic)\b/.test(t))
     return { domain: 'math', title: 'Physics Equations', concept: 'Key equations of motion and energy.', latexFormulas: ['F = ma', 'v = u + at', 'E_k = \\frac{1}{2}mv^2', 's = ut + \\frac{1}{2}at^2'] };
-  if (/\b(chemistry|reaction|equilibrium|thermodynam|enthalpy|entropy)\b/.test(t))
+  if (/\b(chemistry|reaction|equilibrium|thermodynam|enthalpy|entropy|gibbs)\b/.test(t))
     return { domain: 'math', title: 'Chemistry Equations', concept: 'Core thermodynamic and equilibrium expressions.', latexFormulas: ['\\Delta G = \\Delta H - T\\Delta S', 'K_{eq} = \\frac{[\\text{products}]}{[\\text{reactants}]}', 'PV = nRT'] };
-  // Default: biology circulatory (most visually engaging)
-  return { domain: 'biology', title: `${topic} — Live Simulation`, concept: 'Interactive biology simulation.', simulationVariables: { simulationType: 'circulatory' } };
+
+  // ── Default: graphing (y=x² is universally relatable) ────────────────────
+  return { domain: 'graphing', title: `${topic} — Function Graph`, concept: `Interactive graph for ${topic}.`, graphingEquation: 'x^2' };
 }
 
 /**
@@ -1076,42 +968,18 @@ Call render_simulation now with the best domain for this topic.`;
 }
 
 /**
- * Generates 4 visual learning components in parallel.
- * Each component is its own bounded API call (~5–15s each) so no single
- * request can hit Netlify's 50-second edge-function wall-clock limit.
- * Total wall time: ~10–20s regardless of document size.
+ * Generates visual learning components.
+ * Currently: Dynamic visual only (Claude tool_use → KaTeX / function-plot / p5).
+ * Static visuals (diagram, chart, timeline, process, simulation) are disabled
+ * while the Dynamic engine is being tested.
  */
 export async function generateVisualComponents(
   topic:       string,
   contentText: string | null,
-  pdfBase64:   string | null,
+  _pdfBase64:  string | null,
 ): Promise<VisualSet> {
-  // Text path: 4 standard visuals (Haiku) + 1 dynamic (Sonnet), all parallel.
-  // PDF-only path: limit to 2 standard + 1 dynamic to avoid large concurrent uploads.
-  const types: VisualComponent['type'][] = contentText
-    ? ['diagram', 'chart', 'timeline', 'process', 'simulation']
-    : ['diagram', 'chart', 'simulation'];
-
-  const [results, dynamicVisual] = await Promise.all([
-    Promise.allSettled(
-      types.map(type => generateOneVisual(topic, contentText, pdfBase64, type)),
-    ),
-    generateDynamicVisual(topic, contentText),
-  ]);
-
-  const components = results
-    .filter((r): r is PromiseFulfilledResult<VisualComponent> =>
-      r.status === 'fulfilled' && r.value !== null)
-    .map(r => r.value);
-
-  // Append dynamic visual last (always present — falls back to keyword inference)
-  components.push(dynamicVisual);
-
-  if (components.length === 0) {
-    throw new Error('Failed to generate visual components. Please retry.');
-  }
-
-  return { components };
+  const dynamicVisual = await generateDynamicVisual(topic, contentText);
+  return { components: [dynamicVisual] };
 }
 
 // ── Content audit ─────────────────────────────────────────────
