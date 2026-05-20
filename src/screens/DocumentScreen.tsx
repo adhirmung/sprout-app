@@ -3,6 +3,10 @@ import { Icon } from '../components/Icon';
 import { SproutMark } from '../components/Brand';
 import { Chip } from '../components/Chip';
 import { ProgressBar } from '../components/ProgressBar';
+import { VisualChart } from '../components/VisualChart';
+import { VisualDiagram } from '../components/VisualDiagram';
+import { VisualTimeline } from '../components/VisualTimeline';
+import { VisualProcess } from '../components/VisualProcess';
 import {
   buildChatSystemPrompt,
   evaluateWrittenAnswer,
@@ -821,16 +825,22 @@ function VisualsView({
         <div style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 2, lineHeight: 1.5 }}>{active?.concept}</div>
       </div>
 
-      {/* ── Full-screen iframe ── */}
-      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#fff' }}>
+      {/* ── Visual content area ── */}
+      <div style={{ flex: 1, overflow: 'hidden', background: 'var(--bg)' }}>
         {active && (
-          <iframe
-            key={safeIdx}
-            srcDoc={active.html}
-            sandbox="allow-scripts"
-            style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
-            title={active.title}
-          />
+          active.chartData    ? <VisualChart    data={active.chartData}    /> :
+          active.diagramData  ? <VisualDiagram  data={active.diagramData}  /> :
+          active.timelineData ? <VisualTimeline data={active.timelineData} /> :
+          active.processData  ? <VisualProcess  data={active.processData}  /> :
+          active.html         ? (
+            <iframe
+              key={safeIdx}
+              srcDoc={active.html}
+              sandbox="allow-scripts"
+              style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+              title={active.title}
+            />
+          ) : null
         )}
       </div>
 

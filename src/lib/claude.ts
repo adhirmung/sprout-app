@@ -769,95 +769,91 @@ Return ONLY valid JSON — no markdown fences:
 
 // ── Visual learning components ────────────────────────────────
 
+export interface ChartData {
+  chartType: 'bar' | 'line' | 'pie';
+  xLabel?:   string;
+  yLabel?:   string;
+  items:     { name: string; value: number }[];
+}
+
+export interface DiagramData {
+  nodes: { id: string; label: string; subtitle?: string; nodeType?: 'start' | 'process' | 'decision' | 'end' }[];
+  edges: { from: string; to: string; label?: string }[];
+}
+
+export interface TimelineData {
+  events: { date: string; title: string; description: string }[];
+}
+
+export interface ProcessData {
+  steps: { title: string; description: string }[];
+}
+
 export interface VisualComponent {
   title:   string;
   type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive' | 'simulation';
   concept: string;
-  html:    string;
+  // Structured data — rendered by React components (new approach)
+  chartData?:    ChartData;
+  diagramData?:  DiagramData;
+  timelineData?: TimelineData;
+  processData?:  ProcessData;
+  // Raw HTML — simulation only (+ legacy cached visuals)
+  html?: string;
 }
 
 export interface VisualSet {
   components: VisualComponent[];
 }
 
-// Shared layout requirements. NO external CDN — srcDoc iframes block external fetches.
-// Everything must be self-contained: inline JS, Canvas API, CSS only.
-const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html> to </html>)
-- NO external resources — no CDN, no <script src>, no <link href>, no Mermaid, no Chart.js, no D3, no p5.js
-- html, body: { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#FAFAF9; font-family:system-ui,sans-serif }
-- All layout via flexbox or CSS grid — no absolute pixel coordinates for structural elements
-- Minimum 13px font; colour #111 or darker; never light-grey text on white
-- All content visible without scrolling
-- CRITICAL FOR JSON: use single quotes for ALL HTML/SVG attributes inside the html field
-  Correct: <canvas id='c' style='width:100%'>  <div class='box' style='color:#333'>
-  Wrong:   <canvas id="c" style="width:100%">  <div class="box" style="color:#333">`;
+// ── Prompts for structured-data visuals (chart / diagram / timeline / process) ──
+// These produce small JSON payloads consumed by React components — no HTML generation.
+const DATA_VISUAL_PROMPTS: Partial<Record<VisualComponent['type'], string>> = {
+  chart:
+    `Identify the most important quantitative comparison, distribution, or trend from the source material.
+Return ONLY this JSON (no markdown, no backticks):
+{"title":"Short chart title","type":"chart","concept":"One sentence explaining what this shows","chartData":{"chartType":"bar","xLabel":"X label","yLabel":"Y label","items":[{"name":"Label","value":42}]}}
+chartType must be "bar" (comparisons), "line" (trends/sequences), or "pie" (proportions that sum to a whole).
+Include 3–8 real data points. Values MUST be real numbers from the source — never invent data.`,
 
-// Type-specific generation instructions — all self-contained, no external dependencies
-const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
+  diagram:
+    `Identify the most important process, system, or cause-effect relationship from the source material.
+Return ONLY this JSON (no markdown, no backticks):
+{"title":"Short diagram title","type":"diagram","concept":"One sentence explaining what this shows","diagramData":{"nodes":[{"id":"1","label":"Start","nodeType":"start"},{"id":"2","label":"Process step","nodeType":"process"},{"id":"3","label":"End","nodeType":"end"}],"edges":[{"from":"1","to":"2"},{"from":"2","to":"3","label":"optional label"}]}}
+nodeType: "start" | "process" | "decision" | "end". Use 4–8 nodes. Every edge from/to must match a node id.`,
 
-  diagram: `Create a flow diagram using ONLY plain HTML divs and CSS flexbox — absolutely NO Mermaid, NO D3, NO SVG, NO external libraries of any kind.
-BANNED: <div class='mermaid'>, graph TD, graph LR, flowchart, <script src=...>, any library syntax.
-REQUIRED approach — copy this exact pattern and fill in real content:
-<body style='display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:16px;box-sizing:border-box'>
-  <h2 style='font-size:16px;font-weight:700;color:#111;margin:0 0 16px'>Diagram Title</h2>
-  <div style='display:flex;flex-direction:column;align-items:center;gap:8px'>
-    <div style='background:#EFF6FF;border:2px solid #3B82F6;border-radius:8px;padding:10px 20px;font-weight:700;font-size:13px;color:#1e40af'>Step One</div>
-    <div style='font-size:22px;color:#3B82F6'>↓</div>
-    <div style='background:#EFF6FF;border:2px solid #3B82F6;border-radius:8px;padding:10px 20px;font-weight:700;font-size:13px;color:#1e40af'>Step Two</div>
-    <div style='font-size:22px;color:#3B82F6'>↓</div>
-    <div style='background:#ECFDF5;border:2px solid #10B981;border-radius:8px;padding:10px 20px;font-weight:700;font-size:13px;color:#065f46'>Final Step</div>
-  </div>
-</body>
-For horizontal flows use flex-direction:row with → arrows. For branching, nest rows inside columns.
-Use different background/border colours for different node types (start, process, decision, end).`,
+  timeline:
+    `Identify the key events, stages, or milestones from the source in chronological order.
+Return ONLY this JSON (no markdown, no backticks):
+{"title":"Short timeline title","type":"timeline","concept":"One sentence explaining what this shows","timelineData":{"events":[{"date":"1905","title":"Event name","description":"Brief description of what happened and why it matters."}]}}
+Include 4–8 events. "date" can be a year, decade, or descriptive stage label. Must be chronological.`,
 
-  chart: `Create a Canvas API bar, line, or pie chart — NO external libraries.
-Use a single <canvas id='c'> that fills the iframe. In JS:
-  const c=document.getElementById('c'), ctx=c.getContext('2d');
-  function resize(){c.width=window.innerWidth;c.height=window.innerHeight;draw();}
-  window.addEventListener('resize',resize);
-For BAR charts: normalize bars — barHeight = (value/maxValue) * availableHeight.
-  If values differ by more than 10×, use log scale: barHeight = (Math.log10(value+1)/Math.log10(maxValue+1)) * availableHeight
-  Draw value labels ABOVE each bar. Draw category labels BELOW. Never let text overlap bars.
-  Leave padding: top 60px (title), bottom 80px (labels), left 60px (axis), right 20px.
-For PIE/DOUGHNUT: use ctx.arc() slices. Draw legend as coloured squares + text beside chart.
-Always draw a bold title at the top with ctx.font and ctx.fillText.
-Call resize() once on load to initialise.`,
+  process:
+    `Identify the most important step-by-step process or procedure from the source material.
+Return ONLY this JSON (no markdown, no backticks):
+{"title":"Short process title","type":"process","concept":"One sentence explaining what this shows","processData":{"steps":[{"title":"Step name","description":"What happens and why it matters."}]}}
+Include 3–6 steps. Each description 1–2 sentences. Steps must be in order.`,
+};
 
-  timeline: `Create a vertical CSS/HTML timeline — no external libraries.
-A centred vertical line (2px, accent colour) with alternating left/right event cards.
-Each card: rounded border, bold event title, short description, date/stage label.
-Animate cards in with CSS @keyframes fadeSlideIn, staggered animation-delay (0.15s per card).
-Use flexbox for each row (icon circle on the line, card on the side). Padding 16px. Overflow-y auto on body.`,
-
-  process: `Create an animated step process — no external libraries.
-Flex row of step cards (or column on narrow viewports). Each card: large step number circle, bold title, 2-line description.
-CSS gradient arrow (or ▶ character) between cards. @keyframes pop-in with staggered delay per card.
-Accent colour for step circles. Card background white with subtle box-shadow. Rounded corners. No absolute positioning.`,
-
-  interactive: `Create a clickable/hoverable HTML component — no external libraries.
-Use an SVG with viewBox='0 0 800 500' width='100%' height='100%'.
-Group related elements in <g> tags with id attributes. Add JS click/mouseover listeners.
-On interaction: toggle visibility of detail <text> or <foreignObject> panels, change fill colours.
-CSS transition on SVG elements for smooth feedback. Show a hint label like 'Click to explore'.`,
-
-  simulation: `Create a Canvas animation with interactive controls — no external libraries.
+// ── Simulation instructions (iframe / Canvas — no React component) ───────────
+const SIMULATION_INSTRUCTIONS = `Create a Canvas animation with interactive controls — no external libraries.
 Structure:
   <div style='display:flex;flex-direction:column;width:100%;height:100%'>
     <canvas id='c' style='flex:1;display:block'></canvas>
     <div id='controls' style='padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#fff;border-top:1px solid #e5e7eb'></div>
   </div>
-In JS: size canvas to its offsetWidth/offsetHeight. Use requestAnimationFrame for the draw loop.
-Add <label>+<input type='range'>+<span> controls to #controls div via JS (document.getElementById('controls').innerHTML=...).
-Update simulation state when sliders change. Show current values on canvas with ctx.fillText.
-Add a Reset button. Base physics/maths on accurate formulas from the source.`,
-};
+In JS: size canvas to its offsetWidth/offsetHeight. requestAnimationFrame for draw loop.
+Add <label>+<input type='range'>+<span> controls to #controls via JS.
+Update simulation state when sliders change. Show current values with ctx.fillText.
+Add a Reset button. Use accurate formulas/constants from the source.
+CRITICAL FOR JSON: use single quotes for ALL HTML attributes in the html field.`;
 
 /**
  * Generates one visual component in its own API call.
- * Regular visuals: Haiku, max_tokens 2000 (~5–15s).
- * Simulations: Sonnet, max_tokens 5000 (~15–35s) — more complex JS required.
- * All types use responsive CSS so the iframe never clips or overlaps content.
+ *
+ * chart / diagram / timeline / process → Haiku, ~700 tokens (small structured JSON).
+ *   These are rendered by React components (Recharts + pure CSS) — no HTML generation.
+ * simulation → Sonnet, 5000 tokens (full Canvas HTML document, iframe-rendered).
  */
 async function generateOneVisual(
   topic:       string,
@@ -865,47 +861,28 @@ async function generateOneVisual(
   pdfBase64:   string | null,
   visualType:  VisualComponent['type'],
 ): Promise<VisualComponent | null> {
-  const client      = getClient();
-  const hasPdf      = !!pdfBase64;
+  const client       = getClient();
+  const hasPdf       = !!pdfBase64;
   const isSimulation = visualType === 'simulation';
-  // Simulations use the more capable Sonnet model — verified model ID.
-  // Regular visuals stay on fast Haiku with 3000 tokens (up from 2000 — the
-  // longer responsive prompt + richer SVG were truncating at 2000).
-  const model     = isSimulation ? 'claude-3-5-sonnet-20241022' : 'claude-haiku-4-5-20251001';
-  const maxTokens = isSimulation ? 5000 : 3000;
+  const model        = isSimulation ? 'claude-3-5-sonnet-20241022' : 'claude-haiku-4-5-20251001';
+  const maxTokens    = isSimulation ? 5000 : 700;
+
+  const dataInstruction = DATA_VISUAL_PROMPTS[visualType];
 
   const prompt = isSimulation
-    ? `You are an expert educational simulation developer. Create ONE interactive Canvas-based simulation — NO external libraries, no CDN, no p5.js — that accurately models a key concept from the source material.
+    ? `You are an expert educational simulation developer. Create ONE interactive Canvas simulation for a student studying "${topic}".
 
-Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-Instruction: ${VISUAL_TYPE_GUIDE.simulation}
+${SIMULATION_INSTRUCTIONS}
 
-Requirements:
-${RESPONSIVE_REQUIREMENTS}
-- Size the canvas to its parent: c.width=c.offsetWidth; c.height=c.offsetHeight; inside a resize() helper called on load + window resize
-- Use requestAnimationFrame for the draw loop — no setInterval
-- Controls go in the <div id='controls'> below the canvas — never overlap the drawing area
-- Accurate formulas and constants from the source material
-- Show current parameter values on the canvas with ctx.fillText()
-- Include a Reset button that restores default state
+Return ONLY valid JSON:
+{"title":"Short title","type":"simulation","concept":"One sentence what this teaches","html":"<!DOCTYPE html>..."}`
+    : `You are an expert educational analyst. Study the source material below and create a "${visualType}" visual for a student learning "${topic}".
 
-Return ONLY valid JSON — every attribute in the html field must use single quotes:
-{"title":"Short descriptive title","type":"simulation","concept":"One sentence: what this simulation teaches interactively","html":"<!DOCTYPE html>..."}`
-    : `You are an expert educational multimedia designer. Create ONE self-contained visual learning component — NO external libraries, no CDN scripts.
-
-Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-Visual type: "${visualType}"
-Instruction: ${VISUAL_TYPE_GUIDE[visualType]}
-
-Requirements:
-${RESPONSIVE_REQUIREMENTS}
-
-Return ONLY valid JSON — every attribute in the html field must use single quotes:
-{"title":"Short descriptive title","type":"${visualType}","concept":"One sentence: what this visual teaches","html":"<!DOCTYPE html>..."}`;
+${dataInstruction}`;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
   const userContent: MsgContent = pdfBase64
@@ -919,14 +896,14 @@ Return ONLY valid JSON — every attribute in the html field must use single quo
     const raw = await streamToText(client, {
       model,
       max_tokens: maxTokens,
-      system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no backticks, no extra text.',
       messages:   [{ role: 'user', content: userContent }],
     }, 'generateVisualComponents');
 
     const start = raw.indexOf('{');
     const end   = raw.lastIndexOf('}');
     if (start === -1 || end === -1) {
-      console.error(`[generateOneVisual] ${visualType}: no JSON braces found in response (${raw.length} chars)`);
+      console.error(`[generateOneVisual] ${visualType}: no JSON braces in response (${raw.length} chars)`);
       return null;
     }
 
@@ -937,15 +914,22 @@ Return ONLY valid JSON — every attribute in the html field must use single quo
       try {
         parsed = JSON.parse(repairJson(raw.slice(start))) as VisualComponent;
       } catch (parseErr) {
-        console.error(`[generateOneVisual] ${visualType}: JSON parse failed`, parseErr, '\nRaw (first 300):', raw.slice(0, 300));
+        console.error(`[generateOneVisual] ${visualType}: JSON parse failed`, parseErr, '\nRaw:', raw.slice(0, 300));
         return null;
       }
     }
 
-    return parsed?.html && parsed?.title ? parsed : null;
+    if (!parsed?.title) return null;
+
+    // Simulation: needs html field
+    if (isSimulation) return parsed.html ? parsed : null;
+
+    // Data visuals: need the matching data field
+    const hasData = parsed.chartData ?? parsed.diagramData ?? parsed.timelineData ?? parsed.processData;
+    return hasData ? parsed : null;
   } catch (err) {
     console.error(`[generateOneVisual] ${visualType} failed:`, err);
-    return null; // individual failures are non-fatal — other components still show
+    return null;
   }
 }
 
