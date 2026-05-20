@@ -972,7 +972,7 @@ export async function generateVisualComponents(
       const res = await fetch(`${pythonVizUrl}/generate`, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ topic, content: contentText?.slice(0, 6000) ?? null }),
+        body:    JSON.stringify({ topic, content: contentText?.slice(0, 6000) ?? null, api_key: getApiKey() || undefined }),
       });
       if (res.ok) {
         const data = await res.json() as { title: string; concept: string; html: string };
