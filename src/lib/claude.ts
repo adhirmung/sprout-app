@@ -791,14 +791,14 @@ export interface ProcessData {
 
 export interface VisualComponent {
   title:   string;
-  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive' | 'simulation';
+  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive' | 'simulation' | 'python';
   concept: string;
   // Structured data — rendered by React components (new approach)
   chartData?:    ChartData;
   diagramData?:  DiagramData;
   timelineData?: TimelineData;
   processData?:  ProcessData;
-  // Raw HTML — simulation only (+ legacy cached visuals)
+  // Raw HTML — simulation, python, + legacy cached visuals
   html?: string;
 }
 
@@ -961,6 +961,33 @@ export async function generateVisualComponents(
 
   if (components.length === 0) {
     throw new Error('Failed to generate visual components. Please retry.');
+  }
+
+  // ── Python visual (Plotly / RDKit / PyMunk) ──────────────────────────────
+  // Runs in parallel with the above, appended when ready.
+  // Skipped silently if VITE_PYTHON_VIZ_URL is not configured.
+  const pythonVizUrl = (import.meta.env.VITE_PYTHON_VIZ_URL as string | undefined) ?? '';
+  if (pythonVizUrl) {
+    try {
+      const res = await fetch(`${pythonVizUrl}/generate`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ topic, content: contentText?.slice(0, 6000) ?? null }),
+      });
+      if (res.ok) {
+        const data = await res.json() as { title: string; concept: string; html: string };
+        if (data.html) {
+          components.push({
+            type:    'python',
+            title:   data.title,
+            concept: data.concept,
+            html:    data.html,
+          });
+        }
+      }
+    } catch {
+      // non-fatal — Python service unavailable, skip silently
+    }
   }
 
   return { components };

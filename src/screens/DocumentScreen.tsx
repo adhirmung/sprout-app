@@ -745,6 +745,7 @@ const VISUAL_TYPE_META: Record<VisualComponent['type'], { label: string; color: 
   process:     { label: 'Process',     color: '#8B5CF6', bg: '#F5F3FF', emoji: '⚙️' },
   interactive: { label: 'Interactive', color: '#EF4444', bg: '#FEF2F2', emoji: '✦'  },
   simulation:  { label: 'Simulation',  color: '#EC4899', bg: '#FDF2F8', emoji: '🎮' },
+  python:      { label: 'Dynamic',     color: '#0EA5E9', bg: '#F0F9FF', emoji: '⚡' },
 };
 
 function VisualsView({
