@@ -780,61 +780,69 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-// Shared layout requirements for every generated document.
-// CDN libraries are allowed and preferred — they handle layout far better than hand-written SVG.
+// Shared layout requirements. NO external CDN — srcDoc iframes block external fetches.
+// Everything must be self-contained: inline JS, Canvas API, CSS only.
 const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html> to </html>)
-- CDN libraries ARE ALLOWED — use them (Chart.js for charts, Mermaid for diagrams, p5.js for simulations)
-- html, body: { margin:0; padding:8px; width:100%; height:100%; overflow:hidden; background:#FAFAF9; box-sizing:border-box }
-- Flexbox or CSS grid for all layout — no absolute pixel coordinates for structural positioning
-- Minimum font size 13px; text colour #111111 or darker — never light grey
-- Everything must be visible without scrolling
-- CRITICAL FOR JSON VALIDITY: use single quotes for ALL HTML/SVG/JS-string attributes inside the html field
-  Correct: <canvas id='c' style='width:100%'>   <div class='box'>
-  Wrong:   <canvas id="c" style="width:100%">   <div class="box">`;
+- NO external resources whatsoever — no CDN, no script src, no link href, no image src
+- html, body: { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#FAFAF9; font-family:system-ui,sans-serif }
+- All layout via flexbox or CSS grid — no absolute pixel coordinates for structural elements
+- Minimum 13px font; colour #111 or darker; never light-grey text on white
+- All content visible without scrolling
+- CRITICAL FOR JSON: use single quotes for ALL HTML/SVG attributes inside the html field
+  Correct: <canvas id='c' style='width:100%'>  <div class='box' style='color:#333'>
+  Wrong:   <canvas id="c" style="width:100%">  <div class="box" style="color:#333">`;
 
-// Type-specific CDN-powered generation instructions
+// Type-specific generation instructions — all self-contained, no external dependencies
 const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
 
-  diagram: `Use Mermaid.js to auto-layout the diagram — do NOT write manual SVG coordinates.
-Load from CDN (place in <head>): <script src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'></script>
-Initialize before the closing </body>: <script>mermaid.initialize({startOnLoad:true,theme:'neutral',securityLevel:'loose'});</script>
-Wrap diagram in: <div class='mermaid' style='width:100%;height:100%;display:flex;align-items:center;justify-content:center'>
-Use graph LR for left-right flows, graph TD for top-down. Keep node labels under 25 characters.
-Add styling with classDef and class statements. Example: classDef important fill:#3B82F6,color:#fff`,
+  diagram: `Create an HTML/CSS flow diagram — NO SVG coordinate maths, NO external libraries.
+Use a flex container of labelled boxes connected by CSS arrows.
+Each node: <div style='background:#EFF6FF;border:2px solid #3B82F6;border-radius:8px;padding:10px 16px;font-weight:700;font-size:13px;text-align:center;min-width:100px'>Label</div>
+Arrow between nodes: <div style='font-size:20px;color:#3B82F6;align-self:center'>→</div>
+For branching flows use a column of rows. Group rows and columns with nested flex divs.
+Add a bold title at the top. Each node may have a small subtitle in lighter text below its label.
+Wrap everything in a centered flex column filling the viewport.`,
 
-  chart: `Use Chart.js to render a perfectly-scaled, auto-labelled chart — do NOT write manual SVG paths.
-Load from CDN (place in <head>): <script src='https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js'></script>
-Structure: <div style='position:relative;width:100%;height:90%'><canvas id='c'></canvas></div>
-Config: { responsive:true, maintainAspectRatio:false, plugins:{title:{display:true,text:'...',font:{size:15,weight:'bold'}}} }
-Choose chart type: bar (comparisons), line (trends over time), doughnut/pie (proportions), radar (multi-axis scores).
-IMPORTANT: if values differ by more than 10× use scales:{y:{type:'logarithmic'}} to keep all bars visible.
-Keep axis tick labels short — abbreviate millions as 'M', thousands as 'K'.`,
+  chart: `Create a Canvas API bar, line, or pie chart — NO external libraries.
+Use a single <canvas id='c'> that fills the iframe. In JS:
+  const c=document.getElementById('c'), ctx=c.getContext('2d');
+  function resize(){c.width=window.innerWidth;c.height=window.innerHeight;draw();}
+  window.addEventListener('resize',resize);
+For BAR charts: normalize bars — barHeight = (value/maxValue) * availableHeight.
+  If values differ by more than 10×, use log scale: barHeight = (Math.log10(value+1)/Math.log10(maxValue+1)) * availableHeight
+  Draw value labels ABOVE each bar. Draw category labels BELOW. Never let text overlap bars.
+  Leave padding: top 60px (title), bottom 80px (labels), left 60px (axis), right 20px.
+For PIE/DOUGHNUT: use ctx.arc() slices. Draw legend as coloured squares + text beside chart.
+Always draw a bold title at the top with ctx.font and ctx.fillText.
+Call resize() once on load to initialise.`,
 
-  timeline: `Create a clean vertical timeline using only HTML and CSS — no external library needed.
-Layout: scrollable flex column, each item = coloured circle number + bold title + short description.
-Use CSS @keyframes fadeInUp with staggered animation-delay (0.1s per step) for a smooth reveal.
-Flexbox only — no absolute pixel positioning. Gap and padding for spacing.
-Colour the timeline spine line and circle numbers with a single accent colour.`,
+  timeline: `Create a vertical CSS/HTML timeline — no external libraries.
+A centred vertical line (2px, accent colour) with alternating left/right event cards.
+Each card: rounded border, bold event title, short description, date/stage label.
+Animate cards in with CSS @keyframes fadeSlideIn, staggered animation-delay (0.15s per card).
+Use flexbox for each row (icon circle on the line, card on the side). Padding 16px. Overflow-y auto on body.`,
 
-  process: `Create an animated step-by-step process flow using only HTML and CSS — no external library needed.
-Layout: flex row (desktop) or flex column (narrow). Each step = number badge + title + 1-line description.
-CSS arrow connectors between steps using border tricks or the › character.
-@keyframes sequential reveal with animation-delay per step. Clean card style per step.
-Flexbox only — no absolute positioning.`,
+  process: `Create an animated step process — no external libraries.
+Flex row of step cards (or column on narrow viewports). Each card: large step number circle, bold title, 2-line description.
+CSS gradient arrow (or ▶ character) between cards. @keyframes pop-in with staggered delay per card.
+Accent colour for step circles. Card background white with subtle box-shadow. Rounded corners. No absolute positioning.`,
 
-  interactive: `Create a click/hover interactive component using vanilla JS — no external library needed.
-Use an SVG with a viewBox so it scales to any size. Add event listeners for mouseover and click.
-On interaction: reveal hidden detail panels, highlight related elements, toggle expanded state.
-CSS transitions (0.25s ease) for smooth visual feedback. Tooltips or side panels for extra detail.`,
+  interactive: `Create a clickable/hoverable HTML component — no external libraries.
+Use an SVG with viewBox='0 0 800 500' width='100%' height='100%'.
+Group related elements in <g> tags with id attributes. Add JS click/mouseover listeners.
+On interaction: toggle visibility of detail <text> or <foreignObject> panels, change fill colours.
+CSS transition on SVG elements for smooth feedback. Show a hint label like 'Click to explore'.`,
 
-  simulation: `Use p5.js for a smooth, interactive simulation canvas.
-Load from CDN (place in <head>): <script src='https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js'></script>
-Canvas sizing: in setup() use createCanvas(windowWidth, windowHeight - 90) to leave room for controls below.
-In windowResized(): resizeCanvas(windowWidth, windowHeight - 90).
-Controls: place HTML <label>+<input type='range'>+<span> elements in a <div> BELOW the canvas — never overlapping it.
-Draw loop: background(250) each frame, draw the simulation, display current parameter values on canvas.
-Base ALL physics/chemistry/biology on real formulas from the source. Show units on labels.
-Include a Reset button that restores initial parameter values.`,
+  simulation: `Create a Canvas animation with interactive controls — no external libraries.
+Structure:
+  <div style='display:flex;flex-direction:column;width:100%;height:100%'>
+    <canvas id='c' style='flex:1;display:block'></canvas>
+    <div id='controls' style='padding:10px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:#fff;border-top:1px solid #e5e7eb'></div>
+  </div>
+In JS: size canvas to its offsetWidth/offsetHeight. Use requestAnimationFrame for the draw loop.
+Add <label>+<input type='range'>+<span> controls to #controls div via JS (document.getElementById('controls').innerHTML=...).
+Update simulation state when sliders change. Show current values on canvas with ctx.fillText.
+Add a Reset button. Base physics/maths on accurate formulas from the source.`,
 };
 
 /**
@@ -859,7 +867,7 @@ async function generateOneVisual(
   const maxTokens = isSimulation ? 5000 : 3000;
 
   const prompt = isSimulation
-    ? `You are an expert educational simulation developer. Create ONE interactive p5.js simulation that accurately models a key concept from the source material.
+    ? `You are an expert educational simulation developer. Create ONE interactive Canvas-based simulation — NO external libraries, no CDN, no p5.js — that accurately models a key concept from the source material.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
@@ -868,15 +876,16 @@ Instruction: ${VISUAL_TYPE_GUIDE.simulation}
 
 Requirements:
 ${RESPONSIVE_REQUIREMENTS}
-- p5.js handles the animation loop — use setup(), draw(), windowResized()
-- Controls go in a <div id='controls'> below the canvas — never overlap the drawing area
-- Accurate formulas and constants from the source
-- Show current parameter values on the canvas as text
-- Include a Reset button
+- Size the canvas to its parent: c.width=c.offsetWidth; c.height=c.offsetHeight; inside a resize() helper called on load + window resize
+- Use requestAnimationFrame for the draw loop — no setInterval
+- Controls go in the <div id='controls'> below the canvas — never overlap the drawing area
+- Accurate formulas and constants from the source material
+- Show current parameter values on the canvas with ctx.fillText()
+- Include a Reset button that restores default state
 
 Return ONLY valid JSON — every attribute in the html field must use single quotes:
 {"title":"Short descriptive title","type":"simulation","concept":"One sentence: what this simulation teaches interactively","html":"<!DOCTYPE html>..."}`
-    : `You are an expert educational multimedia designer. Create ONE visual learning component using the appropriate CDN library.
+    : `You are an expert educational multimedia designer. Create ONE self-contained visual learning component — NO external libraries, no CDN scripts.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
