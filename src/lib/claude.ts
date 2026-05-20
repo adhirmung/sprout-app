@@ -771,7 +771,7 @@ Return ONLY valid JSON — no markdown fences:
 
 export interface VisualComponent {
   title:   string;
-  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive';
+  type:    'diagram' | 'chart' | 'timeline' | 'process' | 'interactive' | 'simulation';
   concept: string;
   html:    string;
 }
@@ -780,19 +780,30 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-// Type-specific generation instructions — each parallel call gets exactly one
+// Shared responsive CSS requirement injected into every generated document
+const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html> to </html>)
+- ZERO external resources — no CDN, no external fonts, no image URLs
+- Only: inline SVG, Canvas API, CSS animations, vanilla JS
+- CRITICAL: html and body must have { margin:0; padding:0; width:100%; height:100%; overflow:hidden }
+- Use percentage widths/heights, vw/vh units — NEVER fixed pixel viewport dimensions
+- White or #FAFAF9 background, dark readable labels (#1a1a1a or similar)
+- All text, labels, and elements must stay within the visible area at any iframe size`;
+
+// Type-specific generation instructions
 const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
-  diagram:     'SVG anatomical or structural diagram with labeled parts, arrows, and callouts.',
-  chart:       'SVG bar chart, pie chart, or line graph using real data/values from the source.',
-  timeline:    'Horizontal or vertical timeline of key stages, events, or phases.',
-  process:     'Animated step-by-step flow showing how a key process works (CSS/SVG animation).',
-  interactive: 'Hoverable or clickable SVG that reveals additional detail on interaction.',
+  diagram:     'SVG anatomical or structural diagram with labeled parts, arrows, and callouts. Use percentage-based SVG viewBox so it scales to any container.',
+  chart:       'SVG bar chart, pie chart, or line graph using real data/values from the source. Axes, labels, and bars must be proportional — no fixed pixel sizes.',
+  timeline:    'Horizontal or vertical timeline of key stages, events, or phases. Each event is a node with a label. Must scroll or fit within 100% width.',
+  process:     'Animated step-by-step flow showing how a key process works (CSS keyframe animation). Steps appear sequentially. Use flexbox/grid — no absolute px offsets.',
+  interactive: 'Hoverable or clickable SVG that reveals additional detail on interaction. Tooltips or highlight states on click/hover.',
+  simulation:  'Interactive simulation where the user manipulates parameters via sliders or buttons to observe real-time changes. Use requestAnimationFrame for smooth animation. Include: (1) a Canvas or SVG drawing area that fills most of the viewport, (2) at least one labelled slider or button control, (3) accurate mathematical or physical model from the source material, (4) a Reset button. Labels must include units.',
 };
 
 /**
  * Generates one visual component in its own API call.
- * Kept to max_tokens:3000 so each request completes well within Netlify's
- * 50-second edge-function wall-clock limit.
+ * Regular visuals: Haiku, max_tokens 2000 (~5–15s).
+ * Simulations: Sonnet, max_tokens 5000 (~15–35s) — more complex JS required.
+ * All types use responsive CSS so the iframe never clips or overlaps content.
  */
 async function generateOneVisual(
   topic:       string,
@@ -800,10 +811,37 @@ async function generateOneVisual(
   pdfBase64:   string | null,
   visualType:  VisualComponent['type'],
 ): Promise<VisualComponent | null> {
-  const client = getClient();
-  const hasPdf = !!pdfBase64;
+  const client      = getClient();
+  const hasPdf      = !!pdfBase64;
+  const isSimulation = visualType === 'simulation';
+  const model       = isSimulation ? 'claude-sonnet-4-5-20251001' : 'claude-haiku-4-5-20251001';
+  const maxTokens   = isSimulation ? 5000 : 2000;
 
-  const prompt = `You are an expert educational multimedia designer. Create ONE self-contained HTML5 visual learning component.
+  const prompt = isSimulation
+    ? `You are an expert educational simulation developer. Create ONE interactive simulation that accurately models a key concept from the source material.
+
+Topic: "${topic}"
+${sourceBlock(contentText, hasPdf)}
+
+Visual type: "simulation"
+Instruction: ${VISUAL_TYPE_GUIDE.simulation}
+
+Requirements:
+${RESPONSIVE_REQUIREMENTS}
+- requestAnimationFrame animation loop for smooth real-time updates
+- Interactive controls (sliders/buttons) positioned at the bottom or side — never overlapping the simulation area
+- Accurate formulas and constants — ground numbers in the source material
+- Clear axis labels, units, and a legend if applicable
+- A visible Reset button that restores initial state
+
+Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
+{
+  "title": "Short descriptive title",
+  "type": "simulation",
+  "concept": "One sentence: what concept this simulation demonstrates interactively",
+  "html": "<!DOCTYPE html>..."
+}`
+    : `You are an expert educational multimedia designer. Create ONE self-contained HTML5 visual learning component.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
@@ -812,13 +850,9 @@ Visual type: "${visualType}"
 Instruction: ${VISUAL_TYPE_GUIDE[visualType]}
 
 Requirements:
-- Complete standalone document (<!DOCTYPE html> to </html>)
-- ZERO external resources — no CDN, no external fonts, no image URLs
-- Only: inline SVG, Canvas API, CSS animations, vanilla JS
-- 600×380px viewport
-- White or #FAFAF9 background, dark readable labels
+${RESPONSIVE_REQUIREMENTS}
 - Smooth CSS animations where they add clarity
-- Under 50 lines — efficient SVG, short class names, no redundancy
+- Concise and efficient — avoid redundant markup
 
 Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
 {
@@ -838,8 +872,8 @@ Return ONLY valid JSON. Escape double-quotes inside HTML as \\\":
 
   try {
     const raw = await streamToText(client, {
-      model:      'claude-haiku-4-5-20251001',
-      max_tokens: 2000,   // ~3–10s per call — comfortably within Netlify's 50s limit
+      model,
+      max_tokens: maxTokens,
       system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
       messages:   [{ role: 'user', content: userContent }],
     }, 'generateVisualComponents');
@@ -869,13 +903,11 @@ export async function generateVisualComponents(
   contentText: string | null,
   pdfBase64:   string | null,
 ): Promise<VisualSet> {
-  // 4 types for text content (small request bodies, parallel is fast).
-  // For PDF-only (no extracted text, no map) limit to 2 to avoid uploading
-  // the full binary 4x in parallel — the primary fix is passing map text
-  // from the call site instead of the PDF wherever possible.
+  // Text path: 4 standard visuals (Haiku) + 1 simulation (Sonnet), all parallel.
+  // PDF-only path: limit to 2 standard + 1 simulation to avoid large concurrent uploads.
   const types: VisualComponent['type'][] = contentText
-    ? ['diagram', 'chart', 'timeline', 'process']
-    : ['diagram', 'chart'];
+    ? ['diagram', 'chart', 'timeline', 'process', 'simulation']
+    : ['diagram', 'chart', 'simulation'];
 
   const results = await Promise.allSettled(
     types.map(type => generateOneVisual(topic, contentText, pdfBase64, type)),

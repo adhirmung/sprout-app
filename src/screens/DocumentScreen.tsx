@@ -739,7 +739,8 @@ const VISUAL_TYPE_META: Record<VisualComponent['type'], { label: string; color: 
   chart:       { label: 'Chart',       color: '#10B981', bg: '#ECFDF5', emoji: '📊' },
   timeline:    { label: 'Timeline',    color: '#F59E0B', bg: '#FFFBEB', emoji: '📅' },
   process:     { label: 'Process',     color: '#8B5CF6', bg: '#F5F3FF', emoji: '⚙️' },
-  interactive: { label: 'Interactive', color: '#EF4444', bg: '#FEF2F2', emoji: '✦' },
+  interactive: { label: 'Interactive', color: '#EF4444', bg: '#FEF2F2', emoji: '✦'  },
+  simulation:  { label: 'Simulation',  color: '#EC4899', bg: '#FDF2F8', emoji: '🎮' },
 };
 
 function VisualsView({
@@ -752,106 +753,126 @@ function VisualsView({
   onRegenerate: () => void;
 }) {
   const isMobile = useIsMobile();
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const [activeIdx,   setActiveIdx]   = useState(0);
   const [regenerating, setRegenerating] = useState(false);
 
-  const handleRegenerate = () => {
-    setRegenerating(true);
-    onRegenerate();
-  };
+  const safeIdx  = Math.min(activeIdx, visualSet.components.length - 1);
+  const active   = visualSet.components[safeIdx];
+  const meta     = VISUAL_TYPE_META[active?.type] ?? VISUAL_TYPE_META.diagram;
+  const total    = visualSet.components.length;
+
+  const handleRegenerate = () => { setRegenerating(true); onRegenerate(); };
+  const goPrev = () => setActiveIdx(i => Math.max(0, i - 1));
+  const goNext = () => setActiveIdx(i => Math.min(total - 1, i + 1));
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
-      {/* Header */}
-      <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
+
+      {/* ── Header ── */}
+      <div style={{ padding: '12px 16px', borderBottom: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
         <button onClick={onBack} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
-        <div style={{ flex: 1 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>Visual Learning</div>
-          <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{topic}</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>{visualSet.components.length} visuals</span>
-          {hasCache && (
-            <button
-              onClick={handleRegenerate}
-              disabled={regenerating}
-              style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 13px', borderRadius: 10, background: 'var(--brand)', border: 'none', color: 'white', fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: regenerating ? 0.6 : 1 }}>
-              🔄 {regenerating ? 'Generating…' : 'Regenerate'}
-            </button>
-          )}
-        </div>
+        {hasCache && (
+          <button
+            onClick={handleRegenerate}
+            disabled={regenerating}
+            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 10, background: 'var(--brand)', border: 'none', color: 'white', fontSize: 12, fontWeight: 700, cursor: 'pointer', opacity: regenerating ? 0.6 : 1, flexShrink: 0 }}>
+            🔄 {regenerating ? 'Generating…' : 'Regenerate'}
+          </button>
+        )}
       </div>
 
-      {/* Scrollable grid */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '16px 12px 32px' : '24px 28px 40px' }}>
-        <div style={{
-          display: 'grid',
-          gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, 1fr)',
-          gap: isMobile ? 16 : 22,
-          maxWidth: 1100,
-          margin: '0 auto',
-        }}>
-          {visualSet.components.map((c, i) => {
-            const meta = VISUAL_TYPE_META[c.type] ?? VISUAL_TYPE_META.diagram;
-            const isExpanded = expandedIdx === i;
-            const isLast = i === visualSet.components.length - 1;
-            const isSolo = !isMobile && isLast && visualSet.components.length % 2 === 1;
-
-            return (
-              <div key={i} style={{
-                borderRadius: 18,
-                border: `1.5px solid ${meta.color}33`,
-                background: 'var(--card)',
-                overflow: 'hidden',
-                boxShadow: '0 4px 24px rgba(0,0,0,0.06)',
-                gridColumn: isSolo ? '1 / -1' : undefined,
-                maxWidth: isSolo ? 640 : undefined,
-                justifySelf: isSolo ? 'center' : undefined,
-                width: isSolo ? '100%' : undefined,
+      {/* ── Tab pills ── */}
+      <div style={{ display: 'flex', gap: 8, padding: '10px 14px', overflowX: 'auto', flexShrink: 0, borderBottom: '1px solid var(--line)', background: 'var(--card)', scrollbarWidth: 'none' }}>
+        {visualSet.components.map((c, i) => {
+          const m      = VISUAL_TYPE_META[c.type] ?? VISUAL_TYPE_META.diagram;
+          const active = i === safeIdx;
+          return (
+            <button
+              key={i}
+              onClick={() => setActiveIdx(i)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '6px 13px', borderRadius: 20, flexShrink: 0,
+                background: active ? m.color : 'transparent',
+                color:      active ? '#fff'  : 'var(--ink-3)',
+                border:     `1.5px solid ${active ? m.color : 'var(--line)'}`,
+                fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                transition: 'all 0.15s',
               }}>
-                {/* Card header */}
-                <div style={{ padding: '14px 18px', background: meta.bg, borderBottom: `1px solid ${meta.color}22` }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 6 }}>
-                    <span style={{ fontSize: 13 }}>{meta.emoji}</span>
-                    <span style={{ padding: '3px 9px', borderRadius: 999, background: meta.color, color: 'white', fontSize: 10, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                      {meta.label}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.3, marginBottom: 4 }}>{c.title}</div>
-                  <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.5 }}>{c.concept}</div>
-                </div>
+              <span style={{ fontSize: 13 }}>{m.emoji}</span>
+              {m.label}
+            </button>
+          );
+        })}
+      </div>
 
-                {/* iframe */}
-                <div style={{ position: 'relative', background: '#fff' }}>
-                  <iframe
-                    srcDoc={c.html}
-                    sandbox="allow-scripts"
-                    style={{
-                      width: '100%',
-                      height: isExpanded ? 560 : isMobile ? 260 : 360,
-                      border: 'none',
-                      display: 'block',
-                      transition: 'height 0.35s ease',
-                    }}
-                    title={c.title}
-                  />
-                  {/* Expand toggle */}
-                  <button
-                    onClick={() => setExpandedIdx(isExpanded ? null : i)}
-                    style={{
-                      position: 'absolute', bottom: 10, right: 10,
-                      padding: '4px 10px', borderRadius: 8,
-                      background: 'rgba(0,0,0,0.55)', color: 'white',
-                      fontSize: 11, fontWeight: 700, border: 'none',
-                      cursor: 'pointer', backdropFilter: 'blur(4px)',
-                    }}>
-                    {isExpanded ? '↑ Collapse' : '⤢ Expand'}
-                  </button>
-                </div>
-              </div>
+      {/* ── Active visual title + concept ── */}
+      <div style={{
+        padding: '10px 18px 10px',
+        borderBottom: `2px solid ${meta.color}33`,
+        background: meta.bg,
+        flexShrink: 0,
+      }}>
+        <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)', lineHeight: 1.3 }}>{active?.title}</div>
+        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 2, lineHeight: 1.5 }}>{active?.concept}</div>
+      </div>
+
+      {/* ── Full-screen iframe ── */}
+      <div style={{ flex: 1, position: 'relative', overflow: 'hidden', background: '#fff' }}>
+        {active && (
+          <iframe
+            key={safeIdx}
+            srcDoc={active.html}
+            sandbox="allow-scripts"
+            style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+            title={active.title}
+          />
+        )}
+      </div>
+
+      {/* ── Bottom navigation ── */}
+      <div style={{
+        flexShrink: 0, padding: isMobile ? '10px 16px' : '12px 24px',
+        borderTop: '1px solid var(--line)', background: 'var(--card)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+      }}>
+        <button
+          onClick={goPrev}
+          disabled={safeIdx === 0}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', borderRadius: 10, border: '1.5px solid var(--line)', background: 'var(--bg)', color: 'var(--ink)', fontSize: 13, fontWeight: 700, cursor: safeIdx === 0 ? 'default' : 'pointer', opacity: safeIdx === 0 ? 0.35 : 1 }}>
+          ← Prev
+        </button>
+
+        {/* Dot indicators */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {visualSet.components.map((c, i) => {
+            const m = VISUAL_TYPE_META[c.type] ?? VISUAL_TYPE_META.diagram;
+            return (
+              <button
+                key={i}
+                onClick={() => setActiveIdx(i)}
+                style={{
+                  width: i === safeIdx ? 20 : 8, height: 8,
+                  borderRadius: 4, border: 'none',
+                  background: i === safeIdx ? m.color : 'var(--line)',
+                  cursor: 'pointer', padding: 0,
+                  transition: 'all 0.2s',
+                }}
+              />
             );
           })}
         </div>
+
+        <button
+          onClick={goNext}
+          disabled={safeIdx === total - 1}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '7px 14px', borderRadius: 10, border: '1.5px solid var(--line)', background: 'var(--bg)', color: 'var(--ink)', fontSize: 13, fontWeight: 700, cursor: safeIdx === total - 1 ? 'default' : 'pointer', opacity: safeIdx === total - 1 ? 0.35 : 1 }}>
+          Next →
+        </button>
       </div>
     </div>
   );
