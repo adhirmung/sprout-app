@@ -950,36 +950,73 @@ ${dataInstruction}`;
   }
 }
 
+/** Keyword-based fallback when the Claude API call for tool_use fails. */
+function buildFallbackPayload(topic: string): SimulationPayload {
+  const t = topic.toLowerCase();
+  // Biology topics
+  if (/\b(blood|heart|circulat|cardio|vascu|artery|vein|plasma)\b/.test(t))
+    return { domain: 'biology', title: 'Circulatory System', concept: 'Animated blood flow through the heart and vessels.', simulationVariables: { simulationType: 'circulatory' } };
+  if (/\b(cell|divis|mitosis|meiosis|chromosome|nucleus|dna|genetic)\b/.test(t))
+    return { domain: 'biology', title: 'Cell Division', concept: 'Animated mitosis stages from interphase to cytokinesis.', simulationVariables: { simulationType: 'mitosis' } };
+  if (/\b(neuron|nerve|synapse|action potential|brain|neural|dendrite|axon)\b/.test(t))
+    return { domain: 'biology', title: 'Neural Signal', concept: 'Action potential propagating across a neuron chain.', simulationVariables: { simulationType: 'neural' } };
+  if (/\b(ecosystem|predator|prey|population|ecology|species|food web|evolution)\b/.test(t))
+    return { domain: 'biology', title: 'Ecosystem Dynamics', concept: 'Live predator-prey particle simulation.', simulationVariables: { simulationType: 'ecosystem' } };
+  // Math / graphing topics
+  if (/\b(trigonometr|sine|cosine|tangent|wave|oscillat)\b/.test(t))
+    return { domain: 'graphing', title: 'Trigonometric Function', concept: 'Graph of a sine wave.', graphingEquation: 'sin(x)' };
+  if (/\b(quadratic|parabola|polynomial|algebra)\b/.test(t))
+    return { domain: 'graphing', title: 'Quadratic Function', concept: 'Graph of a quadratic equation.', graphingEquation: 'x^2' };
+  if (/\b(calculus|derivative|integral|differenti|rate of change|gradient)\b/.test(t))
+    return { domain: 'math', title: 'Calculus Fundamentals', concept: 'Core derivative and integral formulas.', latexFormulas: ['\\frac{d}{dx}[x^n] = nx^{n-1}', '\\int x^n\\,dx = \\frac{x^{n+1}}{n+1} + C', '\\frac{d}{dx}[\\sin x] = \\cos x'] };
+  if (/\b(physics|force|energy|momentum|velocity|acceleration|newton|motion)\b/.test(t))
+    return { domain: 'math', title: 'Physics Equations', concept: 'Key equations of motion and energy.', latexFormulas: ['F = ma', 'v = u + at', 'E_k = \\frac{1}{2}mv^2', 's = ut + \\frac{1}{2}at^2'] };
+  if (/\b(chemistry|reaction|equilibrium|thermodynam|enthalpy|entropy)\b/.test(t))
+    return { domain: 'math', title: 'Chemistry Equations', concept: 'Core thermodynamic and equilibrium expressions.', latexFormulas: ['\\Delta G = \\Delta H - T\\Delta S', 'K_{eq} = \\frac{[\\text{products}]}{[\\text{reactants}]}', 'PV = nRT'] };
+  // Default: biology circulatory (most visually engaging)
+  return { domain: 'biology', title: `${topic} — Live Simulation`, concept: 'Interactive biology simulation.', simulationVariables: { simulationType: 'circulatory' } };
+}
+
 /**
  * Generates a dynamic visual using Claude tool_use for schema-constrained JSON output.
  * Claude picks one of three renderers based on topic:
  *   math     → KaTeX formula display
  *   graphing → function-plot equation graph
  *   biology  → p5.js preset simulation (circulatory / mitosis / neural / ecosystem)
+ *
+ * Falls back to a topic-keyword-inferred visual if the API call fails,
+ * so the Dynamic tab always appears.
  */
 async function generateDynamicVisual(
   topic:       string,
   contentText: string | null,
-): Promise<VisualComponent | null> {
-  const client = getClient();
+): Promise<VisualComponent> {
+  const makeComponent = (payload: SimulationPayload): VisualComponent => ({
+    type:              'dynamic',
+    title:             payload.title,
+    concept:           payload.concept,
+    simulationPayload: payload,
+  });
 
-  const sourceCtx = contentText
-    ? `SOURCE MATERIAL:\n"""\n${contentText.slice(0, 8000)}\n"""`
-    : '(No source — use accurate general knowledge for this topic.)';
+  try {
+    const client = getClient();
 
-  const prompt = `You are an expert educational content designer.
+    const sourceCtx = contentText
+      ? `SOURCE MATERIAL:\n"""\n${contentText.slice(0, 8000)}\n"""`
+      : '(No source — use accurate general knowledge for this topic.)';
+
+    const prompt = `You are an expert educational content designer.
 Analyse the topic "${topic}" and choose the best interactive visual renderer for a student.
 
 ${sourceCtx}
 
 Choose the domain that best fits:
-- "math":     equations, formulas, proofs, derivations → provide 2-5 LaTeX formula strings
-- "graphing": curves, functions, relationships → provide a math.js equation (e.g. "sin(x)", "x^2 - 3*x + 2")
+- "math":     equations, formulas, proofs, derivations → provide 2-5 LaTeX formula strings (raw LaTeX, no $ delimiters)
+- "graphing": curves, functions, mathematical relationships → provide a math.js equation string e.g. "sin(x)" or "x^2 - 3*x + 2"
 - "biology":  living systems, anatomy, ecology, neuroscience → pick simulationType: circulatory | mitosis | neural | ecosystem
 
-Call render_simulation now.`;
+Call render_simulation now with the best domain for this topic.`;
 
-  try {
     const response = await client.messages.create({
       model:      'claude-3-5-sonnet-20241022',
       max_tokens: 600,
@@ -992,8 +1029,8 @@ Call render_simulation now.`;
             domain:           { type: 'string', enum: ['math', 'graphing', 'biology'] },
             title:            { type: 'string', description: 'Short descriptive title (≤8 words)' },
             concept:          { type: 'string', description: 'One sentence explaining what this visual shows' },
-            latexFormulas:    { type: 'array',  items: { type: 'string' }, description: 'LaTeX strings for math domain (no $ delimiters — raw LaTeX only)' },
-            graphingEquation: { type: 'string', description: 'math.js expression for graphing domain, e.g. "sin(x)" or "x^2"' },
+            latexFormulas:    { type: 'array', items: { type: 'string' }, description: 'LaTeX formula strings for math domain' },
+            graphingEquation: { type: 'string', description: 'math.js equation for graphing domain, e.g. "sin(x)"' },
             simulationVariables: {
               type: 'object',
               description: 'Parameters for biology domain',
@@ -1019,23 +1056,22 @@ Call render_simulation now.`;
 
     const toolBlock = response.content.find(b => b.type === 'tool_use');
     if (!toolBlock || toolBlock.type !== 'tool_use') {
-      console.warn('[generateDynamicVisual] no tool_use block in response', response.content);
-      return null;
+      console.warn('[generateDynamicVisual] no tool_use block — using fallback');
+      return makeComponent(buildFallbackPayload(topic));
     }
 
     const payload = toolBlock.input as SimulationPayload;
-    console.info('[generateDynamicVisual] payload:', payload);
-    if (!payload?.domain || !payload?.title) return null;
+    if (!payload?.domain || !payload?.title) {
+      console.warn('[generateDynamicVisual] invalid payload — using fallback', payload);
+      return makeComponent(buildFallbackPayload(topic));
+    }
 
-    return {
-      type:              'dynamic',
-      title:             payload.title,
-      concept:           payload.concept,
-      simulationPayload: payload,
-    };
+    console.info('[generateDynamicVisual] ✓ domain:', payload.domain, '| simType:', payload.simulationVariables?.simulationType);
+    return makeComponent(payload);
+
   } catch (err) {
-    console.error('[generateDynamicVisual] failed:', err);
-    return null;
+    console.warn('[generateDynamicVisual] API error — using fallback:', err);
+    return makeComponent(buildFallbackPayload(topic));
   }
 }
 
@@ -1068,8 +1104,8 @@ export async function generateVisualComponents(
       r.status === 'fulfilled' && r.value !== null)
     .map(r => r.value);
 
-  // Append dynamic visual last (tab order: static visuals → dynamic)
-  if (dynamicVisual) components.push(dynamicVisual);
+  // Append dynamic visual last (always present — falls back to keyword inference)
+  components.push(dynamicVisual);
 
   if (components.length === 0) {
     throw new Error('Failed to generate visual components. Please retry.');
