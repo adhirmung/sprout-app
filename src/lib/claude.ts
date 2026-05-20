@@ -783,7 +783,7 @@ export interface VisualSet {
 // Shared layout requirements. NO external CDN — srcDoc iframes block external fetches.
 // Everything must be self-contained: inline JS, Canvas API, CSS only.
 const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html> to </html>)
-- NO external resources whatsoever — no CDN, no script src, no link href, no image src
+- NO external resources — no CDN, no <script src>, no <link href>, no Mermaid, no Chart.js, no D3, no p5.js
 - html, body: { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#FAFAF9; font-family:system-ui,sans-serif }
 - All layout via flexbox or CSS grid — no absolute pixel coordinates for structural elements
 - Minimum 13px font; colour #111 or darker; never light-grey text on white
@@ -795,13 +795,21 @@ const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html>
 // Type-specific generation instructions — all self-contained, no external dependencies
 const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
 
-  diagram: `Create an HTML/CSS flow diagram — NO SVG coordinate maths, NO external libraries.
-Use a flex container of labelled boxes connected by CSS arrows.
-Each node: <div style='background:#EFF6FF;border:2px solid #3B82F6;border-radius:8px;padding:10px 16px;font-weight:700;font-size:13px;text-align:center;min-width:100px'>Label</div>
-Arrow between nodes: <div style='font-size:20px;color:#3B82F6;align-self:center'>→</div>
-For branching flows use a column of rows. Group rows and columns with nested flex divs.
-Add a bold title at the top. Each node may have a small subtitle in lighter text below its label.
-Wrap everything in a centered flex column filling the viewport.`,
+  diagram: `Create a flow diagram using ONLY plain HTML divs and CSS flexbox — absolutely NO Mermaid, NO D3, NO SVG, NO external libraries of any kind.
+BANNED: <div class='mermaid'>, graph TD, graph LR, flowchart, <script src=...>, any library syntax.
+REQUIRED approach — copy this exact pattern and fill in real content:
+<body style='display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;padding:16px;box-sizing:border-box'>
+  <h2 style='font-size:16px;font-weight:700;color:#111;margin:0 0 16px'>Diagram Title</h2>
+  <div style='display:flex;flex-direction:column;align-items:center;gap:8px'>
+    <div style='background:#EFF6FF;border:2px solid #3B82F6;border-radius:8px;padding:10px 20px;font-weight:700;font-size:13px;color:#1e40af'>Step One</div>
+    <div style='font-size:22px;color:#3B82F6'>↓</div>
+    <div style='background:#EFF6FF;border:2px solid #3B82F6;border-radius:8px;padding:10px 20px;font-weight:700;font-size:13px;color:#1e40af'>Step Two</div>
+    <div style='font-size:22px;color:#3B82F6'>↓</div>
+    <div style='background:#ECFDF5;border:2px solid #10B981;border-radius:8px;padding:10px 20px;font-weight:700;font-size:13px;color:#065f46'>Final Step</div>
+  </div>
+</body>
+For horizontal flows use flex-direction:row with → arrows. For branching, nest rows inside columns.
+Use different background/border colours for different node types (start, process, decision, end).`,
 
   chart: `Create a Canvas API bar, line, or pie chart — NO external libraries.
 Use a single <canvas id='c'> that fills the iframe. In JS:
