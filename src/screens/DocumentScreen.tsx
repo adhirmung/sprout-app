@@ -827,7 +827,7 @@ function VisualsView({
           <iframe
             key={safeIdx}
             srcDoc={active.html}
-            sandbox="allow-scripts"
+            sandbox="allow-scripts allow-same-origin"
             style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
             title={active.title}
           />

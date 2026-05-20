@@ -780,27 +780,61 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-// Shared layout requirements injected into every generated document.
+// Shared layout requirements for every generated document.
+// CDN libraries are allowed and preferred — they handle layout far better than hand-written SVG.
 const RESPONSIVE_REQUIREMENTS = `- Complete standalone document (<!DOCTYPE html> to </html>)
-- ZERO external resources — no CDN, no external fonts, no image URLs
-- Only: inline SVG, Canvas API, CSS animations, vanilla JS
-- html, body: { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#FAFAF9 }
-- Root SVG or Canvas element must use width='100%' height='100%' so it fills the iframe
-- SVG elements must include a viewBox attribute so they scale at any size
-- Dark readable labels (#111111); avoid light-grey text
-- All content must fit without scrolling
-- CRITICAL FOR JSON: use single quotes for ALL HTML and SVG attributes — never double quotes inside the html field
-  Correct:  <rect x='10' y='10' fill='#3B82F6'/>   <div style='color:red'>
-  Wrong:    <rect x="10" y="10" fill="#3B82F6"/>    <div style="color:red">`;
+- CDN libraries ARE ALLOWED — use them (Chart.js for charts, Mermaid for diagrams, p5.js for simulations)
+- html, body: { margin:0; padding:8px; width:100%; height:100%; overflow:hidden; background:#FAFAF9; box-sizing:border-box }
+- Flexbox or CSS grid for all layout — no absolute pixel coordinates for structural positioning
+- Minimum font size 13px; text colour #111111 or darker — never light grey
+- Everything must be visible without scrolling
+- CRITICAL FOR JSON VALIDITY: use single quotes for ALL HTML/SVG/JS-string attributes inside the html field
+  Correct: <canvas id='c' style='width:100%'>   <div class='box'>
+  Wrong:   <canvas id="c" style="width:100%">   <div class="box">`;
 
-// Type-specific generation instructions
+// Type-specific CDN-powered generation instructions
 const VISUAL_TYPE_GUIDE: Record<VisualComponent['type'], string> = {
-  diagram:     'SVG anatomical or structural diagram with labeled parts, arrows, and callouts. Use percentage-based SVG viewBox so it scales to any container.',
-  chart:       'SVG bar chart, pie chart, or line graph using real data/values from the source. Axes, labels, and bars must be proportional — no fixed pixel sizes.',
-  timeline:    'Horizontal or vertical timeline of key stages, events, or phases. Each event is a node with a label. Must scroll or fit within 100% width.',
-  process:     'Animated step-by-step flow showing how a key process works (CSS keyframe animation). Steps appear sequentially. Use flexbox/grid — no absolute px offsets.',
-  interactive: 'Hoverable or clickable SVG that reveals additional detail on interaction. Tooltips or highlight states on click/hover.',
-  simulation:  'Interactive simulation where the user manipulates parameters via sliders or buttons to observe real-time changes. Use requestAnimationFrame for smooth animation. Include: (1) a Canvas or SVG drawing area that fills most of the viewport, (2) at least one labelled slider or button control, (3) accurate mathematical or physical model from the source material, (4) a Reset button. Labels must include units.',
+
+  diagram: `Use Mermaid.js to auto-layout the diagram — do NOT write manual SVG coordinates.
+Load from CDN (place in <head>): <script src='https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js'></script>
+Initialize before the closing </body>: <script>mermaid.initialize({startOnLoad:true,theme:'neutral',securityLevel:'loose'});</script>
+Wrap diagram in: <div class='mermaid' style='width:100%;height:100%;display:flex;align-items:center;justify-content:center'>
+Use graph LR for left-right flows, graph TD for top-down. Keep node labels under 25 characters.
+Add styling with classDef and class statements. Example: classDef important fill:#3B82F6,color:#fff`,
+
+  chart: `Use Chart.js to render a perfectly-scaled, auto-labelled chart — do NOT write manual SVG paths.
+Load from CDN (place in <head>): <script src='https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js'></script>
+Structure: <div style='position:relative;width:100%;height:90%'><canvas id='c'></canvas></div>
+Config: { responsive:true, maintainAspectRatio:false, plugins:{title:{display:true,text:'...',font:{size:15,weight:'bold'}}} }
+Choose chart type: bar (comparisons), line (trends over time), doughnut/pie (proportions), radar (multi-axis scores).
+IMPORTANT: if values differ by more than 10× use scales:{y:{type:'logarithmic'}} to keep all bars visible.
+Keep axis tick labels short — abbreviate millions as 'M', thousands as 'K'.`,
+
+  timeline: `Create a clean vertical timeline using only HTML and CSS — no external library needed.
+Layout: scrollable flex column, each item = coloured circle number + bold title + short description.
+Use CSS @keyframes fadeInUp with staggered animation-delay (0.1s per step) for a smooth reveal.
+Flexbox only — no absolute pixel positioning. Gap and padding for spacing.
+Colour the timeline spine line and circle numbers with a single accent colour.`,
+
+  process: `Create an animated step-by-step process flow using only HTML and CSS — no external library needed.
+Layout: flex row (desktop) or flex column (narrow). Each step = number badge + title + 1-line description.
+CSS arrow connectors between steps using border tricks or the › character.
+@keyframes sequential reveal with animation-delay per step. Clean card style per step.
+Flexbox only — no absolute positioning.`,
+
+  interactive: `Create a click/hover interactive component using vanilla JS — no external library needed.
+Use an SVG with a viewBox so it scales to any size. Add event listeners for mouseover and click.
+On interaction: reveal hidden detail panels, highlight related elements, toggle expanded state.
+CSS transitions (0.25s ease) for smooth visual feedback. Tooltips or side panels for extra detail.`,
+
+  simulation: `Use p5.js for a smooth, interactive simulation canvas.
+Load from CDN (place in <head>): <script src='https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js'></script>
+Canvas sizing: in setup() use createCanvas(windowWidth, windowHeight - 90) to leave room for controls below.
+In windowResized(): resizeCanvas(windowWidth, windowHeight - 90).
+Controls: place HTML <label>+<input type='range'>+<span> elements in a <div> BELOW the canvas — never overlapping it.
+Draw loop: background(250) each frame, draw the simulation, display current parameter values on canvas.
+Base ALL physics/chemistry/biology on real formulas from the source. Show units on labels.
+Include a Reset button that restores initial parameter values.`,
 };
 
 /**
@@ -825,25 +859,24 @@ async function generateOneVisual(
   const maxTokens = isSimulation ? 5000 : 3000;
 
   const prompt = isSimulation
-    ? `You are an expert educational simulation developer. Create ONE interactive simulation that accurately models a key concept from the source material.
+    ? `You are an expert educational simulation developer. Create ONE interactive p5.js simulation that accurately models a key concept from the source material.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
 
-Visual type: "simulation"
 Instruction: ${VISUAL_TYPE_GUIDE.simulation}
 
 Requirements:
 ${RESPONSIVE_REQUIREMENTS}
-- requestAnimationFrame animation loop for smooth real-time updates
-- Interactive controls (sliders/buttons) positioned at the bottom — never overlapping the simulation area
-- Accurate formulas and constants grounded in the source material
-- Clear axis labels, units, and a legend if applicable
-- A visible Reset button that restores initial state
+- p5.js handles the animation loop — use setup(), draw(), windowResized()
+- Controls go in a <div id='controls'> below the canvas — never overlap the drawing area
+- Accurate formulas and constants from the source
+- Show current parameter values on the canvas as text
+- Include a Reset button
 
-Return ONLY valid JSON — the html value must use single quotes for all attributes:
-{"title":"Short descriptive title","type":"simulation","concept":"One sentence: what this simulation teaches","html":"<!DOCTYPE html>..."}`
-    : `You are an expert educational multimedia designer. Create ONE self-contained HTML5 visual learning component.
+Return ONLY valid JSON — every attribute in the html field must use single quotes:
+{"title":"Short descriptive title","type":"simulation","concept":"One sentence: what this simulation teaches interactively","html":"<!DOCTYPE html>..."}`
+    : `You are an expert educational multimedia designer. Create ONE visual learning component using the appropriate CDN library.
 
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}
@@ -853,10 +886,8 @@ Instruction: ${VISUAL_TYPE_GUIDE[visualType]}
 
 Requirements:
 ${RESPONSIVE_REQUIREMENTS}
-- Smooth CSS animations where they add clarity
-- Concise and efficient — avoid redundant markup
 
-Return ONLY valid JSON — the html value must use single quotes for all attributes:
+Return ONLY valid JSON — every attribute in the html field must use single quotes:
 {"title":"Short descriptive title","type":"${visualType}","concept":"One sentence: what this visual teaches","html":"<!DOCTYPE html>..."}`;
 
   type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
