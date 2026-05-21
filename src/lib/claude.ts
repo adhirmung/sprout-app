@@ -1193,3 +1193,71 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`,
   try   { return JSON.parse(raw.slice(start, end + 1)) as WrittenEvaluation; }
   catch { return { score: 1, feedback: 'Partial credit — keep going!' }; }
 }
+
+// ── Paragraph quiz (4–5 Qs per subtopic for Read → Test Me) ──
+
+export interface ParagraphQuestion {
+  question:    string;
+  options:     string[];  // exactly 4 options
+  answer:      number;    // 0-based index of correct option
+  explanation: string;
+}
+
+export interface ParagraphQuiz {
+  questions: ParagraphQuestion[];  // 4–5 questions
+}
+
+export async function generateParagraphQuiz(
+  subtopicTitle:   string,
+  subtopicContent: string,
+  topicTitle:      string,
+): Promise<ParagraphQuiz> {
+  const client = getClient();
+
+  const prompt = `You are an expert educator. Generate exactly 5 multiple-choice questions to test understanding of the following study paragraph.
+
+TOPIC: ${topicTitle}
+SUBTOPIC: ${subtopicTitle}
+
+PARAGRAPH CONTENT:
+${subtopicContent}
+
+Rules:
+- Each question must be directly answerable from the paragraph content above.
+- Provide exactly 4 answer options per question (A, B, C, D).
+- Exactly one option is correct; the other 3 are plausible distractors.
+- Vary difficulty: 2 recall questions, 2 comprehension questions, 1 application/inference question.
+- Explanation is 1 sentence shown after the student answers.
+- answer is the 0-based index of the correct option.
+
+Return ONLY valid JSON — no markdown:
+{
+  "questions": [
+    { "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "answer": 0, "explanation": "..." },
+    { "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "answer": 2, "explanation": "..." },
+    { "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "answer": 1, "explanation": "..." },
+    { "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "answer": 3, "explanation": "..." },
+    { "question": "...", "options": ["A ...", "B ...", "C ...", "D ..."], "answer": 0, "explanation": "..." }
+  ]
+}`;
+
+  const raw = await streamToText(client, {
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 2000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: prompt }],
+  }, 'generateParagraphQuiz');
+
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) throw new Error('Failed to generate questions. Please retry.');
+
+  let parsed: ParagraphQuiz;
+  try   { parsed = JSON.parse(raw.slice(start, end + 1)); }
+  catch { parsed = JSON.parse(repairJson(raw.slice(start))); }
+
+  if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
+    throw new Error('Invalid quiz response. Please retry.');
+  }
+  return parsed;
+}

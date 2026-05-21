@@ -18,6 +18,7 @@ import {
   generateContentAudit,
   generateContentMap,
   generateFeed,
+  generateParagraphQuiz,
   generatePracticeQuiz,
   generateReading,
   generateVisualComponents,
@@ -25,7 +26,7 @@ import {
   saveApiKey,
   streamCardChat,
 } from '../lib/claude';
-import type { ChatMessage, ContentAudit, ContentMap, DocumentReading, FeedCard, FeedAudit, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
+import type { ChatMessage, ContentAudit, ContentMap, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -2172,9 +2173,23 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
   const [elapsedSec,        setElapsedSec]        = useState(0);
   const [breakDismissed,    setBreakDismissed]    = useState(false);
-  type ActiveQuiz = { key: string; quiz: import('../lib/claude').SubtopicQuiz; color: string; selected: number | null; revealed: boolean } | null;
+
+  // Multi-question Test Me quiz
+  type ActiveQuiz = {
+    key:       string;
+    questions: ParagraphQuestion[];
+    color:     string;
+    qIdx:      number;
+    selected:  number | null;
+    revealed:  boolean;
+    score:     number;
+    done:      boolean;
+  } | null;
   const [activeQuiz,  setActiveQuiz]  = useState<ActiveQuiz>(null);
-  const [viewMode,    setViewMode]    = useState<'list' | 'cards'>('list');
+  const [quizCache,   setQuizCache]   = useState<Record<string, ParagraphQuestion[]>>({});
+  const [quizLoading, setQuizLoading] = useState<string | null>(null);
+
+  const [viewMode,    setViewMode]    = useState<'list' | 'cards' | 'ask'>('list');
   const [cardIdx,     setCardIdx]     = useState(0);
 
   const isMobile    = useIsMobile();
@@ -2236,13 +2251,26 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
     setSubStatuses(prev => ({ ...prev, [key]: prev[key] === status ? 'unread' : status }));
 
   const answerQuiz = (selected: number) => {
+    if (!activeQuiz || activeQuiz.revealed) return;
+    const q       = activeQuiz.questions[activeQuiz.qIdx];
+    const correct = q.answer;
+    const hit     = selected === correct;
+    setActiveQuiz(prev => prev ? { ...prev, selected, revealed: true, score: prev.score + (hit ? 1 : 0) } : null);
+    if (hit) celebrate();
+  };
+
+  const nextQuizQuestion = () => {
     if (!activeQuiz) return;
-    const correct = activeQuiz.quiz.answer;
-    setActiveQuiz(prev => prev ? { ...prev, selected, revealed: true } : null);
-    if (selected === correct) {
-      setSubStatuses(prev => ({ ...prev, [activeQuiz.key]: 'learnt' }));
-      celebrate();
-      setTimeout(() => setActiveQuiz(null), 1800);
+    const nextIdx  = activeQuiz.qIdx + 1;
+    const done     = nextIdx >= activeQuiz.questions.length;
+    const finalScore = activeQuiz.score; // already incremented in answerQuiz
+    if (done) {
+      setActiveQuiz(prev => prev ? { ...prev, done: true } : null);
+      if (finalScore === activeQuiz.questions.length) {
+        setSubStatuses(prev => ({ ...prev, [activeQuiz.key]: 'learnt' }));
+      }
+    } else {
+      setActiveQuiz(prev => prev ? { ...prev, qIdx: nextIdx, selected: null, revealed: false } : null);
     }
   };
 
@@ -2252,6 +2280,32 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   const toggleSub = (key: string) => setExpandedSubs(prev => {
     const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
   });
+
+  // Generate (or retrieve cached) paragraph quiz and open the modal
+  const openTestMe = async (key: string, subTitle: string, subContent: string, topicTitle: string, color: string) => {
+    if (quizCache[key]) {
+      setActiveQuiz({ key, questions: quizCache[key], color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
+      return;
+    }
+    setQuizLoading(key);
+    try {
+      const result = await generateParagraphQuiz(subTitle, subContent, topicTitle);
+      setQuizCache(prev => ({ ...prev, [key]: result.questions }));
+      setActiveQuiz({ key, questions: result.questions, color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
+    } catch {
+      // fail silently — button returns to idle
+    } finally {
+      setQuizLoading(null);
+    }
+  };
+
+  // Jump to a specific card in Ask AI mode (chat always open)
+  const jumpToAskAI = (targetCardIdx: number) => {
+    setViewMode('ask');
+    setCardIdx(targetCardIdx);
+    setFocusChatOpen(true);
+    setFocusChatMessages([]);
+  };
 
   // ── Sidebar (desktop) ────────────────────────────────────────
   const sidebar = (
@@ -2346,15 +2400,19 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
     <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
       {/* View toggle */}
       <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
-        {(['list', 'cards'] as const).map(m => (
-          <button key={m} onClick={() => setViewMode(m)} style={{
+        {([
+          { id: 'list',  label: '≡ List'    },
+          { id: 'cards', label: '▣ Focus'   },
+          { id: 'ask',   label: '✨ Ask AI' },
+        ] as const).map(m => (
+          <button key={m.id} onClick={() => { setViewMode(m.id); if (m.id === 'ask') setFocusChatOpen(true); }} style={{
             padding: '5px 14px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
-            background: viewMode === m ? 'var(--card)' : 'transparent',
-            color: viewMode === m ? 'var(--ink)' : 'var(--ink-4)',
-            boxShadow: viewMode === m ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+            background: viewMode === m.id ? (m.id === 'ask' ? 'var(--brand)' : 'var(--card)') : 'transparent',
+            color: viewMode === m.id ? (m.id === 'ask' ? 'white' : 'var(--ink)') : 'var(--ink-4)',
+            boxShadow: viewMode === m.id ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
             transition: 'all 0.18s',
           }}>
-            {m === 'list' ? '≡ List' : '▣ Focus'}
+            {m.label}
           </button>
         ))}
       </div>
@@ -2376,11 +2434,15 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   const [focusChatStreaming, setFocusChatStreaming] = useState(false);
   const focusChatBottomRef = useRef<HTMLDivElement>(null);
 
-  // Reset chat when card changes
+  // Reset chat when card changes; in Ask AI mode keep it open
   useEffect(() => {
-    setFocusChatOpen(false);
+    if (viewMode === 'ask') {
+      setFocusChatOpen(true);
+    } else {
+      setFocusChatOpen(false);
+    }
     setFocusChatMessages([]);
-  }, [safeCardIdx]);
+  }, [safeCardIdx, viewMode]);
 
   useEffect(() => {
     if (focusChatOpen) focusChatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -2447,24 +2509,26 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
 
             {/* Card footer */}
             <div style={{ borderTop: `1px solid ${color}22` }}>
-              {/* Ask about this card — prominent toggle */}
-              <div style={{ padding: '10px 16px', borderBottom: `1px solid ${color}11` }}>
-                <button
-                  onClick={() => setFocusChatOpen(o => !o)}
-                  style={{
-                    width: '100%', padding: '10px 14px', borderRadius: 10, cursor: 'pointer',
-                    background: focusChatOpen ? color : color + '12',
-                    border: `1.5px solid ${color}55`,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
-                    fontSize: 13, fontWeight: 700,
-                    color: focusChatOpen ? 'white' : color,
-                    transition: 'all 0.2s',
-                  }}
-                >
-                  <span style={{ fontSize: 15 }}>✨</span>
-                  {focusChatOpen ? 'Close chat' : 'Ask about this card'}
-                </button>
-              </div>
+              {/* Ask about this card — toggle only in Focus mode; always open in Ask AI mode */}
+              {viewMode === 'cards' && (
+                <div style={{ padding: '10px 16px', borderBottom: `1px solid ${color}11` }}>
+                  <button
+                    onClick={() => setFocusChatOpen(o => !o)}
+                    style={{
+                      width: '100%', padding: '10px 14px', borderRadius: 10, cursor: 'pointer',
+                      background: focusChatOpen ? color : color + '12',
+                      border: `1.5px solid ${color}55`,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+                      fontSize: 13, fontWeight: 700,
+                      color: focusChatOpen ? 'white' : color,
+                      transition: 'all 0.2s',
+                    }}
+                  >
+                    <span style={{ fontSize: 15 }}>✨</span>
+                    {focusChatOpen ? 'Close chat' : 'Ask about this card'}
+                  </button>
+                </div>
+              )}
 
               {/* Status buttons */}
               <div style={{ padding: '10px 16px', display: 'flex', gap: 8, justifyContent: 'center' }}>
@@ -2472,12 +2536,12 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`, background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)', color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
                   ✓ Read
                 </button>
-                {sub.quiz && (
-                  <button onClick={() => setActiveQuiz({ key, quiz: sub.quiz!, color, selected: null, revealed: false })}
-                    style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${color}66`, background: color + '0f', color, transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
-                    🧪 Test Me
-                  </button>
-                )}
+                <button
+                  onClick={() => openTestMe(key, sub.title, sub.content, ct.title, color)}
+                  disabled={quizLoading === key}
+                  style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: quizLoading === key ? 'default' : 'pointer', border: `1.5px solid ${color}66`, background: color + '0f', color, transition: 'all 0.2s', whiteSpace: 'nowrap', opacity: quizLoading === key ? 0.6 : 1 }}>
+                  {quizLoading === key ? '⏳ Loading…' : '🧪 Test Me'}
+                </button>
                 <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'learnt' ? 'unread' : 'learnt' }))}
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`, background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)', color: isLearnt ? 'white' : 'var(--ink-3)', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
                   🧠 Learnt
@@ -2486,8 +2550,8 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
             </div>
           </div>
 
-          {/* Chat panel — sits BELOW the card, not trapped inside */}
-          {focusChatOpen && (
+          {/* Chat panel — sits BELOW the card, always open in Ask AI mode */}
+          {(focusChatOpen || viewMode === 'ask') && (
             <div style={{ borderRadius: 16, border: `1.5px solid ${color}44`, background: 'var(--card)', overflow: 'hidden', boxShadow: '0 2px 16px rgba(0,0,0,0.07)' }}>
               {/* Chat header */}
               <div style={{ padding: '11px 16px', background: color + '0d', display: 'flex', alignItems: 'center', gap: 8, borderBottom: `1px solid ${color}22` }}>
@@ -2541,7 +2605,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
 
         {subActionBar}
 
-        {viewMode === 'cards' ? cardView : (<>
+        {(viewMode === 'cards' || viewMode === 'ask') ? cardView : (<>
 
         {/* Topic pills nav */}
         <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
@@ -2632,12 +2696,12 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
                             </div>
                           )}
 
-                          {/* Read / Test Me / Learnt buttons */}
-                          <div style={{ padding: '10px 14px', borderTop: `1px solid ${color}11`, display: 'flex', gap: 7, alignItems: 'center' }}>
+                          {/* Read / Test Me / Ask AI / Learnt buttons */}
+                          <div style={{ padding: '10px 14px', borderTop: `1px solid ${color}11`, display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                             <button
                               onClick={() => markStatus(key, 'read')}
                               style={{
-                                flex: 1, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                                flex: 1, minWidth: 64, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
                                 cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`,
                                 background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)',
                                 color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)',
@@ -2646,23 +2710,38 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
                             >
                               ✓ Read
                             </button>
-                            {sub.quiz && (
-                              <button
-                                onClick={() => setActiveQuiz({ key, quiz: sub.quiz!, color, selected: null, revealed: false })}
-                                style={{
-                                  flex: 1, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
-                                  cursor: 'pointer', border: `1.5px solid ${color}66`,
-                                  background: 'transparent', color,
-                                  transition: 'all 0.2s',
-                                }}
-                              >
-                                🧪 Test Me
-                              </button>
-                            )}
+                            <button
+                              onClick={() => openTestMe(key, sub.title, sub.content, t.title, color)}
+                              disabled={quizLoading === key}
+                              style={{
+                                flex: 1, minWidth: 80, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                                cursor: quizLoading === key ? 'default' : 'pointer',
+                                border: `1.5px solid ${color}66`,
+                                background: 'transparent', color,
+                                transition: 'all 0.2s',
+                                opacity: quizLoading === key ? 0.6 : 1,
+                              }}
+                            >
+                              {quizLoading === key ? '⏳…' : '🧪 Test Me'}
+                            </button>
+                            <button
+                              onClick={() => {
+                                const flatIdx = allCards.findIndex(c => c.key === key);
+                                jumpToAskAI(flatIdx >= 0 ? flatIdx : 0);
+                              }}
+                              style={{
+                                flex: 1, minWidth: 72, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                                cursor: 'pointer', border: '1.5px solid var(--brand)',
+                                background: 'var(--brand-tint, #EBF4FF)', color: 'var(--brand)',
+                                transition: 'all 0.2s',
+                              }}
+                            >
+                              ✨ Ask AI
+                            </button>
                             <button
                               onClick={() => markStatus(key, 'learnt')}
                               style={{
-                                flex: 1, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                                flex: 1, minWidth: 64, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
                                 cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`,
                                 background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)',
                                 color: isLearnt ? 'white' : 'var(--ink-3)',
@@ -2695,102 +2774,158 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
     </div>
   );
 
-  // ── Quiz modal ───────────────────────────────────────────────
+  // ── Multi-question quiz modal ────────────────────────────────
   const quizModal = activeQuiz && (() => {
-    const { quiz, color, selected, revealed } = activeQuiz;
-    const isCorrect = revealed && selected === quiz.answer;
+    const { questions, color, qIdx, selected, revealed, score, done } = activeQuiz;
+    const q         = questions[qIdx];
+    const totalQ    = questions.length;
+    const isCorrect = revealed && selected === q.answer;
+    const pct       = done ? Math.round((score / totalQ) * 100) : 0;
+
     return (
       <div
         onClick={(e) => { if (e.target === e.currentTarget) setActiveQuiz(null); }}
         style={{
           position: 'fixed', inset: 0, zIndex: 2000,
-          background: 'rgba(0,0,0,0.45)',
-          backdropFilter: 'blur(10px)',
-          WebkitBackdropFilter: 'blur(10px)',
+          background: 'rgba(0,0,0,0.5)',
+          backdropFilter: 'blur(12px)',
+          WebkitBackdropFilter: 'blur(12px)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           padding: '24px 16px',
         }}
       >
         <div style={{
-          width: '100%', maxWidth: 460,
+          width: '100%', maxWidth: 500,
           background: 'var(--card)',
-          borderRadius: 20,
-          boxShadow: '0 24px 64px rgba(0,0,0,0.3)',
+          borderRadius: 22,
+          boxShadow: '0 24px 72px rgba(0,0,0,0.35)',
           overflow: 'hidden',
         }}>
           {/* Modal header */}
-          <div style={{ padding: '16px 20px 14px', borderBottom: `2px solid ${color}33`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ padding: '15px 20px 13px', borderBottom: `2px solid ${color}33`, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
               <span style={{ fontSize: 18 }}>🧪</span>
-              <span style={{ fontSize: 14, fontWeight: 800, color }}>Quick Test</span>
-            </div>
-            <button
-              onClick={() => setActiveQuiz(null)}
-              style={{ width: 28, height: 28, borderRadius: '50%', border: '1px solid var(--line)', background: 'var(--bg-tint)', cursor: 'pointer', fontSize: 14, color: 'var(--ink-3)', display: 'grid', placeItems: 'center' }}
-            >✕</button>
-          </div>
-
-          {/* Question + options */}
-          <div style={{ padding: '18px 20px 14px' }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)', lineHeight: 1.5, marginBottom: 16 }}>
-              {quiz.question}
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
-              {quiz.options.map((opt, oi) => {
-                const isSelected = oi === selected;
-                const isAnswer   = oi === quiz.answer;
-                let bg = 'var(--bg-tint)', border = 'var(--line)', textColor = 'var(--ink-2)', prefix = String.fromCharCode(65 + oi);
-                if (revealed) {
-                  if (isAnswer)                    { bg = 'rgba(47,158,94,0.12)'; border = 'var(--brand)'; textColor = 'var(--brand)'; prefix = '✓'; }
-                  else if (isSelected && !isAnswer) { bg = 'rgba(255,122,92,0.1)';  border = '#FF7A5C';     textColor = '#FF7A5C';      prefix = '✗'; }
-                }
-                return (
-                  <button
-                    key={oi}
-                    disabled={revealed}
-                    onClick={() => answerQuiz(oi)}
-                    style={{
-                      padding: '11px 14px', borderRadius: 12,
-                      border: `1.5px solid ${border}`,
-                      background: bg, color: textColor,
-                      fontSize: 13, fontWeight: revealed && isAnswer ? 700 : 500,
-                      textAlign: 'left', cursor: revealed ? 'default' : 'pointer',
-                      display: 'flex', alignItems: 'center', gap: 10, transition: 'all 0.2s',
-                    }}
-                  >
-                    <span style={{ fontWeight: 700, fontSize: 12, width: 16, flexShrink: 0 }}>{prefix}</span>
-                    {opt}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Result footer */}
-          {revealed && (
-            <div style={{
-              padding: '14px 20px 18px',
-              borderTop: `1px solid ${isCorrect ? 'rgba(47,158,94,0.2)' : 'rgba(255,122,92,0.2)'}`,
-              background: isCorrect ? 'rgba(47,158,94,0.05)' : 'rgba(255,122,92,0.05)',
-            }}>
-              {isCorrect ? (
-                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--brand)' }}>
-                  🎉 Correct! Marked as Learnt — closing…
-                </div>
+              {done ? (
+                <span style={{ fontSize: 14, fontWeight: 800, color }}>Results</span>
               ) : (
-                <>
-                  <div style={{ fontSize: 13, color: '#CC3B1A', fontWeight: 600, lineHeight: 1.55, marginBottom: 12 }}>
-                    {quiz.explanation}
-                  </div>
-                  <button
-                    onClick={() => setActiveQuiz(prev => prev ? { ...prev, selected: null, revealed: false } : null)}
-                    style={{ padding: '8px 18px', borderRadius: 10, fontSize: 13, fontWeight: 700, background: color, color: 'white', border: 'none', cursor: 'pointer' }}
-                  >
-                    Try again →
-                  </button>
-                </>
+                <span style={{ fontSize: 14, fontWeight: 800, color }}>
+                  Question {qIdx + 1} <span style={{ color: 'var(--ink-4)', fontWeight: 500 }}>/ {totalQ}</span>
+                </span>
               )}
             </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              {/* Progress dots */}
+              {!done && (
+                <div style={{ display: 'flex', gap: 4 }}>
+                  {questions.map((_, di) => (
+                    <div key={di} style={{
+                      width: 7, height: 7, borderRadius: '50%', transition: 'background 0.2s',
+                      background: di < qIdx ? 'var(--brand)' : di === qIdx ? color : 'var(--line)',
+                    }} />
+                  ))}
+                </div>
+              )}
+              <button
+                onClick={() => setActiveQuiz(null)}
+                style={{ width: 28, height: 28, borderRadius: '50%', border: '1px solid var(--line)', background: 'var(--bg-tint)', cursor: 'pointer', fontSize: 14, color: 'var(--ink-3)', display: 'grid', placeItems: 'center' }}
+              >✕</button>
+            </div>
+          </div>
+
+          {done ? (
+            /* ── Results screen ── */
+            <div style={{ padding: '28px 24px 28px', textAlign: 'center' }}>
+              <div style={{ fontSize: 52, marginBottom: 10 }}>
+                {pct >= 80 ? '🏆' : pct >= 60 ? '👍' : '📚'}
+              </div>
+              <div style={{ fontSize: 30, fontWeight: 900, color, marginBottom: 4 }}>{pct}%</div>
+              <div style={{ fontSize: 14, color: 'var(--ink-3)', marginBottom: 20 }}>
+                {score} of {totalQ} correct
+              </div>
+              {score >= Math.ceil(totalQ * 0.8) && (
+                <div style={{ fontSize: 13, color: 'var(--brand)', fontWeight: 600, marginBottom: 16 }}>
+                  🎉 Great job — this subtopic is marked Learnt!
+                </div>
+              )}
+              <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+                <button
+                  onClick={() => {
+                    setActiveQuiz(prev => prev ? { ...prev, qIdx: 0, selected: null, revealed: false, score: 0, done: false } : null);
+                  }}
+                  style={{ padding: '9px 22px', borderRadius: 12, fontSize: 13, fontWeight: 700, background: color + '15', color, border: `1.5px solid ${color}55`, cursor: 'pointer' }}
+                >
+                  Try Again
+                </button>
+                <button
+                  onClick={() => setActiveQuiz(null)}
+                  style={{ padding: '9px 22px', borderRadius: 12, fontSize: 13, fontWeight: 700, background: color, color: 'white', border: 'none', cursor: 'pointer' }}
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Question + options */}
+              <div style={{ padding: '18px 20px 14px' }}>
+                <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)', lineHeight: 1.55, marginBottom: 16 }}>
+                  {q.question}
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 9 }}>
+                  {q.options.map((opt, oi) => {
+                    const isSelected = oi === selected;
+                    const isAnswer   = oi === q.answer;
+                    let bg = 'var(--bg-tint)', border = 'var(--line)', textColor = 'var(--ink-2)', prefix = String.fromCharCode(65 + oi);
+                    if (revealed) {
+                      if (isAnswer)                     { bg = 'rgba(47,158,94,0.12)'; border = 'var(--brand)'; textColor = 'var(--brand)'; prefix = '✓'; }
+                      else if (isSelected && !isAnswer) { bg = 'rgba(255,122,92,0.1)';  border = '#FF7A5C';     textColor = '#FF7A5C';      prefix = '✗'; }
+                    }
+                    return (
+                      <button
+                        key={oi}
+                        disabled={revealed}
+                        onClick={() => answerQuiz(oi)}
+                        style={{
+                          padding: '11px 14px', borderRadius: 12,
+                          border: `1.5px solid ${border}`,
+                          background: bg, color: textColor,
+                          fontSize: 13, fontWeight: revealed && isAnswer ? 700 : 500,
+                          textAlign: 'left', cursor: revealed ? 'default' : 'pointer',
+                          display: 'flex', alignItems: 'center', gap: 10, transition: 'all 0.2s',
+                        }}
+                      >
+                        <span style={{ fontWeight: 700, fontSize: 12, width: 16, flexShrink: 0 }}>{prefix}</span>
+                        {opt}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Result footer */}
+              {revealed && (
+                <div style={{
+                  padding: '13px 20px 16px',
+                  borderTop: `1px solid ${isCorrect ? 'rgba(47,158,94,0.2)' : 'rgba(255,122,92,0.2)'}`,
+                  background: isCorrect ? 'rgba(47,158,94,0.05)' : 'rgba(255,122,92,0.05)',
+                  display: 'flex', flexDirection: 'column', gap: 10,
+                }}>
+                  <div style={{ fontSize: 13, color: isCorrect ? 'var(--brand)' : '#CC3B1A', fontWeight: 600, lineHeight: 1.55 }}>
+                    {isCorrect ? '✓ Correct! ' : '✗ Not quite — '}{q.explanation}
+                  </div>
+                  <button
+                    onClick={nextQuizQuestion}
+                    style={{
+                      alignSelf: 'flex-end',
+                      padding: '8px 20px', borderRadius: 10, fontSize: 13, fontWeight: 700,
+                      background: color, color: 'white', border: 'none', cursor: 'pointer',
+                    }}
+                  >
+                    {qIdx + 1 < totalQ ? 'Next question →' : 'See results →'}
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -2874,7 +3009,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
 
       {/* Body — always row layout; sidebar visible in both List and Focus modes */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
-        {viewMode === 'cards' ? (
+        {(viewMode === 'cards' || viewMode === 'ask') ? (
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0, padding: isMobile ? '14px 14px 10px' : '20px 28px 14px' }}>
             {subActionBar}
             {cardView}
