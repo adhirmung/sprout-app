@@ -660,6 +660,11 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
               </div>
             )}
 
+            {/* ── Uploaded papers tracker ── */}
+            {userId && !loadingSets && examSets.length > 0 && (
+              <PapersSection examSets={examSets} />
+            )}
+
             {/* ── Untaken ── */}
             {untaken.length > 0 && (
               <>
@@ -782,6 +787,85 @@ function SectionLabel({ label, dot, count }: { label: string; dot: string; count
   );
 }
 
+// ── Uploaded papers tracker (sidebar accordion) ───────────────
+
+function PapersSection({ examSets }: { examSets: StoredExamSet[] }) {
+  const [open, setOpen] = useState(true);
+
+  // Aggregate unique paper names → count of exam sets referencing each
+  const paperMap = new Map<string, number>();
+  for (const set of examSets) {
+    for (const name of set.paperNames) {
+      paperMap.set(name, (paperMap.get(name) ?? 0) + 1);
+    }
+  }
+  if (paperMap.size === 0) return null;
+
+  const papers = Array.from(paperMap.entries()).sort(([a], [b]) => a.localeCompare(b));
+
+  return (
+    <div>
+      {/* Toggle header */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          padding: '10px 10px 3px', width: '100%',
+          background: 'none', border: 'none', cursor: 'pointer',
+        }}
+      >
+        <span style={{ fontSize: 12 }}>📚</span>
+        <span style={{
+          fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
+          letterSpacing: '0.09em', color: 'var(--ink-4)', flex: 1, textAlign: 'left',
+        }}>
+          Uploaded Papers
+        </span>
+        <span style={{
+          fontSize: 10, color: 'var(--ink-4)',
+          background: 'var(--bg)', borderRadius: 8, padding: '1px 6px', marginRight: 4,
+        }}>
+          {papers.length}
+        </span>
+        <span style={{
+          fontSize: 9, color: 'var(--ink-4)', display: 'inline-block',
+          transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+          transition: 'transform 0.15s',
+        }}>▼</span>
+      </button>
+
+      {/* Paper rows */}
+      {open && (
+        <div style={{ padding: '3px 8px 6px' }}>
+          {papers.map(([name, count]) => (
+            <div
+              key={name}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8,
+                padding: '5px 8px', borderRadius: 8,
+              }}
+            >
+              <span style={{ fontSize: 12, flexShrink: 0 }}>📋</span>
+              <span style={{
+                flex: 1, fontSize: 11, color: 'var(--ink-2)', fontWeight: 500,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
+                {name}
+              </span>
+              <span style={{ fontSize: 10, color: 'var(--ink-4)', flexShrink: 0, whiteSpace: 'nowrap' }}>
+                {count} exam{count !== 1 ? 's' : ''}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ height: 1, background: 'var(--line)', margin: '6px 10px 4px' }} />
+    </div>
+  );
+}
+
 // ── Exam set card (sidebar item) ───────────────────────────────
 
 function ExamSetCard({ set, isSelected, summary, onSelect, onDelete }: {
@@ -852,6 +936,96 @@ function ExamSetCard({ set, isSelected, summary, onSelect, onDelete }: {
   );
 }
 
+// ── How it works (homepage explainer) ─────────────────────────
+
+const HOW_IT_WORKS_STEPS = [
+  {
+    icon: '📤',
+    title: 'Upload Past Papers',
+    desc: 'Upload 2–5 past NSC exam papers (PDF). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
+  },
+  {
+    icon: '🤖',
+    title: 'AI Generates a Unique Exam',
+    desc: 'Claude analyses your papers and creates a brand-new timed practice exam that mirrors their exact style, question types, mark distribution, and cognitive levels — not a copy, a fresh original.',
+  },
+  {
+    icon: '✍️',
+    title: 'Sit It & Get AI Marking',
+    desc: 'Take the exam under timed conditions with a live countdown. AI marks every answer — including calculations and essays — and returns per-question scores, model answers, and a grade.',
+  },
+  {
+    icon: '✨',
+    title: 'Generate New Variants (No Re-upload)',
+    desc: 'Already taken an exam? Tap "New Variant" on any saved exam to generate a completely fresh set of questions covering the same curriculum topics. Expect 3–6 genuinely unique variants per paper set before question overlap — more if you uploaded more papers.',
+  },
+] as const;
+
+function HowItWorks() {
+  const [open, setOpen] = useState(true);
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      {/* Toggle header */}
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          width: '100%', background: 'none', border: 'none', cursor: 'pointer',
+          padding: '0 0 12px',
+        }}
+      >
+        <span style={{
+          fontSize: 11, fontWeight: 800, textTransform: 'uppercase',
+          letterSpacing: '0.1em', color: 'var(--ink-4)',
+        }}>
+          How it works
+        </span>
+        <span style={{
+          fontSize: 10, color: 'var(--ink-4)',
+          display: 'inline-block',
+          transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+          transition: 'transform 0.18s',
+        }}>▼</span>
+      </button>
+
+      {open && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {HOW_IT_WORKS_STEPS.map((s, i) => (
+            <div
+              key={i}
+              style={{
+                display: 'flex', gap: 14, padding: '14px 16px',
+                background: 'var(--card)', border: '1.5px solid var(--line)',
+                borderRadius: 14,
+              }}
+            >
+              {/* Step icon */}
+              <div style={{
+                width: 36, height: 36, borderRadius: 10, flexShrink: 0,
+                background: 'var(--brand-tint)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: 18,
+              }}>
+                {s.icon}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', marginBottom: 4 }}>
+                  {s.title}
+                </div>
+                <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.65 }}>
+                  {s.desc}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Upload panel (homepage) ────────────────────────────────────
 
 function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInputRef, onDragOver, onDragLeave, onDrop, onFileInput, onRemovePaper, onGenerate }: {
@@ -899,6 +1073,9 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
             Upload Papers
           </button>
         </div>
+
+        {/* How it works */}
+        <HowItWorks />
 
         {/* Guest notice */}
         {guestMode && (
