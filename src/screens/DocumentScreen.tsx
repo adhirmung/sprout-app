@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
+import { ExamScreen } from './ExamScreen';
 import { SproutMark } from '../components/Brand';
 import { Chip } from '../components/Chip';
 import { ProgressBar } from '../components/ProgressBar';
@@ -53,7 +54,7 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
@@ -566,6 +567,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
+  if (phase === 'exam') return (
+    <ExamScreen userId={userId} onBack={() => setPhase('idle')} />
+  );
+
   if (phase === 'read' && documentReading && contentMap) return (
     <ReadView
       documentReading={documentReading}
@@ -620,6 +625,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onGenerate={(mode) => generate(false, mode)}
             onRegenerate={() => generate(true, 'activities')}
             onStartLearning={startLearning}
+            onStartExam={() => setPhase('exam')}
           />
         )}
         {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading') && <FeedLoading topic={topic} />}
@@ -902,12 +908,12 @@ function VisualsView({
 
 function DocIdleView({
   source, topic, breadcrumb, isLargeDoc, fromCache, audit, hasMap, error, retryRef, profile,
-  onBack, onGenerate, onRegenerate, onStartLearning,
+  onBack, onGenerate, onRegenerate, onStartLearning, onStartExam,
 }: {
   source: FeedSource | null; topic: string; breadcrumb: string;
   isLargeDoc: boolean; fromCache: boolean; audit: FeedAudit | null; hasMap: boolean; error: string;
   retryRef: React.RefObject<HTMLButtonElement | null>; profile: LearnerProfile | null;
-  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onStartLearning: () => void;
+  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onStartLearning: () => void; onStartExam: () => void;
 }) {
   const isMobile = useIsMobile();
   const [hoveredMode, setHoveredMode] = useState<string | null>(null);
@@ -977,13 +983,15 @@ function DocIdleView({
     : '📚';
 
   const MODES = [
-    { id: 'flashcards', emoji: '🃏', bg: '#EEF6FF', title: 'Flashcards', desc: 'AI-generated flip cards to test your memory' },
-    { id: 'activities', emoji: '🎮', bg: '#EDFAF3', title: 'Activities',  desc: 'Interactive learning components', recommended: true },
-    { id: 'podcast',    emoji: '🎙️', bg: '#F5F0FF', title: 'Podcast',     desc: 'AI-generated audio lesson', soon: true },
+    { id: 'flashcards',  emoji: '🃏', bg: '#EEF6FF', title: 'Flashcards',  desc: 'AI-generated flip cards to test your memory' },
+    { id: 'activities',  emoji: '🎮', bg: '#EDFAF3', title: 'Activities',   desc: 'Interactive learning components', recommended: true },
+    { id: 'exam',        emoji: '📝', bg: '#FFF7ED', title: 'Examination',  desc: 'Upload past papers — AI generates a timed practice exam' },
+    { id: 'podcast',     emoji: '🎙️', bg: '#F5F0FF', title: 'Podcast',      desc: 'AI-generated audio lesson', soon: true },
   ];
 
   const handleMode = (id: string, soon?: boolean) => {
     if (soon) return;
+    if (id === 'exam') { onStartExam(); return; }
     const mode: 'activities' | 'flashcards' | 'quiz' =
       id === 'flashcards' ? 'flashcards' : 'activities';
     onGenerate(mode);
