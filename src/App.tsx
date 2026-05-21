@@ -6,6 +6,7 @@ import { ToastHost } from './components/Toast';
 import { AssessmentFlow } from './screens/AssessmentFlow';
 import { LoginScreen, RegisterScreen } from './screens/AuthScreens';
 import { DocumentScreen } from './screens/DocumentScreen';
+import { ExamScreen } from './screens/ExamScreen';
 import { HomeScreen, collectRecent } from './screens/HomeScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
@@ -194,6 +195,14 @@ function AppCore() {
     );
   }
 
+  if (route === 'exam') {
+    return (
+      <AppShell user={user} route={route} setRoute={setRoute} onLogout={handleLogout} hideNav>
+        <ExamScreen userId={user.id} onBack={() => setRoute('home')} />
+      </AppShell>
+    );
+  }
+
   const library: LibraryTree = Store.get('library', {});
 
   return (
@@ -219,6 +228,7 @@ function AppCore() {
 const NAV_ITEMS = [
   { id: 'home',    label: 'Home',    icon: 'home' },
   { id: 'library', label: 'Library', icon: 'folder' },
+  { id: 'exam',    label: 'Exam',    icon: 'edit' },
   { id: 'profile', label: 'Profile', icon: 'user' },
 ] as const;
 
