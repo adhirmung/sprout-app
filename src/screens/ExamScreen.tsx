@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
-import {
-  analyzeAndGenerateExam,
-  markExamSubmission,
-} from '../lib/examClaude';
+import { analyzeAndGenerateExam, markExamSubmission } from '../lib/examClaude';
 import type { ExamQuestion, ExamResults, GeneratedExam } from '../lib/examClaude';
+import { dbDeleteExamSet, dbLoadAttempts, dbLoadExamSets, dbSaveAttempt, dbSaveExamSet } from '../lib/examDb';
+import type { StoredAttempt, StoredExamSet } from '../lib/examDb';
 
 // ── Math symbol groups ─────────────────────────────────────────
 
@@ -119,7 +118,6 @@ function MathKeyboard({ onInsert, onClose }: {
       boxShadow: '0 4px 24px rgba(0,0,0,0.10)',
       animation: 'math-kb-in 0.15s ease',
     }}>
-      {/* Category tabs + close */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
         {SYMBOL_GROUPS.map((g, i) => (
           <button
@@ -150,7 +148,6 @@ function MathKeyboard({ onInsert, onClose }: {
         </button>
       </div>
 
-      {/* Symbol grid */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
         {SYMBOL_GROUPS[activeGroup].items.map(sym => (
           <button
@@ -209,6 +206,20 @@ function formatTime(seconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString('en-ZA', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
+function formatDuration(seconds: number | null): string {
+  if (seconds === null || seconds === undefined) return '—';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${String(s).padStart(2, '0')}s`;
+  return `${s}s`;
+}
+
 function gradeColor(grade: string): string {
   switch (grade) {
     case 'A': return '#059669';
@@ -247,6 +258,13 @@ interface ExamScreenProps {
 }
 
 export function ExamScreen({ userId, onBack }: ExamScreenProps) {
+  // ── DB state ─────────────────────────────────────────────────
+  const [examSets,      setExamSets]      = useState<StoredExamSet[]>([]);
+  const [selectedSetId, setSelectedSetId] = useState<string | null>(null);
+  const [attempts,      setAttempts]      = useState<StoredAttempt[]>([]);
+  const [loadingSets,   setLoadingSets]   = useState(false);
+
+  // ── Session state ─────────────────────────────────────────────
   const [phase,       setPhase]       = useState<ExamPhase>('upload');
   const [papers,      setPapers]      = useState<UploadedPaper[]>([]);
   const [dragging,    setDragging]    = useState(false);
@@ -256,12 +274,65 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
   const [results,     setResults]     = useState<ExamResults | null>(null);
   const [error,       setError]       = useState<string | null>(null);
   const [timeLeft,    setTimeLeft]    = useState(0);
+  const [startTime,   setStartTime]   = useState(0);
+  const [savingError, setSavingError] = useState<string | null>(null);
+
   const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // Keep a stable ref to the submit callback so the timer closure stays fresh
-  const submitRef = useRef<() => Promise<void>>(async () => {});
+  const submitRef   = useRef<() => Promise<void>>(async () => {});
 
-  // ── File handling ──────────────────────────────────────────
+  // ── Load exam sets on mount ───────────────────────────────────
+  useEffect(() => {
+    if (!userId) return;
+    setLoadingSets(true);
+    dbLoadExamSets(userId).then(sets => {
+      setExamSets(sets);
+      setLoadingSets(false);
+    });
+  }, [userId]);
+
+  // ── Load attempts when selection changes ─────────────────────
+  useEffect(() => {
+    if (!selectedSetId) { setAttempts([]); return; }
+    dbLoadAttempts(selectedSetId).then(setAttempts);
+  }, [selectedSetId]);
+
+  // ── Sidebar actions ───────────────────────────────────────────
+
+  const handleSelectSet = (set: StoredExamSet) => {
+    setSelectedSetId(set.id);
+    setExam(set.examData);
+    setAnswers({});
+    setResults(null);
+    setError(null);
+    setSavingError(null);
+    setPhase('preview');
+  };
+
+  const handleNewExam = () => {
+    setSelectedSetId(null);
+    setExam(null);
+    setPapers([]);
+    setAnswers({});
+    setResults(null);
+    setError(null);
+    setSavingError(null);
+    setPhase('upload');
+  };
+
+  const handleDeleteSet = async (id: string) => {
+    if (!window.confirm('Delete this exam set and all its history?')) return;
+    await dbDeleteExamSet(id);
+    setExamSets(prev => prev.filter(s => s.id !== id));
+    if (selectedSetId === id) {
+      setSelectedSetId(null);
+      setExam(null);
+      setAttempts([]);
+      setPhase('upload');
+    }
+  };
+
+  // ── File handling ─────────────────────────────────────────────
 
   const handleFiles = useCallback(async (files: File[]) => {
     const pdfs = files.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
@@ -274,7 +345,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
         sizeMB: file.size / (1024 * 1024),
       }))
     );
-    setPapers(prev => [...prev, ...loaded].slice(0, 5)); // cap at 5
+    setPapers(prev => [...prev, ...loaded].slice(0, 5));
   }, []);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
@@ -285,15 +356,16 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
 
   const handleFileInput = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) handleFiles(Array.from(e.target.files));
-    e.target.value = ''; // allow re-upload of same file
+    e.target.value = '';
   }, [handleFiles]);
 
-  // ── Generate exam ──────────────────────────────────────────
+  // ── Generate exam ─────────────────────────────────────────────
 
   const handleGenerate = async () => {
     if (papers.length < 2) return;
     setPhase('generating');
     setError(null);
+    setSavingError(null);
     try {
       const generated = await analyzeAndGenerateExam(
         papers.map(p => p.base64),
@@ -302,6 +374,26 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
       );
       setExam(generated);
       setAnswers({});
+
+      if (userId) {
+        const saved = await dbSaveExamSet(userId, {
+          title:           generated.title,
+          subject:         generated.subject,
+          grade:           generated.grade,
+          paperNames:      papers.map(p => p.name),
+          examData:        generated,
+          totalMarks:      generated.totalMarks,
+          durationMinutes: generated.durationMinutes,
+        });
+        if (saved) {
+          setExamSets(prev => [saved, ...prev]);
+          setSelectedSetId(saved.id);
+          setAttempts([]);
+        } else {
+          setSavingError('Exam generated but could not be saved to your history.');
+        }
+      }
+
       setPhase('preview');
     } catch (err) {
       setError((err as Error).message || 'Failed to generate exam. Please try again.');
@@ -309,60 +401,69 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
     }
   };
 
-  // ── Exam session ────────────────────────────────────────────
+  // ── Start / retake ────────────────────────────────────────────
 
-  const handleStartExam = () => {
+  const handleStartExam = useCallback(() => {
     if (!exam) return;
+    setAnswers({});
+    setResults(null);
     setTimeLeft(exam.durationMinutes * 60);
+    setStartTime(Date.now());
     setPhase('taking');
-  };
+  }, [exam]);
+
+  // ── Submit exam ───────────────────────────────────────────────
 
   const handleSubmitExam = useCallback(async () => {
     if (!exam) return;
     if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    const elapsed = Math.floor((Date.now() - startTime) / 1000);
     setPhase('marking');
     setProgressMsg('Marking your answers…');
     try {
       const examResults = await markExamSubmission(exam, answers, setProgressMsg, userId);
       setResults(examResults);
+
+      if (userId && selectedSetId) {
+        const saved = await dbSaveAttempt(selectedSetId, userId, answers, examResults, elapsed);
+        if (saved) setAttempts(prev => [saved, ...prev]);
+      }
+
       setPhase('results');
     } catch (err) {
       setError((err as Error).message || 'Marking failed. Please try again.');
       setPhase('taking');
     }
-  }, [exam, answers, userId]);
+  }, [exam, answers, userId, selectedSetId, startTime]);
 
-  // Keep the submit ref updated
+  // Keep submit ref fresh for timer closure
   useEffect(() => { submitRef.current = handleSubmitExam; }, [handleSubmitExam]);
 
-  // Countdown timer
+  // ── Countdown timer ───────────────────────────────────────────
   useEffect(() => {
     if (phase !== 'taking') return;
     timerRef.current = setInterval(() => {
       setTimeLeft(t => {
-        if (t <= 1) {
-          clearInterval(timerRef.current!);
-          void submitRef.current();
-          return 0;
-        }
+        if (t <= 1) { clearInterval(timerRef.current!); void submitRef.current(); return 0; }
         return t - 1;
       });
     }, 1000);
     return () => { if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; } };
   }, [phase]);
 
-  // ── Reset / retry ──────────────────────────────────────────
+  // ── Full-screen phases (hide sidebar) ─────────────────────────
 
-  const handleReset = () => {
-    setPapers([]); setExam(null); setAnswers({});
-    setResults(null); setError(null); setPhase('upload');
-  };
-
-  const handleRetry = () => {
-    setAnswers({}); setResults(null); setPhase('preview');
-  };
-
-  // ── Loading overlay ────────────────────────────────────────
+  if (phase === 'taking' && exam) {
+    return (
+      <TakingView
+        exam={exam}
+        answers={answers}
+        timeLeft={timeLeft}
+        onAnswer={(id, val) => setAnswers(prev => ({ ...prev, [id]: val }))}
+        onSubmit={handleSubmitExam}
+      />
+    );
+  }
 
   if (phase === 'generating' || phase === 'marking') {
     return (
@@ -380,178 +481,362 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
     );
   }
 
-  // ── Results ────────────────────────────────────────────────
-
-  if (phase === 'results' && results && exam) {
-    return <ResultsView exam={exam} results={results} onReset={handleReset} onRetry={handleRetry} onBack={onBack} />;
-  }
-
-  // ── Taking exam ────────────────────────────────────────────
-
-  if (phase === 'taking' && exam) {
-    return (
-      <TakingView
-        exam={exam}
-        answers={answers}
-        timeLeft={timeLeft}
-        onAnswer={(id, val) => setAnswers(prev => ({ ...prev, [id]: val }))}
-        onSubmit={handleSubmitExam}
-      />
-    );
-  }
-
-  // ── Preview ────────────────────────────────────────────────
-
-  if (phase === 'preview' && exam) {
-    return <PreviewView exam={exam} onStart={handleStartExam} onBack={() => setPhase('upload')} />;
-  }
-
-  // ── Upload (default) ────────────────────────────────────────
+  // ── Sidebar + right panel layout ──────────────────────────────
 
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
       <ScreenHeader title="Exam Module" onBack={onBack} />
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '28px 20px' }}>
-        <div style={{ maxWidth: 680, margin: '0 auto' }}>
+      <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
-          {/* Intro */}
-          <div style={{ marginBottom: 28 }}>
-            <h2 style={{ fontSize: 22, fontWeight: 800, color: 'var(--ink)', margin: '0 0 8px' }}>
-              Practice Exam Generator
-            </h2>
-            <p style={{ fontSize: 14, color: 'var(--ink-3)', margin: 0, lineHeight: 1.6 }}>
-              Upload 2 or more past NSC exam papers and the AI will analyse them, then
-              generate a new practice exam that matches their style, topics, and difficulty.
-            </p>
+        {/* ── Left sidebar ── */}
+        <aside style={{
+          width: 240, flexShrink: 0,
+          display: 'flex', flexDirection: 'column',
+          borderRight: '1px solid var(--line)',
+          background: 'var(--card)',
+          overflow: 'hidden',
+        }}>
+          {/* Upload new button */}
+          <div style={{ padding: '12px 10px', borderBottom: '1px solid var(--line)', flexShrink: 0 }}>
+            <button
+              className="btn btn-primary"
+              onClick={handleNewExam}
+              style={{
+                width: '100%', fontSize: 13, padding: '9px 14px', borderRadius: 10,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+              }}
+            >
+              <span style={{ fontSize: 16, lineHeight: 1, fontWeight: 700 }}>+</span>
+              Upload New Papers
+            </button>
           </div>
 
-          {/* Drop zone */}
-          <div
-            onDragOver={e => { e.preventDefault(); setDragging(true); }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
+          {/* Section label */}
+          <div style={{ padding: '10px 14px 4px', flexShrink: 0 }}>
+            <span style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)' }}>
+              Saved Exams
+            </span>
+          </div>
+
+          {/* Exam set list */}
+          <div style={{ flex: 1, overflowY: 'auto', padding: '2px 8px 12px' }}>
+            {!userId && (
+              <div style={{ padding: '24px 12px', textAlign: 'center' }}>
+                <div style={{ fontSize: 28, marginBottom: 10 }}>🔒</div>
+                <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.7 }}>
+                  Sign in to save your exam history and track progress over time.
+                </div>
+              </div>
+            )}
+
+            {userId && loadingSets && (
+              <div style={{ padding: '20px 10px', textAlign: 'center', color: 'var(--ink-4)', fontSize: 13 }}>
+                Loading…
+              </div>
+            )}
+
+            {userId && !loadingSets && examSets.length === 0 && (
+              <div style={{ padding: '24px 12px', textAlign: 'center' }}>
+                <div style={{ fontSize: 28, marginBottom: 10 }}>📋</div>
+                <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.7 }}>
+                  No saved exams yet.<br />Upload past papers to get started.
+                </div>
+              </div>
+            )}
+
+            {examSets.map(set => (
+              <ExamSetCard
+                key={set.id}
+                set={set}
+                isSelected={set.id === selectedSetId}
+                onSelect={() => handleSelectSet(set)}
+                onDelete={() => void handleDeleteSet(set.id)}
+              />
+            ))}
+          </div>
+        </aside>
+
+        {/* ── Right panel ── */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          {phase === 'upload' && (
+            <UploadPanel
+              papers={papers}
+              dragging={dragging}
+              error={error}
+              savingError={savingError}
+              guestMode={!userId}
+              fileInputRef={fileInputRef}
+              onDragOver={() => setDragging(true)}
+              onDragLeave={() => setDragging(false)}
+              onDrop={handleDrop}
+              onFileInput={handleFileInput}
+              onRemovePaper={i => setPapers(prev => prev.filter((_, j) => j !== i))}
+              onGenerate={handleGenerate}
+            />
+          )}
+
+          {phase === 'preview' && exam && (
+            <PreviewPanel
+              exam={exam}
+              attempts={attempts}
+              savingError={savingError}
+              onStart={handleStartExam}
+            />
+          )}
+
+          {phase === 'results' && results && exam && (
+            <ResultsPanel
+              exam={exam}
+              results={results}
+              onRetake={handleStartExam}
+              onViewHistory={() => setPhase('preview')}
+            />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Exam set card (sidebar item) ───────────────────────────────
+
+function ExamSetCard({ set, isSelected, onSelect, onDelete }: {
+  set:        StoredExamSet;
+  isSelected: boolean;
+  onSelect:   () => void;
+  onDelete:   () => void;
+}) {
+  const [hovered, setHovered] = useState(false);
+
+  return (
+    <div
+      onClick={onSelect}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        padding: '10px 10px',
+        borderRadius: 10, marginBottom: 3, cursor: 'pointer',
+        background: isSelected ? 'var(--brand-tint)' : hovered ? 'var(--bg)' : 'transparent',
+        border: `1.5px solid ${isSelected ? 'var(--brand)' : 'transparent'}`,
+        transition: 'all 0.15s',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 4 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{
+            fontSize: 12, fontWeight: 700,
+            color: isSelected ? 'var(--brand-2)' : 'var(--ink)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>
+            {set.subject || set.title}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
+            {set.grade} · {set.paperNames.length} paper{set.paperNames.length !== 1 ? 's' : ''}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--ink-4)', marginTop: 1 }}>
+            {formatDate(set.createdAt)}
+          </div>
+        </div>
+        {(isSelected || hovered) && (
+          <button
+            onClick={e => { e.stopPropagation(); onDelete(); }}
+            aria-label="Delete exam set"
             style={{
-              border:     `2.5px dashed ${dragging ? 'var(--brand)' : 'var(--line)'}`,
-              borderRadius: 18,
-              padding:    '44px 24px',
-              textAlign:  'center',
-              cursor:     'pointer',
-              background: dragging ? 'var(--brand-tint)' : 'var(--card)',
-              transition: 'border-color 0.18s, background 0.18s',
-              marginBottom: 18,
+              background: 'none', border: 'none', cursor: 'pointer',
+              padding: '2px 4px', borderRadius: 5, flexShrink: 0,
+              color: 'var(--ink-4)', display: 'flex', alignItems: 'center',
             }}
           >
-            <div style={{ marginBottom: 12, color: dragging ? 'var(--brand)' : 'var(--ink-3)', display: 'flex', justifyContent: 'center' }}>
-              <Icon name="upload" size={36} stroke="currentColor" />
-            </div>
-            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)', marginBottom: 6 }}>
-              Drop PDF files here or click to browse
-            </div>
-            <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>
-              Upload 2–5 past exam papers (PDF only)
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".pdf,application/pdf"
-              multiple
-              style={{ display: 'none' }}
-              onChange={handleFileInput}
-            />
-          </div>
-
-          {/* Uploaded files */}
-          {papers.length > 0 && (
-            <div style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)', marginBottom: 10 }}>
-                Uploaded Papers ({papers.length}/5)
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {papers.map((p, i) => (
-                  <div key={i} style={{
-                    display: 'flex', alignItems: 'center', gap: 12,
-                    padding: '12px 16px',
-                    background: 'var(--card)', border: '1.5px solid var(--line)', borderRadius: 12,
-                  }}>
-                    <span style={{ fontSize: 22, flexShrink: 0 }}>📋</span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {p.name}
-                      </div>
-                      <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
-                        {p.sizeMB.toFixed(1)} MB &bull; PDF
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => setPapers(prev => prev.filter((_, j) => j !== i))}
-                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 8, borderRadius: 8, color: 'var(--ink-3)', display: 'flex', alignItems: 'center' }}
-                      aria-label="Remove"
-                    >
-                      <Icon name="close" size={16} stroke="currentColor" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Requirement hint */}
-          {papers.length < 2 && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '12px 16px', background: '#FFFBEB',
-              border: '1.5px solid #FDE68A', borderRadius: 12, marginBottom: 18,
-            }}>
-              <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
-              <span style={{ fontSize: 13, color: '#92400E' }}>
-                {papers.length === 0
-                  ? 'Upload at least 2 past exam papers to get started.'
-                  : 'Upload 1 more paper to enable exam generation.'}
-              </span>
-            </div>
-          )}
-
-          {papers.length >= 2 && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '12px 16px', background: '#ECFDF5',
-              border: '1.5px solid #A7F3D0', borderRadius: 12, marginBottom: 18,
-            }}>
-              <Icon name="check" size={18} stroke="#059669" />
-              <span style={{ fontSize: 13, color: '#065F46', fontWeight: 600 }}>
-                {papers.length} papers ready. AI will analyse all of them to generate your exam.
-              </span>
-            </div>
-          )}
-
-          {/* Error */}
-          {error && (
-            <div style={{
-              display: 'flex', alignItems: 'flex-start', gap: 10,
-              padding: '12px 16px', background: '#FEF2F2',
-              border: '1.5px solid #FECACA', borderRadius: 12, marginBottom: 18,
-            }}>
-              <span style={{ fontSize: 18, flexShrink: 0 }}>❌</span>
-              <div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: '#991B1B', marginBottom: 2 }}>Error</div>
-                <div style={{ fontSize: 13, color: '#991B1B' }}>{error}</div>
-              </div>
-            </div>
-          )}
-
-          {/* Generate button */}
-          <button
-            className="btn btn-primary"
-            onClick={handleGenerate}
-            disabled={papers.length < 2}
-            style={{ width: '100%', fontSize: 15, padding: '14px 24px', borderRadius: 14 }}
-          >
-            <Icon name="sparkle" size={18} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
-            Generate Practice Exam
+            <Icon name="close" size={13} stroke="currentColor" />
           </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Upload panel ───────────────────────────────────────────────
+
+function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInputRef, onDragOver, onDragLeave, onDrop, onFileInput, onRemovePaper, onGenerate }: {
+  papers:        UploadedPaper[];
+  dragging:      boolean;
+  error:         string | null;
+  savingError:   string | null;
+  guestMode:     boolean;
+  fileInputRef:  React.RefObject<HTMLInputElement | null>;
+  onDragOver:    () => void;
+  onDragLeave:   () => void;
+  onDrop:        (e: React.DragEvent) => void;
+  onFileInput:   (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onRemovePaper: (i: number) => void;
+  onGenerate:    () => void;
+}) {
+  return (
+    <div style={{ flex: 1, overflowY: 'auto', padding: '28px 24px' }}>
+      <div style={{ maxWidth: 640, margin: '0 auto' }}>
+
+        {/* Intro */}
+        <div style={{ marginBottom: 24 }}>
+          <h2 style={{ fontSize: 20, fontWeight: 800, color: 'var(--ink)', margin: '0 0 8px' }}>
+            Generate a Practice Exam
+          </h2>
+          <p style={{ fontSize: 14, color: 'var(--ink-3)', margin: 0, lineHeight: 1.65 }}>
+            Upload 2 or more past NSC exam papers and AI will analyse them, then generate a
+            new practice exam matching their style, topics, and difficulty.
+          </p>
         </div>
+
+        {/* Guest notice */}
+        {guestMode && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '12px 16px', background: '#EFF6FF',
+            border: '1.5px solid #BFDBFE', borderRadius: 12, marginBottom: 20,
+          }}>
+            <span style={{ fontSize: 18, flexShrink: 0 }}>ℹ️</span>
+            <span style={{ fontSize: 13, color: '#1E40AF' }}>
+              Sign in to save your exam history and track your progress over time.
+            </span>
+          </div>
+        )}
+
+        {/* Drop zone */}
+        <div
+          onDragOver={e => { e.preventDefault(); onDragOver(); }}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onClick={() => fileInputRef.current?.click()}
+          style={{
+            border: `2.5px dashed ${dragging ? 'var(--brand)' : 'var(--line)'}`,
+            borderRadius: 18, padding: '44px 24px',
+            textAlign: 'center', cursor: 'pointer',
+            background: dragging ? 'var(--brand-tint)' : 'var(--card)',
+            transition: 'border-color 0.18s, background 0.18s',
+            marginBottom: 18,
+          }}
+        >
+          <div style={{ marginBottom: 12, color: dragging ? 'var(--brand)' : 'var(--ink-3)', display: 'flex', justifyContent: 'center' }}>
+            <Icon name="upload" size={36} stroke="currentColor" />
+          </div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--ink)', marginBottom: 6 }}>
+            Drop PDF files here or click to browse
+          </div>
+          <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>
+            Upload 2–5 past exam papers (PDF only)
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,application/pdf"
+            multiple
+            style={{ display: 'none' }}
+            onChange={onFileInput}
+          />
+        </div>
+
+        {/* Uploaded papers */}
+        {papers.length > 0 && (
+          <div style={{ marginBottom: 18 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)', marginBottom: 10 }}>
+              Uploaded Papers ({papers.length}/5)
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {papers.map((p, i) => (
+                <div key={i} style={{
+                  display: 'flex', alignItems: 'center', gap: 12,
+                  padding: '12px 16px',
+                  background: 'var(--card)', border: '1.5px solid var(--line)', borderRadius: 12,
+                }}>
+                  <span style={{ fontSize: 22, flexShrink: 0 }}>📋</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {p.name}
+                    </div>
+                    <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
+                      {p.sizeMB.toFixed(1)} MB · PDF
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => onRemovePaper(i)}
+                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 8, borderRadius: 8, color: 'var(--ink-3)', display: 'flex', alignItems: 'center' }}
+                    aria-label="Remove"
+                  >
+                    <Icon name="close" size={16} stroke="currentColor" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Status banners */}
+        {papers.length < 2 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '12px 16px', background: '#FFFBEB',
+            border: '1.5px solid #FDE68A', borderRadius: 12, marginBottom: 16,
+          }}>
+            <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
+            <span style={{ fontSize: 13, color: '#92400E' }}>
+              {papers.length === 0
+                ? 'Upload at least 2 past exam papers to get started.'
+                : 'Upload 1 more paper to enable exam generation.'}
+            </span>
+          </div>
+        )}
+
+        {papers.length >= 2 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '12px 16px', background: '#ECFDF5',
+            border: '1.5px solid #A7F3D0', borderRadius: 12, marginBottom: 16,
+          }}>
+            <Icon name="check" size={18} stroke="#059669" />
+            <span style={{ fontSize: 13, color: '#065F46', fontWeight: 600 }}>
+              {papers.length} papers ready. AI will analyse all of them to generate your exam.
+            </span>
+          </div>
+        )}
+
+        {error && (
+          <div style={{
+            display: 'flex', alignItems: 'flex-start', gap: 10,
+            padding: '12px 16px', background: '#FEF2F2',
+            border: '1.5px solid #FECACA', borderRadius: 12, marginBottom: 16,
+          }}>
+            <span style={{ fontSize: 18, flexShrink: 0 }}>❌</span>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#991B1B', marginBottom: 2 }}>Error</div>
+              <div style={{ fontSize: 13, color: '#991B1B' }}>{error}</div>
+            </div>
+          </div>
+        )}
+
+        {savingError && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '12px 16px', background: '#FFFBEB',
+            border: '1.5px solid #FDE68A', borderRadius: 12, marginBottom: 16,
+          }}>
+            <span style={{ fontSize: 16 }}>⚠️</span>
+            <span style={{ fontSize: 13, color: '#92400E' }}>{savingError}</span>
+          </div>
+        )}
+
+        {/* Generate button */}
+        <button
+          className="btn btn-primary"
+          onClick={onGenerate}
+          disabled={papers.length < 2}
+          style={{
+            width: '100%', fontSize: 15, padding: '14px 24px', borderRadius: 14,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          }}
+        >
+          <Icon name="sparkle" size={18} stroke="currentColor" />
+          Generate Practice Exam
+        </button>
       </div>
     </div>
   );
@@ -591,7 +876,7 @@ function LoadingDots() {
       {[0, 1, 2].map(i => (
         <div key={i} style={{
           width: 9, height: 9, borderRadius: '50%', background: 'var(--brand)',
-          animation: `exam-dot ${1.2}s ease-in-out ${i * 0.22}s infinite`,
+          animation: `exam-dot 1.2s ease-in-out ${i * 0.22}s infinite`,
         }} />
       ))}
       <style>{`@keyframes exam-dot{0%,80%,100%{transform:scale(0);opacity:.4}40%{transform:scale(1);opacity:1}}`}</style>
@@ -599,9 +884,20 @@ function LoadingDots() {
   );
 }
 
-// ── Preview view ───────────────────────────────────────────────
+// ── Preview panel (with attempt history) ───────────────────────
 
-function PreviewView({ exam, onStart, onBack }: { exam: GeneratedExam; onStart: () => void; onBack: () => void }) {
+function PreviewPanel({ exam, attempts, savingError, onStart }: {
+  exam:        GeneratedExam;
+  attempts:    StoredAttempt[];
+  savingError: string | null;
+  onStart:     () => void;
+}) {
+  const [showQuestions, setShowQuestions] = useState(false);
+  const hasAttempts = attempts.length > 0;
+  const bestPct     = hasAttempts
+    ? Math.max(...attempts.map(a => a.scorePct ?? 0))
+    : null;
+
   const counts = {
     mcq:         exam.questions.filter(q => q.type === 'mcq').length,
     short:       exam.questions.filter(q => q.type === 'short').length,
@@ -610,94 +906,202 @@ function PreviewView({ exam, onStart, onBack }: { exam: GeneratedExam; onStart: 
   };
 
   return (
-    <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
-      <ScreenHeader title={exam.title} subtitle={`${exam.subject} • ${exam.grade}`} onBack={onBack} />
+    <div style={{ flex: 1, overflowY: 'auto', padding: '24px 24px' }}>
+      <div style={{ maxWidth: 700, margin: '0 auto' }}>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px' }}>
-        <div style={{ maxWidth: 680, margin: '0 auto' }}>
+        {/* Saving warning */}
+        {savingError && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10,
+            padding: '10px 14px', background: '#FFFBEB',
+            border: '1.5px solid #FDE68A', borderRadius: 10, marginBottom: 16,
+          }}>
+            <span style={{ fontSize: 15 }}>⚠️</span>
+            <span style={{ fontSize: 13, color: '#92400E' }}>{savingError}</span>
+          </div>
+        )}
 
-          {/* Meta card */}
-          <div className="card" style={{ padding: 24, marginBottom: 18 }}>
-            <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--ink)', marginBottom: 18 }}>
-              {exam.title}
-            </div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 18 }}>
-              {[
-                { label: 'Subject',       value: exam.subject,              icon: '📚' },
-                { label: 'Grade',         value: exam.grade,                icon: '🎓' },
-                { label: 'Total Marks',   value: String(exam.totalMarks),   icon: '📊' },
-                { label: 'Duration',      value: `${exam.durationMinutes} min`, icon: '⏱️' },
-                { label: 'Questions',     value: String(exam.questions.length), icon: '❓' },
-              ].map(({ label, value, icon }) => (
-                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 14px', background: 'var(--bg)', borderRadius: 10 }}>
-                  <span style={{ fontSize: 18 }}>{icon}</span>
-                  <div>
-                    <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)' }}>{label}</div>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)' }}>{value}</div>
-                  </div>
+        {/* Exam meta card */}
+        <div className="card" style={{ padding: 24, marginBottom: 18 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--ink)', marginBottom: 16 }}>
+            {exam.title}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10, marginBottom: 16 }}>
+            {[
+              { label: 'Subject',   value: exam.subject,                       icon: '📚' },
+              { label: 'Grade',     value: exam.grade,                         icon: '🎓' },
+              { label: 'Marks',     value: String(exam.totalMarks),            icon: '📊' },
+              { label: 'Duration',  value: `${exam.durationMinutes} min`,      icon: '⏱️' },
+              { label: 'Questions', value: String(exam.questions.length),      icon: '❓' },
+            ].map(({ label, value, icon }) => (
+              <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 12px', background: 'var(--bg)', borderRadius: 10 }}>
+                <span style={{ fontSize: 18 }}>{icon}</span>
+                <div>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-4)' }}>{label}</div>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)' }}>{value}</div>
                 </div>
-              ))}
-            </div>
-
-            {/* Type badges */}
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              {(Object.entries(counts) as [string, number][]).filter(([, n]) => n > 0).map(([t, n]) => (
-                <span key={t} style={{ padding: '4px 12px', borderRadius: 20, fontSize: 12, fontWeight: 600, background: typeChip(t).bg, color: typeChip(t).fg }}>
-                  {n} × {typeLabel(t)}
-                </span>
-              ))}
-            </div>
+              </div>
+            ))}
           </div>
 
-          {/* Instructions */}
-          <div className="card" style={{ padding: 20, marginBottom: 18 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)', marginBottom: 12 }}>📋 Instructions</div>
-            <ol style={{ margin: 0, paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 7 }}>
-              {exam.instructions.map((ins, i) => (
-                <li key={i} style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{ins}</li>
-              ))}
-            </ol>
+          {/* Question type badges */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {(Object.entries(counts) as [string, number][]).filter(([, n]) => n > 0).map(([t, n]) => (
+              <span key={t} style={{ padding: '4px 12px', borderRadius: 20, fontSize: 12, fontWeight: 600, background: typeChip(t).bg, color: typeChip(t).fg }}>
+                {n} × {typeLabel(t)}
+              </span>
+            ))}
           </div>
+        </div>
 
-          {/* Question list */}
-          <div className="card" style={{ padding: 20, marginBottom: 24 }}>
-            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)', marginBottom: 12 }}>
+        {/* Instructions */}
+        <div className="card" style={{ padding: 18, marginBottom: 18 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)', marginBottom: 10 }}>📋 Instructions</div>
+          <ol style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 6 }}>
+            {exam.instructions.map((ins, i) => (
+              <li key={i} style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.65 }}>{ins}</li>
+            ))}
+          </ol>
+        </div>
+
+        {/* Questions (collapsible) */}
+        <div className="card" style={{ padding: 18, marginBottom: 18 }}>
+          <button
+            onClick={() => setShowQuestions(s => !s)}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              width: '100%', background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+            }}
+          >
+            <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>
               ❓ Questions ({exam.questions.length})
-            </div>
-            <div style={{ display: 'flex', flexDirection: 'column' }}>
+            </span>
+            <span style={{
+              fontSize: 12, color: 'var(--ink-4)',
+              transform: showQuestions ? 'rotate(180deg)' : 'rotate(0deg)',
+              transition: 'transform 0.18s', display: 'inline-block',
+            }}>▼</span>
+          </button>
+
+          {showQuestions && (
+            <div style={{ marginTop: 12 }}>
               {exam.questions.map((q, i) => {
                 const chip = typeChip(q.type);
                 return (
                   <div key={q.id} style={{
                     display: 'flex', alignItems: 'center', gap: 10,
-                    padding: '9px 0',
+                    padding: '8px 0',
                     borderBottom: i < exam.questions.length - 1 ? '1px solid var(--line)' : 'none',
                   }}>
-                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-4)', width: 28, flexShrink: 0 }}>Q{q.number}</span>
-                    <span style={{ flex: 1, fontSize: 13, color: 'var(--ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {q.topic}
-                    </span>
-                    <span style={{ padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600, background: chip.bg, color: chip.fg, flexShrink: 0 }}>
-                      {typeLabel(q.type)}
-                    </span>
-                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)', flexShrink: 0, minWidth: 40, textAlign: 'right' }}>
-                      {q.marks} mk
-                    </span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-4)', width: 26, flexShrink: 0 }}>Q{q.number}</span>
+                    <span style={{ flex: 1, fontSize: 13, color: 'var(--ink-2)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{q.topic}</span>
+                    <span style={{ padding: '2px 8px', borderRadius: 20, fontSize: 11, fontWeight: 600, background: chip.bg, color: chip.fg, flexShrink: 0 }}>{typeLabel(q.type)}</span>
+                    <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)', flexShrink: 0, minWidth: 38, textAlign: 'right' }}>{q.marks} mk</span>
                   </div>
                 );
               })}
             </div>
-          </div>
-
-          <button
-            className="btn btn-primary"
-            onClick={onStart}
-            style={{ width: '100%', fontSize: 15, padding: '14px 24px', borderRadius: 14 }}
-          >
-            <Icon name="play" size={18} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
-            Start Exam — {exam.durationMinutes} min
-          </button>
+          )}
         </div>
+
+        {/* Attempt history */}
+        {hasAttempts && (
+          <div className="card" style={{ padding: 20, marginBottom: 18 }}>
+            <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)', marginBottom: 14 }}>
+              📈 Attempt History
+            </div>
+
+            {/* Best score banner */}
+            {bestPct !== null && (
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: 12,
+                padding: '12px 16px', background: 'var(--brand-tint)',
+                borderRadius: 10, marginBottom: 16,
+              }}>
+                <span style={{ fontSize: 22 }}>🏆</span>
+                <div>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand-2)' }}>Personal Best</div>
+                  <div style={{ fontSize: 20, fontWeight: 900, color: 'var(--brand-2)', lineHeight: 1.2 }}>
+                    {bestPct.toFixed(1)}%
+                  </div>
+                </div>
+                <div style={{ marginLeft: 'auto', fontSize: 13, color: 'var(--brand-2)', fontWeight: 600 }}>
+                  {attempts.length} attempt{attempts.length !== 1 ? 's' : ''}
+                </div>
+              </div>
+            )}
+
+            {/* History table */}
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                <thead>
+                  <tr>
+                    {['#', 'Date', 'Score', 'Grade', 'Duration'].map(h => (
+                      <th key={h} style={{
+                        fontSize: 10, fontWeight: 800, textTransform: 'uppercase',
+                        letterSpacing: '0.08em', color: 'var(--ink-4)',
+                        padding: '6px 8px', textAlign: 'left',
+                        borderBottom: '1.5px solid var(--line)',
+                      }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {attempts.map((a, i) => {
+                    const isBest = (a.scorePct ?? -1) === bestPct;
+                    const pct    = a.scorePct ?? 0;
+                    const gc     = gradeColor(a.letterGrade ?? 'G');
+                    return (
+                      <tr key={a.id} style={{
+                        background: isBest ? 'var(--brand-tint)' : 'transparent',
+                        borderBottom: i < attempts.length - 1 ? '1px solid var(--line)' : 'none',
+                      }}>
+                        <td style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-4)', padding: '10px 8px' }}>
+                          {attempts.length - i}
+                        </td>
+                        <td style={{ fontSize: 12, color: 'var(--ink-2)', padding: '10px 8px', whiteSpace: 'nowrap' }}>
+                          {formatDate(a.createdAt)}
+                        </td>
+                        <td style={{ fontSize: 13, fontWeight: 700, color: gc, padding: '10px 8px' }}>
+                          {pct.toFixed(1)}%
+                          {isBest && <span style={{ fontSize: 11, marginLeft: 5 }}>⭐</span>}
+                        </td>
+                        <td style={{ padding: '10px 8px' }}>
+                          <span style={{
+                            fontSize: 11, fontWeight: 800,
+                            padding: '2px 9px', borderRadius: 20,
+                            background: `${gc}22`, color: gc,
+                          }}>
+                            {a.letterGrade ?? '—'}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: 12, color: 'var(--ink-3)', padding: '10px 8px', whiteSpace: 'nowrap' }}>
+                          {formatDuration(a.durationSeconds)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* Start / Retake button */}
+        <button
+          className="btn btn-primary"
+          onClick={onStart}
+          style={{
+            width: '100%', fontSize: 15, padding: '14px 24px', borderRadius: 14,
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+          }}
+        >
+          <Icon name="play" size={18} stroke="currentColor" />
+          {hasAttempts ? 'Retake Exam' : `Start Exam — ${exam.durationMinutes} min`}
+        </button>
       </div>
     </div>
   );
@@ -713,7 +1117,7 @@ function TakingView({ exam, answers, timeLeft, onAnswer, onSubmit }: {
   onSubmit: () => void;
 }) {
   const answered = exam.questions.filter(q => answers[q.id] && answers[q.id].trim()).length;
-  const urgent   = timeLeft < 600 && timeLeft > 0; // < 10 minutes
+  const urgent   = timeLeft < 600 && timeLeft > 0;
 
   const confirmSubmit = () => {
     const unanswered = exam.questions.length - answered;
@@ -729,7 +1133,9 @@ function TakingView({ exam, answers, timeLeft, onAnswer, onSubmit }: {
         display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0,
       }}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{exam.subject}</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {exam.subject}
+          </div>
           <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{answered}/{exam.questions.length} answered</div>
         </div>
 
@@ -741,8 +1147,7 @@ function TakingView({ exam, answers, timeLeft, onAnswer, onSubmit }: {
           fontWeight: 800, fontSize: 15, fontFamily: 'monospace',
           border: `1.5px solid ${urgent ? '#FECACA' : 'transparent'}`,
           animation: urgent ? 'timer-urgent 1s ease infinite' : 'none',
-          display: 'flex', alignItems: 'center', gap: 6,
-          flexShrink: 0,
+          display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0,
         }}>
           <Icon name="clock" size={14} stroke="currentColor" />
           {formatTime(timeLeft)}
@@ -789,9 +1194,7 @@ function TakingView({ exam, answers, timeLeft, onAnswer, onSubmit }: {
         </div>
       </div>
 
-      <style>{`
-        @keyframes timer-urgent { 0%, 100% { opacity:1; } 50% { opacity:0.55; } }
-      `}</style>
+      <style>{`@keyframes timer-urgent { 0%, 100% { opacity:1; } 50% { opacity:0.55; } }`}</style>
     </div>
   );
 }
@@ -816,7 +1219,6 @@ function QuestionCard({ question, index, answer, onAnswer }: {
     const end    = ta.selectionEnd   ?? answer.length;
     const newVal = answer.slice(0, start) + sym + answer.slice(end);
     onAnswer(newVal);
-    // Restore focus + cursor after React re-render
     requestAnimationFrame(() => {
       ta.focus();
       ta.setSelectionRange(start + sym.length, start + sym.length);
@@ -870,13 +1272,13 @@ function QuestionCard({ question, index, answer, onAnswer }: {
         </div>
       </div>
 
-      {/* MCQ */}
+      {/* MCQ options */}
       {question.type === 'mcq' && question.options && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {question.options.map((opt, j) => {
             const letter   = opt.trim()[0] ?? String.fromCharCode(65 + j);
             const selected = answer === letter;
-            const display  = opt.slice(2).trim(); // strip "A. "
+            const display  = opt.slice(2).trim();
             return (
               <button
                 key={j}
@@ -966,132 +1368,131 @@ function QuestionCard({ question, index, answer, onAnswer }: {
   );
 }
 
-// ── Results view ───────────────────────────────────────────────
+// ── Results panel ──────────────────────────────────────────────
 
-function ResultsView({ exam, results, onReset, onRetry, onBack }: {
-  exam:    GeneratedExam;
-  results: ExamResults;
-  onReset: () => void;
-  onRetry: () => void;
-  onBack:  () => void;
+function ResultsPanel({ exam, results, onRetake, onViewHistory }: {
+  exam:           GeneratedExam;
+  results:        ExamResults;
+  onRetake:       () => void;
+  onViewHistory:  () => void;
 }) {
   const [showAnswers, setShowAnswers] = useState(false);
-  const color = gradeColor(results.letterGrade);
-
+  const color  = gradeColor(results.letterGrade);
   const pctNum = typeof results.percentage === 'number'
     ? results.percentage
     : (results.totalAwarded / results.totalMarks) * 100;
 
   return (
-    <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
-      <ScreenHeader title="Results" subtitle={`${exam.subject} • ${exam.grade}`} onBack={onBack} />
+    <div style={{ flex: 1, overflowY: 'auto', padding: '24px 20px' }}>
+      <div style={{ maxWidth: 680, margin: '0 auto' }}>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '24px 16px' }}>
-        <div style={{ maxWidth: 680, margin: '0 auto' }}>
-
-          {/* Score card */}
-          <div className="card" style={{ padding: 28, textAlign: 'center', marginBottom: 18 }}>
-            {/* Percentage */}
-            <div style={{ fontSize: 68, fontWeight: 900, color, lineHeight: 1, marginBottom: 6 }}>
-              {pctNum.toFixed(0)}%
-            </div>
-            <div style={{ fontSize: 18, fontWeight: 800, color, marginBottom: 4 }}>
-              Grade {results.letterGrade}
-            </div>
-            <div style={{ fontSize: 14, color: 'var(--ink-3)', marginBottom: 20 }}>
-              {results.totalAwarded} / {results.totalMarks} marks
-            </div>
-
-            {/* Bar */}
-            <div style={{ height: 10, background: 'var(--line)', borderRadius: 999, overflow: 'hidden', marginBottom: 20 }}>
-              <div style={{ height: '100%', borderRadius: 999, background: color, width: `${Math.min(pctNum, 100)}%` }} />
-            </div>
-
-            {/* Overall feedback */}
-            <div style={{
-              fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7,
-              textAlign: 'left', background: 'var(--bg)',
-              padding: '14px 16px', borderRadius: 12,
-            }}>
-              {results.overallFeedback}
-            </div>
+        {/* Score card */}
+        <div className="card" style={{ padding: 28, textAlign: 'center', marginBottom: 18 }}>
+          <div style={{ fontSize: 68, fontWeight: 900, color, lineHeight: 1, marginBottom: 6 }}>
+            {pctNum.toFixed(0)}%
+          </div>
+          <div style={{ fontSize: 18, fontWeight: 800, color, marginBottom: 4 }}>
+            Grade {results.letterGrade}
+          </div>
+          <div style={{ fontSize: 14, color: 'var(--ink-3)', marginBottom: 20 }}>
+            {results.totalAwarded} / {results.totalMarks} marks
           </div>
 
-          {/* Per-question breakdown */}
-          <div style={{ marginBottom: 20 }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
-              <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)' }}>
-                Question Breakdown
-              </div>
-              <button
-                onClick={() => setShowAnswers(s => !s)}
-                className="btn btn-ghost"
-                style={{ fontSize: 12, padding: '6px 12px' }}
-              >
-                {showAnswers ? 'Hide answers' : 'Show model answers'}
-              </button>
+          <div style={{ height: 10, background: 'var(--line)', borderRadius: 999, overflow: 'hidden', marginBottom: 20 }}>
+            <div style={{ height: '100%', borderRadius: 999, background: color, width: `${Math.min(pctNum, 100)}%` }} />
+          </div>
+
+          <div style={{
+            fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7,
+            textAlign: 'left', background: 'var(--bg)',
+            padding: '14px 16px', borderRadius: 12,
+          }}>
+            {results.overallFeedback}
+          </div>
+        </div>
+
+        {/* Per-question breakdown */}
+        <div style={{ marginBottom: 20 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)' }}>
+              Question Breakdown
             </div>
+            <button
+              onClick={() => setShowAnswers(s => !s)}
+              className="btn btn-ghost"
+              style={{ fontSize: 12, padding: '6px 12px' }}
+            >
+              {showAnswers ? 'Hide answers' : 'Show model answers'}
+            </button>
+          </div>
 
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {results.results.map(res => {
-                const q    = exam.questions.find(x => x.id === res.questionId);
-                const pct  = res.total > 0 ? (res.awarded / res.total) * 100 : 0;
-                const rc   = pct >= 100 ? '#059669' : pct >= 50 ? '#ca8a04' : '#dc2626';
-                const rbg  = pct >= 100 ? '#ECFDF5' : pct >= 50 ? '#FFFBEB' : '#FEF2F2';
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {results.results.map(res => {
+              const q   = exam.questions.find(x => x.id === res.questionId);
+              const pct = res.total > 0 ? (res.awarded / res.total) * 100 : 0;
+              const rc  = pct >= 100 ? '#059669' : pct >= 50 ? '#ca8a04' : '#dc2626';
+              const rbg = pct >= 100 ? '#ECFDF5' : pct >= 50 ? '#FFFBEB' : '#FEF2F2';
 
-                return (
-                  <div key={res.questionId} className="card" style={{ padding: 16, borderLeft: `4px solid ${rc}` }}>
-                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                      <div style={{ flex: 1 }}>
-                        <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>
-                          Q{q?.number ?? '?'}: {q?.topic ?? 'Question'}
-                        </div>
-                        <div style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 3, lineHeight: 1.5 }}>
-                          {res.feedback}
-                        </div>
+              return (
+                <div key={res.questionId} className="card" style={{ padding: 16, borderLeft: `4px solid ${rc}` }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>
+                        Q{q?.number ?? '?'}: {q?.topic ?? 'Question'}
                       </div>
-                      <div style={{
-                        padding: '4px 10px', borderRadius: 20,
-                        background: rbg, color: rc,
-                        fontSize: 12, fontWeight: 800, flexShrink: 0,
-                      }}>
-                        {res.awarded}/{res.total}
+                      <div style={{ fontSize: 12, color: 'var(--ink-3)', marginTop: 3, lineHeight: 1.5 }}>
+                        {res.feedback}
                       </div>
                     </div>
+                    <div style={{
+                      padding: '4px 10px', borderRadius: 20,
+                      background: rbg, color: rc,
+                      fontSize: 12, fontWeight: 800, flexShrink: 0,
+                    }}>
+                      {res.awarded}/{res.total}
+                    </div>
+                  </div>
 
-                    {showAnswers && (
-                      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
-                        <div style={{ padding: '10px 14px', background: 'var(--bg)', borderRadius: 10 }}>
-                          <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', color: 'var(--ink-4)', marginBottom: 4 }}>Your Answer</div>
-                          <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5 }}>
-                            {res.studentAnswer || '(No answer provided)'}
-                          </div>
-                        </div>
-                        <div style={{ padding: '10px 14px', background: '#ECFDF5', borderRadius: 10 }}>
-                          <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', color: '#065F46', marginBottom: 4 }}>Model Answer</div>
-                          <div style={{ fontSize: 13, color: '#065F46', lineHeight: 1.5 }}>
-                            {res.modelAnswer}
-                          </div>
+                  {showAnswers && (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+                      <div style={{ padding: '10px 14px', background: 'var(--bg)', borderRadius: 10 }}>
+                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', color: 'var(--ink-4)', marginBottom: 4 }}>Your Answer</div>
+                        <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5 }}>
+                          {res.studentAnswer || '(No answer provided)'}
                         </div>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
+                      <div style={{ padding: '10px 14px', background: '#ECFDF5', borderRadius: 10 }}>
+                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', color: '#065F46', marginBottom: 4 }}>Model Answer</div>
+                        <div style={{ fontSize: 13, color: '#065F46', lineHeight: 1.5 }}>
+                          {res.modelAnswer}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </div>
+        </div>
 
-          {/* Action buttons */}
-          <div style={{ display: 'flex', gap: 12 }}>
-            <button className="btn btn-secondary" onClick={onRetry} style={{ flex: 1, padding: '12px 20px', borderRadius: 12 }}>
-              <Icon name="rotate" size={16} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
-              Try Again
-            </button>
-            <button className="btn btn-primary" onClick={onReset} style={{ flex: 1, padding: '12px 20px', borderRadius: 12 }}>
-              <Icon name="upload" size={16} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
-              New Papers
-            </button>
-          </div>
+        {/* Action buttons */}
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button
+            className="btn btn-secondary"
+            onClick={onViewHistory}
+            style={{ flex: 1, padding: '12px 20px', borderRadius: 12 }}
+          >
+            <Icon name="rotate" size={16} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
+            View History
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={onRetake}
+            style={{ flex: 1, padding: '12px 20px', borderRadius: 12 }}
+          >
+            <Icon name="play" size={16} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
+            Retake Exam
+          </button>
         </div>
       </div>
     </div>
