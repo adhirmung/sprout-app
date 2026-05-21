@@ -96,6 +96,39 @@ export async function dbDeleteExamSet(id: string): Promise<void> {
   await supabase.from('exam_sets').delete().eq('id', id);
 }
 
+// ── Attempt summaries (for sidebar categorisation) ───────────
+
+export interface AttemptSummary {
+  count:   number;
+  bestPct: number | null;
+}
+
+/**
+ * Returns { count, bestPct } keyed by exam_set_id for every attempt
+ * belonging to this user — one lightweight query for the whole sidebar.
+ */
+export async function dbLoadAttemptSummaries(
+  userId: string,
+): Promise<Record<string, AttemptSummary>> {
+  const { data } = await supabase
+    .from('exam_attempts')
+    .select('exam_set_id, score_pct')
+    .eq('user_id', userId);
+  if (!data) return {};
+
+  const result: Record<string, AttemptSummary> = {};
+  for (const row of data) {
+    const id  = row.exam_set_id as string;
+    const pct = row.score_pct   as number | null;
+    if (!result[id]) result[id] = { count: 0, bestPct: null };
+    result[id].count++;
+    if (pct !== null && (result[id].bestPct === null || pct > result[id].bestPct!)) {
+      result[id].bestPct = pct;
+    }
+  }
+  return result;
+}
+
 // ── Attempts ──────────────────────────────────────────────────
 
 export async function dbLoadAttempts(examSetId: string): Promise<StoredAttempt[]> {
