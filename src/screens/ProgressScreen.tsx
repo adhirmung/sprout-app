@@ -300,7 +300,7 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
         <span style={{ fontSize: 52 }}>🔒</span>
         <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--ink)' }}>Sign in to view your progress</div>
         <div style={{ fontSize: 14, color: 'var(--ink-3)', maxWidth: 340, lineHeight: 1.65 }}>
-          Your practice test history, topic mastery, and learning trends are saved when you have an account.
+          Your exam history, topic mastery, and learning trends are saved when you have an account.
         </div>
       </div>
     );
@@ -327,7 +327,7 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
           <div style={{ fontSize: 20, fontWeight: 900, color: 'var(--ink)' }}>Progress Dashboard</div>
         </div>
         <div style={{ fontSize: 13, color: 'var(--ink-3)', marginBottom: subjects.length > 1 ? 14 : 0 }}>
-          Your practice test history, topic mastery and learning trends
+          Your practice exam history, topic mastery and learning trends
         </div>
 
         {/* Subject filter tabs */}
@@ -359,7 +359,7 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
         {/* ── Snapshot stats ── */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12, marginBottom: 20 }}>
           <StatCard icon="⏱️" label="Study Time"   value={fmtTime(totalSecs)}                        sub={`${filteredAttempts.length} sessions`} />
-          <StatCard icon="📝" label="Tests Taken"  value={String(filteredAttempts.length)}           sub={`${filteredSets.filter(s => filteredAttempts.some(a => a.examSetId === s.id)).length} test sets`} />
+          <StatCard icon="📝" label="Exams Taken"  value={String(filteredAttempts.length)}           sub={`${filteredSets.filter(s => filteredAttempts.some(a => a.examSetId === s.id)).length} exam sets`} />
           <StatCard icon="❓" label="Qs Answered"  value={String(totalQsAnswered)}                   sub="across all attempts" />
           <StatCard icon="📈" label="Avg Score"    value={avgScore !== null ? `${avgScore.toFixed(0)}%` : '—'} sub={bestScore !== null ? `Best: ${bestScore.toFixed(0)}%` : undefined} />
         </div>
@@ -372,7 +372,7 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
               No exam attempts yet
             </div>
             <div style={{ fontSize: 13, lineHeight: 1.65, maxWidth: 360, margin: '0 auto' }}>
-              Complete a practice test to start seeing your topic mastery,
+              Complete a practice exam to start seeing your topic mastery,
               question type breakdown, and progress trends here.
             </div>
           </div>
@@ -504,8 +504,8 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
             {/* ── Exam Set Performance ── */}
             {setStats.length > 0 && (
               <Section
-                title="Practice Test Performance"
-                subtitle="Score trend per practice test — retake to see your improvement"
+                title="Exam Performance"
+                subtitle="Score trend per exam set — retake to see your improvement"
               >
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                   {setStats.map(({ set, attempts: sa, scores, bestPct, avgPct, improvement, totalSecs: secs }) => {
@@ -525,7 +525,7 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
                               {set.subject || set.title}
                             </div>
                             <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
-                              {set.grade} · {sa.length} attempt{sa.length !== 1 ? 's' : ''} · {fmtTime(secs)} studied
+                              {set.grade} · {sa.length} attempt{sa.length !== 1 ? 's' : ''} · {fmtTime(secs)} total
                             </div>
                           </div>
                           <Sparkline scores={scores} />
@@ -598,7 +598,7 @@ export function ProgressScreen({ userId }: ProgressScreenProps) {
               );
               if (untouched.length === 0) return null;
               return (
-                <Section title="Not Yet Attempted" subtitle="Practice tests you haven't taken yet">
+                <Section title="Not Yet Attempted" subtitle="Exam sets you haven't taken yet">
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                     {untouched.map(set => (
                       <div key={set.id} style={{

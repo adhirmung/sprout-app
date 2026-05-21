@@ -360,7 +360,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
   };
 
   const handleDeleteSet = async (id: string) => {
-    if (!window.confirm('Delete this practice test and all its history?')) return;
+    if (!window.confirm('Delete this exam set and all its history?')) return;
     await dbDeleteExamSet(id);
     setExamSets(prev => prev.filter(s => s.id !== id));
     setAttemptSummaries(prev => {
@@ -435,13 +435,13 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
           setSelectedSetId(saved.id);
           setAttempts([]);
         } else {
-          setSavingError('Practice test generated but could not be saved to your history.');
+          setSavingError('Exam generated but could not be saved to your history.');
         }
       }
 
       setPhase('preview');
     } catch (err) {
-      setError((err as Error).message || 'Failed to generate practice test. Please try again.');
+      setError((err as Error).message || 'Failed to generate exam. Please try again.');
       setPhase('upload');
     }
   };
@@ -580,11 +580,11 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
   if (phase === 'generating' || phase === 'marking') {
     return (
       <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
-        <ScreenHeader title="Practice Tests" onBack={onBack} />
+        <ScreenHeader title="Exam Module" onBack={onBack} />
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 20, padding: 32 }}>
           <span style={{ fontSize: 52 }}>{phase === 'generating' ? '📝' : '✍️'}</span>
           <div style={{ fontSize: 17, fontWeight: 800, color: 'var(--ink)', textAlign: 'center' }}>
-            {phase === 'generating' ? 'Creating your practice test…' : 'Marking your submission…'}
+            {phase === 'generating' ? 'Creating your practice exam…' : 'Marking your submission…'}
           </div>
           <div style={{ fontSize: 14, color: 'var(--ink-3)', textAlign: 'center', maxWidth: 320 }}>{progressMsg}</div>
           <LoadingDots />
@@ -602,7 +602,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
 
   return (
     <div style={{ height: '100dvh', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
-      <ScreenHeader title="Practice Tests" onBack={onBack} />
+      <ScreenHeader title="Exam Module" onBack={onBack} />
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
 
@@ -626,7 +626,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
               }}
             >
               <span style={{ fontSize: 16, lineHeight: 1, fontWeight: 700 }}>+</span>
-              New Test
+              New Exam
             </button>
           </div>
 
@@ -638,7 +638,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
               <div style={{ padding: '24px 12px', textAlign: 'center' }}>
                 <div style={{ fontSize: 28, marginBottom: 10 }}>🔒</div>
                 <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.7 }}>
-                  Sign in to save your practice test history and track progress over time.
+                  Sign in to save your exam history and track progress over time.
                 </div>
               </div>
             )}
@@ -655,7 +655,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
               <div style={{ padding: '24px 12px', textAlign: 'center' }}>
                 <div style={{ fontSize: 28, marginBottom: 10 }}>📋</div>
                 <div style={{ fontSize: 12, color: 'var(--ink-3)', lineHeight: 1.7 }}>
-                  No saved practice tests yet.<br />Click <strong>New Test</strong> to get started.
+                  No saved exams yet.<br />Click <strong>New Exam</strong> to get started.
                 </div>
               </div>
             )}
@@ -942,22 +942,22 @@ const HOW_IT_WORKS_STEPS = [
   {
     icon: '📤',
     title: 'Upload Past Papers',
-    desc: 'Upload 2–5 past papers (PDF). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
+    desc: 'Upload 2–5 past NSC exam papers (PDF). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
   },
   {
     icon: '🤖',
-    title: 'AI Generates a Unique Practice Test',
-    desc: 'Claude analyses your papers and creates a brand-new timed practice test that mirrors their exact style, question types, mark distribution, and cognitive levels — not a copy, a fresh original.',
+    title: 'AI Generates a Unique Exam',
+    desc: 'Claude analyses your papers and creates a brand-new timed practice exam that mirrors their exact style, question types, mark distribution, and cognitive levels — not a copy, a fresh original.',
   },
   {
     icon: '✍️',
     title: 'Sit It & Get AI Marking',
-    desc: 'Take the test under timed conditions with a live countdown. AI marks every answer — including calculations and essays — and returns per-question scores, model answers, and a grade.',
+    desc: 'Take the exam under timed conditions with a live countdown. AI marks every answer — including calculations and essays — and returns per-question scores, model answers, and a grade.',
   },
   {
     icon: '✨',
     title: 'Generate New Variants (No Re-upload)',
-    desc: 'Already taken a test? Tap "New Variant" on any saved test to generate a completely fresh set of questions covering the same curriculum topics. Expect 3–6 genuinely unique variants per paper set before question overlap — more if you uploaded more papers.',
+    desc: 'Already taken an exam? Tap "New Variant" on any saved exam to generate a completely fresh set of questions covering the same curriculum topics. Expect 3–6 genuinely unique variants per paper set before question overlap — more if you uploaded more papers.',
   },
 ] as const;
 
@@ -1057,11 +1057,11 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
           <span style={{ fontSize: 44, flexShrink: 0 }}>📝</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 17, fontWeight: 800, color: 'var(--ink)', marginBottom: 5 }}>
-              Generate a New Practice Test
+              Generate a New Examination
             </div>
             <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.55 }}>
-              Upload 2–5 past papers and AI will analyse them, then create a
-              timed practice test that mirrors their style and difficulty.
+              Upload 2–5 past NSC papers and AI will analyse them, then create a
+              timed practice exam that mirrors their style and difficulty.
             </div>
           </div>
           <button
@@ -1086,7 +1086,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
           }}>
             <span style={{ fontSize: 18, flexShrink: 0 }}>ℹ️</span>
             <span style={{ fontSize: 13, color: '#1E40AF' }}>
-              Sign in to save your practice test history and track your progress over time.
+              Sign in to save your exam history and track your progress over time.
             </span>
           </div>
         )}
@@ -1112,7 +1112,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
           <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 5 }}>
             Drop PDF files here or click to browse
           </div>
-          <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 2–5 past papers (PDF only)</div>
+          <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 2–5 past exam papers (PDF only)</div>
           <input
             ref={fileInputRef}
             type="file"
@@ -1223,7 +1223,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
             }}
           >
             <Icon name="sparkle" size={18} stroke="currentColor" />
-            Generate Practice Test
+            Generate Examination
           </button>
         )}
       </div>
@@ -1500,7 +1500,7 @@ function PreviewPanel({ exam, attempts, savingError, onStart, onGenerateVariant 
             }}
           >
             <Icon name="play" size={18} stroke="currentColor" />
-            {hasAttempts ? 'Retake Test' : `Start Test — ${exam.durationMinutes} min`}
+            {hasAttempts ? 'Retake Exam' : `Start Exam — ${exam.durationMinutes} min`}
           </button>
         </div>
       </div>
@@ -1992,7 +1992,7 @@ function ResultsPanel({ exam, results, onRetake, onViewHistory }: {
             style={{ flex: 1, padding: '12px 20px', borderRadius: 12 }}
           >
             <Icon name="play" size={16} stroke="currentColor" style={{ display: 'inline', marginRight: 8 }} />
-            Retake Test
+            Retake Exam
           </button>
         </div>
       </div>
