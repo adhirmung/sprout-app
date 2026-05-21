@@ -131,27 +131,6 @@ export async function dbLoadAttemptSummaries(
 
 // ── Attempts ──────────────────────────────────────────────────
 
-/** Load every attempt across all exam sets for a user — used by the Progress Dashboard. */
-export async function dbLoadAllAttempts(userId: string): Promise<StoredAttempt[]> {
-  const { data } = await supabase
-    .from('exam_attempts')
-    .select('*')
-    .eq('user_id', userId)
-    .order('created_at', { ascending: true });
-  if (!data) return [];
-  return data.map(row => ({
-    id:              row.id               as string,
-    examSetId:       row.exam_set_id      as string,
-    userId:          row.user_id          as string,
-    answers:         row.answers          as Record<string, string>,
-    results:         row.results          as ExamResults | null,
-    scorePct:        row.score_pct        as number | null,
-    letterGrade:     row.letter_grade     as string | null,
-    durationSeconds: row.duration_seconds as number | null,
-    createdAt:       row.created_at       as string,
-  }));
-}
-
 export async function dbLoadAttempts(examSetId: string): Promise<StoredAttempt[]> {
   const { data } = await supabase
     .from('exam_attempts')

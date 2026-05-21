@@ -36,6 +36,7 @@ app.add_middleware(
 class GenerateRequest(BaseModel):
     topic:   str
     content: str | None = None   # source text (optional for PDF-only docs)
+    api_key: str | None = None   # optional — falls back to ANTHROPIC_API_KEY env var
 
 
 class GenerateResponse(BaseModel):
@@ -65,10 +66,10 @@ def strip_fences(code: str) -> str:
     return code.strip()
 
 
-def get_client() -> anthropic.Anthropic:
-    key = os.getenv("ANTHROPIC_API_KEY")
+def get_client(request_key: str | None = None) -> anthropic.Anthropic:
+    key = request_key or os.getenv("ANTHROPIC_API_KEY")
     if not key:
-        raise HTTPException(status_code=500, detail="ANTHROPIC_API_KEY not configured")
+        raise HTTPException(status_code=500, detail="No API key — set ANTHROPIC_API_KEY or pass api_key in request")
     return anthropic.Anthropic(api_key=key)
 
 
@@ -76,7 +77,7 @@ def get_client() -> anthropic.Anthropic:
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(req: GenerateRequest):
-    client = get_client()
+    client = get_client(req.api_key)
     user_prompt = build_prompt(req.topic, req.content)
 
     # ── First attempt ──────────────────────────────────────────────────────
@@ -127,3 +128,12 @@ async def generate(req: GenerateRequest):
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ── Temporary debug (remove after confirming env vars) ────────────────────────
+@app.get("/debug/env")
+def debug_env():
+    """Returns env var NAMES only (not values) so we can see what Railway injects."""
+    keys = sorted(os.environ.keys())
+    has_key = bool(os.getenv("ANTHROPIC_API_KEY"))
+    return {"env_keys": keys, "has_anthropic_key": has_key}

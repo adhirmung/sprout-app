@@ -9,7 +9,6 @@ import { DocumentScreen } from './screens/DocumentScreen';
 import { HomeScreen, collectRecent } from './screens/HomeScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
-import { ProgressScreen } from './screens/ProgressScreen';
 import { Store } from './lib/store';
 import { supabase, dbLoadProfile, dbLoadLibrary, dbSaveProfile, dbSaveLibrary } from './lib/supabase';
 import { saveApiKey, setCurrentUserId } from './lib/claude';
@@ -207,8 +206,7 @@ function AppCore() {
           onGotoLibrary={() => setRoute('library')}
           onQuickStudy={quickStudy} />
       )}
-      {route === 'library'  && <LibraryScreen onOpenFile={startFeed} userId={user.id} />}
-      {route === 'progress' && <ProgressScreen userId={user?.guest ? undefined : user.id} />}
+      {route === 'library' && <LibraryScreen onOpenFile={startFeed} userId={user.id} />}
       {route === 'profile' && (
         <ProfileScreen user={user} profile={profile}
           onRetake={() => setRoute('assess')}
@@ -220,10 +218,9 @@ function AppCore() {
 
 // ── App Shell ─────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { id: 'home',     label: 'Home',     icon: 'home'    },
-  { id: 'library',  label: 'Library',  icon: 'folder'  },
-  { id: 'progress', label: 'Progress', icon: 'chart'   },
-  { id: 'profile',  label: 'Profile',  icon: 'user'    },
+  { id: 'home',    label: 'Home',    icon: 'home'   },
+  { id: 'library', label: 'Library', icon: 'folder' },
+  { id: 'profile', label: 'Profile', icon: 'user'   },
 ] as const;
 
 interface AppShellProps {

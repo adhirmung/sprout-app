@@ -1,0 +1,49 @@
+functionsDirectory = "/Users/adhirmungroo/Documents/Sprout App/sprout/netlify/functions"
+functionsDirectoryOrigin = "config"
+redirectsOrigin = "config"
+plugins = []
+headers = []
+
+[build]
+edge_functions = "/Users/adhirmungroo/Documents/Sprout App/sprout/netlify/edge-functions"
+publish = "/Users/adhirmungroo/Documents/Sprout App/sprout/dist"
+publishOrigin = "config"
+commandOrigin = "config"
+command = "npm run build"
+functions = "/Users/adhirmungroo/Documents/Sprout App/sprout/netlify/functions"
+
+[build.environment]
+NODE_VERSION = "20"
+VITE_USE_PROXY = "true"
+
+[build.processing]
+
+[build.processing.css]
+
+[build.processing.html]
+
+[build.processing.images]
+
+[build.processing.js]
+
+[build.services]
+
+[[edge_functions]]
+path = "/api/v1/messages"
+function = "anthropic-proxy"
+
+[functions]
+
+[functions."*"]
+
+[[redirects]]
+from = "/*"
+to = "/index.html"
+status = 200.0
+force = false
+
+[redirects.query]
+
+[redirects.conditions]
+
+[redirects.headers]
