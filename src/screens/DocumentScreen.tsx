@@ -985,7 +985,7 @@ function DocIdleView({
   const MODES = [
     { id: 'flashcards',  emoji: '🃏', bg: '#EEF6FF', title: 'Flashcards',  desc: 'AI-generated flip cards to test your memory' },
     { id: 'activities',  emoji: '🎮', bg: '#EDFAF3', title: 'Activities',   desc: 'Interactive learning components', recommended: true },
-    { id: 'exam',        emoji: '📝', bg: '#FFF7ED', title: 'Examination',  desc: 'Upload past papers — AI generates a timed practice exam' },
+    { id: 'exam',        emoji: '📝', bg: '#FFF7ED', title: 'Practice Test', desc: 'Upload past papers — AI generates a timed practice test' },
     { id: 'podcast',     emoji: '🎙️', bg: '#F5F0FF', title: 'Podcast',      desc: 'AI-generated audio lesson', soon: true },
   ];
 
