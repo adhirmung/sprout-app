@@ -6,6 +6,93 @@ import {
 } from '../lib/examClaude';
 import type { ExamQuestion, ExamResults, GeneratedExam } from '../lib/examClaude';
 
+// ── Math symbol groups ─────────────────────────────────────────
+
+const SYMBOL_GROUPS: { label: string; items: { display: string; insert: string }[] }[] = [
+  {
+    label: 'Basic',
+    items: [
+      { display: '×',   insert: '×'   },
+      { display: '÷',   insert: '÷'   },
+      { display: '±',   insert: '±'   },
+      { display: '≠',   insert: '≠'   },
+      { display: '≈',   insert: '≈'   },
+      { display: '≤',   insert: '≤'   },
+      { display: '≥',   insert: '≥'   },
+      { display: '√',   insert: '√'   },
+      { display: '∞',   insert: '∞'   },
+      { display: '∴',   insert: '∴'   },
+    ],
+  },
+  {
+    label: 'Powers',
+    items: [
+      { display: 'x²',  insert: '²'   },
+      { display: 'x³',  insert: '³'   },
+      { display: 'xⁿ',  insert: '^n'  },
+      { display: 'x⁻¹', insert: '⁻¹'  },
+      { display: '∛',   insert: '∛'   },
+      { display: '½',   insert: '½'   },
+      { display: '¼',   insert: '¼'   },
+      { display: '¾',   insert: '¾'   },
+    ],
+  },
+  {
+    label: 'Trig',
+    items: [
+      { display: 'sin',    insert: 'sin '    },
+      { display: 'cos',    insert: 'cos '    },
+      { display: 'tan',    insert: 'tan '    },
+      { display: 'sin⁻¹',  insert: 'sin⁻¹ '  },
+      { display: 'cos⁻¹',  insert: 'cos⁻¹ '  },
+      { display: 'tan⁻¹',  insert: 'tan⁻¹ '  },
+      { display: 'θ',      insert: 'θ'       },
+      { display: 'π',      insert: 'π'       },
+    ],
+  },
+  {
+    label: 'Calculus',
+    items: [
+      { display: "f'(x)", insert: "f'(x)" },
+      { display: 'd/dx',  insert: 'd/dx '  },
+      { display: '∫',     insert: '∫'      },
+      { display: '∑',     insert: '∑'      },
+      { display: 'lim',   insert: 'lim '   },
+      { display: 'Δ',     insert: 'Δ'      },
+      { display: '→',     insert: '→'      },
+      { display: '∂',     insert: '∂'      },
+    ],
+  },
+  {
+    label: 'Greek',
+    items: [
+      { display: 'α', insert: 'α' },
+      { display: 'β', insert: 'β' },
+      { display: 'γ', insert: 'γ' },
+      { display: 'δ', insert: 'δ' },
+      { display: 'λ', insert: 'λ' },
+      { display: 'μ', insert: 'μ' },
+      { display: 'σ', insert: 'σ' },
+      { display: 'φ', insert: 'φ' },
+      { display: 'ω', insert: 'ω' },
+      { display: 'Ω', insert: 'Ω' },
+    ],
+  },
+  {
+    label: 'Sets',
+    items: [
+      { display: '∈', insert: '∈' },
+      { display: '∉', insert: '∉' },
+      { display: '∪', insert: '∪' },
+      { display: '∩', insert: '∩' },
+      { display: '⊂', insert: '⊂' },
+      { display: '∅', insert: '∅' },
+      { display: '∀', insert: '∀' },
+      { display: '∃', insert: '∃' },
+    ],
+  },
+];
+
 // ── Types ──────────────────────────────────────────────────────
 
 type ExamPhase = 'upload' | 'generating' | 'preview' | 'taking' | 'marking' | 'results';
@@ -15,6 +102,92 @@ interface UploadedPaper {
   base64: string;
   name:   string;
   sizeMB: number;
+}
+
+// ── Math keyboard ──────────────────────────────────────────────
+
+function MathKeyboard({ onInsert, onClose }: {
+  onInsert: (sym: string) => void;
+  onClose:  () => void;
+}) {
+  const [activeGroup, setActiveGroup] = useState(0);
+
+  return (
+    <div style={{
+      border: '1.5px solid var(--line)', borderRadius: 14,
+      background: 'var(--card)', padding: '12px 14px', marginBottom: 10,
+      boxShadow: '0 4px 24px rgba(0,0,0,0.10)',
+      animation: 'math-kb-in 0.15s ease',
+    }}>
+      {/* Category tabs + close */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap', marginBottom: 10 }}>
+        {SYMBOL_GROUPS.map((g, i) => (
+          <button
+            key={g.label}
+            onClick={() => setActiveGroup(i)}
+            style={{
+              padding: '3px 10px', borderRadius: 7,
+              fontSize: 11, fontWeight: 700, cursor: 'pointer',
+              border: 'none',
+              background: activeGroup === i ? 'var(--brand)'  : 'var(--bg)',
+              color:      activeGroup === i ? '#fff'          : 'var(--ink-3)',
+              transition: 'background 0.12s, color 0.12s',
+            }}
+          >
+            {g.label}
+          </button>
+        ))}
+        <button
+          onClick={onClose}
+          aria-label="Close math keyboard"
+          style={{
+            marginLeft: 'auto', padding: '3px 8px', borderRadius: 7,
+            border: '1px solid var(--line)', background: 'transparent',
+            color: 'var(--ink-4)', cursor: 'pointer', fontSize: 13, lineHeight: '1',
+          }}
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Symbol grid */}
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+        {SYMBOL_GROUPS[activeGroup].items.map(sym => (
+          <button
+            key={sym.insert}
+            onClick={() => onInsert(sym.insert)}
+            title={`Insert ${sym.insert}`}
+            style={{
+              minWidth: 44, height: 38, padding: '0 8px',
+              borderRadius: 8, border: '1.5px solid var(--line)',
+              background: 'var(--bg)', cursor: 'pointer',
+              fontSize: 15, fontWeight: 600, color: 'var(--ink)',
+              fontFamily: '"STIX Two Math", "Cambria Math", math, serif',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'border-color 0.12s, background 0.12s',
+            }}
+            onMouseEnter={e => {
+              (e.currentTarget as HTMLElement).style.borderColor = 'var(--brand)';
+              (e.currentTarget as HTMLElement).style.background  = 'var(--brand-tint)';
+            }}
+            onMouseLeave={e => {
+              (e.currentTarget as HTMLElement).style.borderColor = 'var(--line)';
+              (e.currentTarget as HTMLElement).style.background  = 'var(--bg)';
+            }}
+          >
+            {sym.display}
+          </button>
+        ))}
+      </div>
+
+      <style>{`
+        @keyframes math-kb-in {
+          from { opacity: 0; transform: translateY(-6px); }
+          to   { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+    </div>
+  );
 }
 
 // ── Helpers ────────────────────────────────────────────────────
@@ -631,8 +804,24 @@ function QuestionCard({ question, index, answer, onAnswer }: {
   answer:   string;
   onAnswer: (val: string) => void;
 }) {
-  const chip = typeChip(question.type);
-  const hasAnswer = answer.trim().length > 0;
+  const chip        = typeChip(question.type);
+  const hasAnswer   = answer.trim().length > 0;
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [showMath, setShowMath] = useState(false);
+
+  const insertSymbol = useCallback((sym: string) => {
+    const ta = textareaRef.current;
+    if (!ta) { onAnswer(answer + sym); return; }
+    const start  = ta.selectionStart ?? answer.length;
+    const end    = ta.selectionEnd   ?? answer.length;
+    const newVal = answer.slice(0, start) + sym + answer.slice(end);
+    onAnswer(newVal);
+    // Restore focus + cursor after React re-render
+    requestAnimationFrame(() => {
+      ta.focus();
+      ta.setSelectionRange(start + sym.length, start + sym.length);
+    });
+  }, [answer, onAnswer]);
 
   return (
     <div className="card" style={{
@@ -722,25 +911,56 @@ function QuestionCard({ question, index, answer, onAnswer }: {
 
       {/* Written / calculation / essay */}
       {question.type !== 'mcq' && (
-        <textarea
-          value={answer}
-          onChange={e => onAnswer(e.target.value)}
-          placeholder={
-            question.type === 'calculation' ? 'Show all working here…' :
-            question.type === 'essay'       ? 'Write your essay here. Plan before you write.' :
-                                              'Write your answer here…'
-          }
-          rows={question.type === 'essay' ? 9 : question.type === 'calculation' ? 6 : 4}
-          style={{
-            width: '100%', borderRadius: 12, padding: '12px 16px',
-            border: '1.5px solid var(--line)', background: 'var(--bg)',
-            color: 'var(--ink)', fontSize: 14, fontFamily: 'inherit',
-            lineHeight: 1.6, resize: 'vertical', outline: 'none',
-            boxSizing: 'border-box',
-          }}
-          onFocus={e => { e.currentTarget.style.borderColor = 'var(--brand)'; }}
-          onBlur={e => { e.currentTarget.style.borderColor = 'var(--line)'; }}
-        />
+        <div>
+          {/* Math keyboard toggle */}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 6 }}>
+            <button
+              onClick={() => setShowMath(m => !m)}
+              title="Insert mathematical notation"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 6,
+                padding: '5px 12px', borderRadius: 8,
+                border: `1.5px solid ${showMath ? 'var(--brand)' : 'var(--line)'}`,
+                background: showMath ? 'var(--brand-tint)' : 'var(--bg)',
+                color: showMath ? 'var(--brand-2)' : 'var(--ink-3)',
+                cursor: 'pointer', fontSize: 12, fontWeight: 700,
+                transition: 'all 0.15s',
+              }}
+            >
+              <span style={{ fontSize: 15, lineHeight: 1 }}>∑</span>
+              Math symbols
+            </button>
+          </div>
+
+          {/* Inline math keyboard */}
+          {showMath && (
+            <MathKeyboard
+              onInsert={insertSymbol}
+              onClose={() => setShowMath(false)}
+            />
+          )}
+
+          <textarea
+            ref={textareaRef}
+            value={answer}
+            onChange={e => onAnswer(e.target.value)}
+            placeholder={
+              question.type === 'calculation' ? 'Show all working here…' :
+              question.type === 'essay'       ? 'Write your essay here. Plan before you write.' :
+                                                'Write your answer here…'
+            }
+            rows={question.type === 'essay' ? 9 : question.type === 'calculation' ? 6 : 4}
+            style={{
+              width: '100%', borderRadius: 12, padding: '12px 16px',
+              border: '1.5px solid var(--line)', background: 'var(--bg)',
+              color: 'var(--ink)', fontSize: 14, fontFamily: 'inherit',
+              lineHeight: 1.6, resize: 'vertical', outline: 'none',
+              boxSizing: 'border-box',
+            }}
+            onFocus={e => { e.currentTarget.style.borderColor = 'var(--brand)'; }}
+            onBlur={e => { e.currentTarget.style.borderColor = 'var(--line)'; }}
+          />
+        </div>
       )}
     </div>
   );
