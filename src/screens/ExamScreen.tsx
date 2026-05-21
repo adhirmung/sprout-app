@@ -1765,6 +1765,28 @@ function QuestionCard({ question, index, answer, onAnswer }: {
   );
 }
 
+// ── Topic report helper ────────────────────────────────────────
+
+function computeTopicReport(
+  exam:    GeneratedExam,
+  results: ExamResults,
+): { topic: string; awarded: number; total: number; pct: number }[] {
+  const map = new Map<string, { awarded: number; total: number }>();
+  for (const res of results.results) {
+    const topic = exam.questions.find(x => x.id === res.questionId)?.topic ?? 'General';
+    const cur   = map.get(topic) ?? { awarded: 0, total: 0 };
+    map.set(topic, { awarded: cur.awarded + res.awarded, total: cur.total + res.total });
+  }
+  return Array.from(map.entries())
+    .map(([topic, { awarded, total }]) => ({
+      topic,
+      awarded,
+      total,
+      pct: total > 0 ? (awarded / total) * 100 : 0,
+    }))
+    .sort((a, b) => a.pct - b.pct); // weakest first
+}
+
 // ── Results panel ──────────────────────────────────────────────
 
 function ResultsPanel({ exam, results, onRetake, onViewHistory }: {
@@ -1774,6 +1796,8 @@ function ResultsPanel({ exam, results, onRetake, onViewHistory }: {
   onViewHistory: () => void;
 }) {
   const [showAnswers, setShowAnswers] = useState(false);
+  const topicReport = computeTopicReport(exam, results);
+  const weakTopics  = topicReport.filter(t => t.pct < 40);
   const color  = gradeColor(results.letterGrade);
   const pctNum = typeof results.percentage === 'number'
     ? results.percentage
@@ -1803,6 +1827,91 @@ function ResultsPanel({ exam, results, onRetake, onViewHistory }: {
             {results.overallFeedback}
           </div>
         </div>
+
+        {/* ── Topic Report ── */}
+        {topicReport.length > 0 && (
+          <div className="card" style={{ padding: 20, marginBottom: 18 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+              <div style={{ fontSize: 12, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)' }}>
+                Topic Report
+              </div>
+              <span style={{ fontSize: 11, color: 'var(--ink-4)' }}>
+                weakest first
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {topicReport.map(({ topic, awarded, total, pct }) => {
+                const strong   = pct >= 70;
+                const building = pct >= 40;
+                const tc       = strong ? '#059669' : building ? '#b45309' : '#dc2626';
+                const tbg      = strong ? '#ECFDF5' : building ? '#FFFBEB' : '#FEF2F2';
+                const label    = strong ? 'Strong'   : building ? 'Building' : 'Needs Work';
+                const dot      = strong ? '#22c55e'  : building ? '#f59e0b'  : '#ef4444';
+
+                return (
+                  <div key={topic}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                      {/* Status dot */}
+                      <div style={{ width: 8, height: 8, borderRadius: '50%', background: dot, flexShrink: 0 }} />
+
+                      {/* Topic name */}
+                      <span style={{ flex: 1, fontSize: 13, fontWeight: 600, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {topic}
+                      </span>
+
+                      {/* Marks */}
+                      <span style={{ fontSize: 12, color: 'var(--ink-3)', flexShrink: 0 }}>
+                        {awarded}/{total}
+                      </span>
+
+                      {/* Percentage */}
+                      <span style={{ fontSize: 12, fontWeight: 800, color: tc, flexShrink: 0, minWidth: 38, textAlign: 'right' }}>
+                        {pct.toFixed(0)}%
+                      </span>
+
+                      {/* Status pill */}
+                      <span style={{
+                        fontSize: 10, fontWeight: 700, padding: '2px 9px', borderRadius: 20,
+                        background: tbg, color: tc, flexShrink: 0, whiteSpace: 'nowrap',
+                      }}>
+                        {label}
+                      </span>
+                    </div>
+
+                    {/* Progress bar */}
+                    <div style={{ height: 5, background: 'var(--line)', borderRadius: 999, overflow: 'hidden', marginLeft: 16 }}>
+                      <div style={{
+                        height: '100%', borderRadius: 999, background: dot,
+                        width: `${Math.min(pct, 100)}%`,
+                        transition: 'width 0.6s ease',
+                      }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Weak topics callout */}
+            {weakTopics.length > 0 && (
+              <div style={{
+                marginTop: 16, padding: '12px 14px',
+                background: '#FEF2F2', border: '1.5px solid #FECACA',
+                borderRadius: 10, display: 'flex', alignItems: 'flex-start', gap: 10,
+              }}>
+                <span style={{ fontSize: 16, flexShrink: 0 }}>📌</span>
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: '#991B1B', marginBottom: 3 }}>
+                    Revisit before your next attempt
+                  </div>
+                  <div style={{ fontSize: 12, color: '#B91C1C', lineHeight: 1.6 }}>
+                    {weakTopics.map(t => t.topic).join(' · ')}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Per-question breakdown */}
         <div style={{ marginBottom: 20 }}>
