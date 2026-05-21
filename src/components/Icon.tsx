@@ -53,6 +53,7 @@ export function Icon({ name, size = 20, stroke = 'currentColor', style }: IconPr
     case 'eye-off': return <svg {...common}><path d="M3 3l18 18"/><path d="M10.6 6.1A10.6 10.6 0 0 1 12 6c6.5 0 10 6 10 6a17 17 0 0 1-3 3.7M6.1 6.1A17 17 0 0 0 2 12s3.5 6 10 6c1.4 0 2.7-.3 3.9-.7"/></svg>;
     case 'menu': return <svg {...common}><path d="M4 6h16M4 12h16M4 18h16"/></svg>;
     case 'lightning': return <svg {...common}><path d="M13 2 4 14h7l-1 8 9-12h-7z" fill="currentColor"/></svg>;
+    case 'chart': return <svg {...common}><rect x="3" y="12" width="4" height="9" rx="1"/><rect x="10" y="7" width="4" height="14" rx="1"/><rect x="17" y="3" width="4" height="18" rx="1"/></svg>;
     default: return null;
   }
 }
