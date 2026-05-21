@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
-import { analyzeAndGenerateExam, markExamSubmission } from '../lib/examClaude';
+import { analyzeAndGenerateExam, generateExamVariant, markExamSubmission } from '../lib/examClaude';
 import type { ExamQuestion, ExamResults, GeneratedExam } from '../lib/examClaude';
 import {
   dbDeleteExamSet,
@@ -457,6 +457,64 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
     setPhase('taking');
   }, [exam]);
 
+  // ── Generate variant from existing exam ──────────────────────
+
+  const handleGenerateVariant = useCallback(async () => {
+    if (!exam) return;
+
+    // Collect all previously generated exams for this set so Claude avoids
+    // repeating question stems the student has already seen.
+    const siblingExams = examSets
+      .filter(s => s.id !== selectedSetId &&
+                   s.subject === exam.subject &&
+                   s.grade   === exam.grade)
+      .map(s => s.examData);
+
+    setPhase('generating');
+    setProgressMsg('Preparing a fresh variant…');
+    setError(null);
+    setSavingError(null);
+
+    try {
+      const variant = await generateExamVariant(
+        exam,
+        siblingExams,
+        setProgressMsg,
+        userId,
+      );
+
+      setExam(variant);
+      setAnswers({});
+
+      if (userId) {
+        // Reuse the same paper names so the sidebar still shows the source
+        const sourcePaperNames = examSets.find(s => s.id === selectedSetId)?.paperNames ?? [];
+        const saved = await dbSaveExamSet(userId, {
+          title:           variant.title,
+          subject:         variant.subject,
+          grade:           variant.grade,
+          paperNames:      sourcePaperNames,
+          examData:        variant,
+          totalMarks:      variant.totalMarks,
+          durationMinutes: variant.durationMinutes,
+        });
+        if (saved) {
+          setExamSets(prev => [saved, ...prev]);
+          setAttemptSummaries(prev => ({ ...prev, [saved.id]: { count: 0, bestPct: null } }));
+          setSelectedSetId(saved.id);
+          setAttempts([]);
+        } else {
+          setSavingError('Variant generated but could not be saved to your history.');
+        }
+      }
+
+      setPhase('preview');
+    } catch (err) {
+      setError((err as Error).message || 'Failed to generate variant. Please retry.');
+      setPhase('preview');
+    }
+  }, [exam, examSets, selectedSetId, userId]);
+
   // ── Submit exam ───────────────────────────────────────────────
 
   const handleSubmitExam = useCallback(async () => {
@@ -681,6 +739,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
               attempts={attempts}
               savingError={savingError}
               onStart={handleStartExam}
+              onGenerateVariant={handleGenerateVariant}
             />
           )}
 
@@ -1040,11 +1099,12 @@ function LoadingDots() {
 
 // ── Preview panel (with attempt history) ───────────────────────
 
-function PreviewPanel({ exam, attempts, savingError, onStart }: {
-  exam:        GeneratedExam;
-  attempts:    StoredAttempt[];
-  savingError: string | null;
-  onStart:     () => void;
+function PreviewPanel({ exam, attempts, savingError, onStart, onGenerateVariant }: {
+  exam:                GeneratedExam;
+  attempts:            StoredAttempt[];
+  savingError:         string | null;
+  onStart:             () => void;
+  onGenerateVariant:   () => void;
 }) {
   const [showQuestions, setShowQuestions] = useState(false);
   const hasAttempts = attempts.length > 0;
@@ -1236,19 +1296,36 @@ function PreviewPanel({ exam, attempts, savingError, onStart }: {
           </div>
         )}
 
-        {/* Start / Retake button */}
-        <button
-          type="button"
-          className="btn btn-primary"
-          onClick={onStart}
-          style={{
-            width: '100%', fontSize: 15, padding: '14px 24px', borderRadius: 14,
-            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-          }}
-        >
-          <Icon name="play" size={18} stroke="currentColor" />
-          {hasAttempts ? 'Retake Exam' : `Start Exam — ${exam.durationMinutes} min`}
-        </button>
+        {/* Action buttons */}
+        <div style={{ display: 'flex', gap: 12 }}>
+          {/* Generate variant — always available */}
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={onGenerateVariant}
+            style={{
+              flex: 1, fontSize: 14, padding: '13px 16px', borderRadius: 14,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
+            }}
+          >
+            <Icon name="sparkle" size={16} stroke="currentColor" />
+            New Variant
+          </button>
+
+          {/* Start / Retake */}
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={onStart}
+            style={{
+              flex: 2, fontSize: 15, padding: '13px 20px', borderRadius: 14,
+              display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            }}
+          >
+            <Icon name="play" size={18} stroke="currentColor" />
+            {hasAttempts ? 'Retake Exam' : `Start Exam — ${exam.durationMinutes} min`}
+          </button>
+        </div>
       </div>
     </div>
   );

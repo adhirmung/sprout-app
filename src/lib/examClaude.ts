@@ -227,6 +227,113 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
   return exam;
 }
 
+// ── Variant generation ──────────────────────────────────────────
+
+/**
+ * Generates a brand-new practice exam covering the same curriculum topics
+ * as `sourceExam` but with completely different question stems, numbers,
+ * scenarios, and stimulus material.
+ *
+ * Optionally pass `previousExams` (earlier variants) so Claude can avoid
+ * repeating questions the student has already seen.
+ */
+export async function generateExamVariant(
+  sourceExam:    GeneratedExam,
+  previousExams: GeneratedExam[] = [],
+  onProgress?:   (msg: string) => void,
+  userId?:       string | null,
+): Promise<GeneratedExam> {
+  onProgress?.('Generating a new exam variant…');
+
+  const client = createClient();
+
+  // Summarise the source exam's topics so Claude knows what curriculum to cover
+  const topicRows = sourceExam.questions
+    .map(q => `  Q${q.number} [${q.type}, ${q.marks}m, ${q.topic}]: ${q.stem.slice(0, 90)}`)
+    .join('\n');
+
+  // Build an "already used" block from all previous variants
+  const seenBlock = previousExams.length
+    ? `\nPREVIOUS VARIANT QUESTIONS (do NOT reuse these stems or scenarios):\n` +
+      previousExams.flatMap(e => e.questions).map(q =>
+        `  [${q.type}] ${q.stem.slice(0, 80)}`
+      ).join('\n')
+    : '';
+
+  const variantNum = previousExams.length + 2; // source = 1, this = 2, 3, …
+
+  const prompt = `You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer.
+
+I need Variant ${variantNum} of a ${sourceExam.subject} (${sourceExam.grade}) practice exam.
+
+SOURCE EXAM STRUCTURE (replicate topics & mark distribution — NOT the questions):
+${topicRows}
+${seenBlock}
+
+Generate a COMPLETELY NEW practice exam that:
+- Covers the EXACT same syllabus topics as the source exam above
+- Keeps the same total marks (${sourceExam.totalMarks}) and duration (${sourceExam.durationMinutes} min)
+- Uses DIFFERENT question stems, numbers, real-world contexts, and stimulus material
+- Still follows NSC/CAPS style and marking conventions
+- Has the same spread of question types (MCQ, short, calculation, essay) as the source
+
+Return ONLY valid JSON — no markdown fences, no explanation:
+{
+  "title": "Practice Examination — Variant ${variantNum}",
+  "subject": "${sourceExam.subject}",
+  "grade": "${sourceExam.grade}",
+  "totalMarks": ${sourceExam.totalMarks},
+  "durationMinutes": ${sourceExam.durationMinutes},
+  "instructions": ${JSON.stringify(sourceExam.instructions)},
+  "questions": [
+    {
+      "id": "q1", "number": "1", "type": "mcq", "topic": "...",
+      "marks": 2, "stem": "...", "options": ["A. …","B. …","C. …","D. …"],
+      "modelAnswer": "B", "markingGuidance": "..."
+    }
+  ]
+}
+
+IMPORTANT: Sum of all question marks must equal ${sourceExam.totalMarks}.`;
+
+  onProgress?.('Building variant questions…');
+
+  const raw = await streamToText(client, {
+    model:      'claude-haiku-4-5-20251001',
+    max_tokens: 12000,
+    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    messages:   [{ role: 'user', content: prompt }],
+  }, 'generateExamVariant', userId ?? null);
+
+  onProgress?.('Finalising variant…');
+
+  let exam: GeneratedExam;
+  try {
+    exam = JSON.parse(extractJson(raw)) as GeneratedExam;
+  } catch {
+    throw new Error('Failed to parse exam variant from AI response. Please retry.');
+  }
+
+  if (!Array.isArray(exam.questions) || exam.questions.length === 0) {
+    throw new Error('Failed to generate variant questions. Please retry.');
+  }
+
+  exam.questions = exam.questions.map((q, i) => ({
+    id:              q.id     ?? `q${i + 1}`,
+    number:          q.number ?? String(i + 1),
+    type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
+    topic:           q.topic  ?? 'General',
+    marks:           typeof q.marks === 'number' ? q.marks : 2,
+    stem:            q.stem   ?? '',
+    context:         q.context,
+    options:         q.options,
+    modelAnswer:     q.modelAnswer    ?? '',
+    markingGuidance: q.markingGuidance,
+  }));
+
+  return exam;
+}
+
 // ── Marking ─────────────────────────────────────────────────────
 
 /**
