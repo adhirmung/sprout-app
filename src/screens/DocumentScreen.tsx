@@ -2401,14 +2401,13 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
       {/* View toggle */}
       <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
         {([
-          { id: 'list',  label: '≡ List'    },
-          { id: 'cards', label: '▣ Focus'   },
-          { id: 'ask',   label: '✨ Ask AI' },
+          { id: 'list',  label: '≡ List'  },
+          { id: 'cards', label: '▣ Focus' },
         ] as const).map(m => (
-          <button key={m.id} onClick={() => { setViewMode(m.id); if (m.id === 'ask') setFocusChatOpen(true); }} style={{
+          <button key={m.id} onClick={() => setViewMode(m.id)} style={{
             padding: '5px 14px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
-            background: viewMode === m.id ? (m.id === 'ask' ? 'var(--brand)' : 'var(--card)') : 'transparent',
-            color: viewMode === m.id ? (m.id === 'ask' ? 'white' : 'var(--ink)') : 'var(--ink-4)',
+            background: viewMode === m.id ? 'var(--card)' : 'transparent',
+            color: viewMode === m.id ? 'var(--ink)' : 'var(--ink-4)',
             boxShadow: viewMode === m.id ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
             transition: 'all 0.18s',
           }}>
