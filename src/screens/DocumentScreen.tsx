@@ -2188,6 +2188,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   const [activeQuiz,  setActiveQuiz]  = useState<ActiveQuiz>(null);
   const [quizCache,   setQuizCache]   = useState<Record<string, ParagraphQuestion[]>>({});
   const [quizLoading, setQuizLoading] = useState<string | null>(null);
+  const [quizError,   setQuizError]   = useState<string | null>(null);
 
   const [viewMode,    setViewMode]    = useState<'list' | 'cards' | 'ask'>('list');
   const [cardIdx,     setCardIdx]     = useState(0);
@@ -2283,6 +2284,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
 
   // Generate (or retrieve cached) paragraph quiz and open the modal
   const openTestMe = async (key: string, subTitle: string, subContent: string, topicTitle: string, color: string) => {
+    setQuizError(null);
     if (quizCache[key]) {
       setActiveQuiz({ key, questions: quizCache[key], color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
       return;
@@ -2292,8 +2294,8 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
       const result = await generateParagraphQuiz(subTitle, subContent, topicTitle);
       setQuizCache(prev => ({ ...prev, [key]: result.questions }));
       setActiveQuiz({ key, questions: result.questions, color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
-    } catch {
-      // fail silently — button returns to idle
+    } catch (e) {
+      setQuizError(e instanceof Error ? e.message : 'Could not generate questions — please retry.');
     } finally {
       setQuizLoading(null);
     }
@@ -2934,6 +2936,22 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
       {quizModal}
+
+      {/* Test Me error toast */}
+      {quizError && (
+        <div style={{
+          position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)',
+          zIndex: 3000, maxWidth: 360, width: 'calc(100% - 32px)',
+          background: '#FEF2F2', border: '1.5px solid #FECACA', borderRadius: 12,
+          padding: '12px 16px', display: 'flex', alignItems: 'center', gap: 10,
+          boxShadow: '0 4px 20px rgba(0,0,0,0.12)',
+        }}>
+          <span style={{ fontSize: 16, flexShrink: 0 }}>⚠️</span>
+          <span style={{ flex: 1, fontSize: 13, color: '#991B1B', lineHeight: 1.4 }}>{quizError}</span>
+          <button onClick={() => setQuizError(null)} style={{ fontSize: 16, background: 'none', border: 'none', cursor: 'pointer', color: '#991B1B', padding: 0, flexShrink: 0 }}>✕</button>
+        </div>
+      )}
+
       {/* Header */}
       <div style={{ padding: '0 16px', height: 58, flexShrink: 0, background: 'var(--card)', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12 }}>
         <button className="btn btn-ghost" onClick={onBack} style={{ padding: 8, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Back to map">
