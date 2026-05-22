@@ -490,7 +490,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       // Pass 2: weave in missed concepts from the audit (background)
       void runReadingEnhancement(map, resolvedPdf, sentenceTarget);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to generate reading material. Please retry.');
+      const msg = e instanceof Error ? e.message : 'Failed to generate reading material. Please retry.';
+      console.error('[startReading] error:', e);
+      setError(msg);
       setPhase('map');
     }
   };
@@ -1061,7 +1063,7 @@ function DocIdleView({
 
       {error && (
         <div style={{ marginTop: 20, fontSize: 13, color: 'var(--error)', background: 'var(--error-soft)', border: '1px solid var(--error-line)', padding: '10px 14px', borderRadius: 10 }}>
-          ⚠ {error} — select Activities to retry
+          ⚠ {error}
         </div>
       )}
     </div>

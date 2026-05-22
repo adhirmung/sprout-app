@@ -670,17 +670,22 @@ export async function generateReading(
   const client = getClient();
   const hasPdf = !!pdfBase64;
 
-  const mapOutline = contentMap.topics.map(t =>
+  // Cap topics to keep the response within token limits. Large content maps
+  // (8+ topics × 5 subtopics) exceed max_tokens: 8000 mid-string, which
+  // produces truncated JSON that repairJson cannot recover.
+  const MAX_TOPICS = 7;
+  const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
+
+  const mapOutline = cappedTopics.map(t =>
     `- topicId: "${t.id}" | "${t.title}"\n${t.subtopics.map(s => `    • "${s.title}"`).join('\n')}`
   ).join('\n');
 
+  // Keep sentences tight — high-WM users still get 4, not 4-5, to save tokens.
   const sentenceInstruction = sentenceTarget <= 2
     ? '2 concise sentences — one main idea, one supporting detail'
     : sentenceTarget <= 3
       ? '3 sentences — clear and focused, one key fact per sentence'
-      : sentenceTarget <= 4
-        ? '4 sentences — include elaboration and a concrete example'
-        : '4–5 sentences — include nuance, examples, and connections to other topics';
+      : '4 sentences — include elaboration and one concrete example';
 
   const gapBlock = gapFill?.length
     ? `\n\nCRITICAL GAP-FILL REQUIREMENT:\nThe following concepts were identified as MISSING from an earlier draft. You MUST weave ALL of them explicitly into the appropriate subtopic content below:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
@@ -744,25 +749,39 @@ Return ONLY valid JSON — no markdown fences:
 
   const raw = await streamToText(client, {
     model:      'claude-haiku-4-5-20251001',
-    max_tokens: 8000,   // ~40s at Haiku streaming speed — safe within Netlify's 50s limit
+    max_tokens: 12000,  // raised from 8000 — large maps with 7 topics × 5 subs need ~9k tokens
     system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     messages:   [{ role: 'user', content: userContent }],
   }, 'generateReading');
 
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('Failed to generate reading material. Please retry.');
+  if (start === -1 || end === -1) {
+    console.error('[generateReading] No JSON found in response. Raw (first 500):', raw.slice(0, 500));
+    throw new Error('Reading generation returned an empty response. Please retry.');
+  }
 
   let parsed: DocumentReading;
   try {
     parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch {
-    parsed = JSON.parse(repairJson(raw.slice(start)));
+  } catch (e1) {
+    try {
+      parsed = JSON.parse(repairJson(raw.slice(start)));
+    } catch (e2) {
+      console.error('[generateReading] JSON parse failed. Raw tail (last 300):', raw.slice(-300));
+      console.error('Parse error:', e1);
+      throw new Error('Reading generation produced malformed JSON. Please retry.');
+    }
   }
 
   if (!Array.isArray(parsed.topics) || parsed.topics.length === 0) {
-    throw new Error('Invalid reading response. Please retry.');
+    console.error('[generateReading] topics missing or empty. parsed:', JSON.stringify(parsed).slice(0, 200));
+    throw new Error('Reading generation returned no topics. Please retry.');
   }
+
+  // Strip out any topics that have no subtopics (can happen on truncation edge cases)
+  parsed.topics = parsed.topics.filter(t => Array.isArray(t.subtopics) && t.subtopics.length > 0);
+  if (parsed.topics.length === 0) throw new Error('No valid topic content was generated. Please retry.');
 
   return parsed;
 }
