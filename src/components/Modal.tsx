@@ -13,9 +13,14 @@ interface ModalProps {
 const FOCUSABLE = 'a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 export function Modal({ open, onClose, title, children, footer, width = 480 }: ModalProps) {
-  const dialogRef = useRef<HTMLDivElement>(null);
-  const titleId   = useId();
-  const prevFocus = useRef<HTMLElement | null>(null);
+  const dialogRef   = useRef<HTMLDivElement>(null);
+  const titleId     = useId();
+  const prevFocus   = useRef<HTMLElement | null>(null);
+  // Keep onClose in a ref so the effect never needs to re-run when the
+  // caller passes a new inline function — otherwise each keystroke in a
+  // controlled input would retrigger focus() and steal focus away.
+  const onCloseRef  = useRef(onClose);
+  onCloseRef.current = onClose;
 
   useEffect(() => {
     if (!open) return;
@@ -26,7 +31,7 @@ export function Modal({ open, onClose, title, children, footer, width = 480 }: M
     first?.focus();
 
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { onClose(); return; }
+      if (e.key === 'Escape') { onCloseRef.current(); return; }
       if (e.key !== 'Tab' || !dialogRef.current) return;
 
       const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE));
@@ -46,7 +51,7 @@ export function Modal({ open, onClose, title, children, footer, width = 480 }: M
       document.removeEventListener('keydown', onKey);
       prevFocus.current?.focus();
     };
-  }, [open, onClose]);
+  }, [open]); // ← only `open` — not `onClose` — so typing doesn't retrigger focus()
 
   if (!open) return null;
 
