@@ -18,6 +18,7 @@ import {
   generateContentAudit,
   generateContentMap,
   generateCourseMaterial,
+  generateDocumentDiagnostic,
   generateFeed,
   generateParagraphQuiz,
   generatePracticeQuiz,
@@ -27,7 +28,7 @@ import {
   saveApiKey,
   streamCardChat,
 } from '../lib/gemini';
-import type { ChatMessage, ContentAudit, ContentMap, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -81,7 +82,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [error,     setError]     = useState('');
   const [fromCache, setFromCache] = useState(false);
   const [needsKey,  setNeedsKey]  = useState(!hasApiKey());
-  const [showTutor, setShowTutor] = useState(false);
+  const [showTutor,        setShowTutor]        = useState(false);
+  const [diagnostic,       setDiagnostic]       = useState<DocumentDiagnostic | null>(null);
+  const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   const retryRef = useRef<HTMLButtonElement>(null);
 
   const topic       = source?.path?.[source.path.length - 1] ?? 'Document';
@@ -155,6 +158,22 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     const t = setTimeout(() => setGapCardsAdded(0), 5000);
     return () => clearTimeout(t);
   }, [gapCardsAdded]);
+
+  const runDiagnostic = async () => {
+    if (!courseMaterial) return;
+    setDiagnosticLoading(true);
+    setDiagnostic(null);
+    try {
+      let resolvedPdf = pdfBase64;
+      if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+      const report = await generateDocumentDiagnostic(topic, content, resolvedPdf, courseMaterial);
+      setDiagnostic(report);
+    } catch (e) {
+      console.error('Diagnostic failed:', e);
+    } finally {
+      setDiagnosticLoading(false);
+    }
+  };
 
   const generate = async (force = false, mode: 'activities' | 'flashcards' | 'quiz' = 'activities') => {
     setPhase('loading');
@@ -563,12 +582,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       contentAudit={null}
       isCourse={true}
       hasCourseMaterial={true}
+      diagnostic={diagnostic}
+      diagnosticLoading={diagnosticLoading}
+      onRunDiagnostic={runDiagnostic}
       onContinueToRead={() => startReading(contentMap)}
       onBack={() => setPhase('map')}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
         Store.del(`course:${sourceKey}`);
         setCourseMaterial(null);
+        setDiagnostic(null);
         await startCourseMaterial(contentMap);
       }}
     />
@@ -1421,6 +1444,147 @@ function CoverageStatsOverlay({
   );
 }
 
+// ── Diagnostic Report Sheet ───────────────────────────────────
+
+function DiagnosticSheet({
+  diagnostic,
+  loading,
+  onClose,
+  onRun,
+}: {
+  diagnostic:  DocumentDiagnostic | null;
+  loading:     boolean;
+  onClose:     () => void;
+  onRun:       () => void;
+}) {
+  const notesScore   = diagnostic?.notesCoverageScore ?? 0;
+  const scoreColor   = notesScore >= 85 ? '#16A34A' : notesScore >= 65 ? '#D97706' : '#DC2626';
+  const scoreBg      = notesScore >= 85 ? '#F0FDF4'  : notesScore >= 65 ? '#FFFBEB' : '#FEF2F2';
+
+  return (
+    <div
+      onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 400, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
+    >
+      <div
+        onClick={e => e.stopPropagation()}
+        style={{
+          background: 'var(--card)', borderRadius: '20px 20px 0 0',
+          width: '100%', maxWidth: 600, maxHeight: '80vh',
+          display: 'flex', flexDirection: 'column',
+          boxShadow: '0 -8px 40px rgba(0,0,0,0.18)',
+        }}
+      >
+        {/* Handle + title */}
+        <div style={{ padding: '12px 20px 0', flexShrink: 0 }}>
+          <div style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--line)', margin: '0 auto 12px' }} />
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)' }}>🔬 AI Diagnostic Report</div>
+              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>Tests document read coverage and notes quality</div>
+            </div>
+            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 22, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>×</button>
+          </div>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px 28px' }}>
+
+          {/* No report yet */}
+          {!diagnostic && !loading && (
+            <div style={{ textAlign: 'center', padding: '24px 0' }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>🔍</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 6 }}>Run a diagnostic</div>
+              <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6, marginBottom: 20 }}>
+                Tests whether the AI read the full document and how completely the notes cover it.
+              </div>
+              <button
+                onClick={onRun}
+                className="btn btn-primary"
+                style={{ fontSize: 14, padding: '10px 24px' }}
+              >
+                Run Diagnostic
+              </button>
+            </div>
+          )}
+
+          {/* Loading */}
+          {loading && (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '28px 0', color: 'var(--ink-3)', fontSize: 13 }}>
+              <div style={{ width: 28, height: 28, border: '3px solid var(--brand)', borderTop: '3px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+              <div style={{ fontWeight: 600 }}>Reading document and comparing notes…</div>
+              <div style={{ fontSize: 12, opacity: 0.7 }}>This may take 10–20 seconds</div>
+            </div>
+          )}
+
+          {/* Report */}
+          {diagnostic && !loading && (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+
+              {/* Notes coverage score */}
+              <div style={{ borderRadius: 12, background: scoreBg, border: `1px solid ${scoreColor}33`, padding: '14px 16px' }}>
+                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 4 }}>Notes Coverage</div>
+                <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{notesScore}%</div>
+                <div style={{ fontSize: 12, color: scoreColor, marginTop: 6, opacity: 0.85, lineHeight: 1.5 }}>{diagnostic.notesVerdict}</div>
+              </div>
+
+              {/* Document read check */}
+              <div style={{ borderRadius: 12, background: 'var(--bg-tint)', border: '1px solid var(--line)', padding: '14px 16px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-3)' }}>Document Read</div>
+                  {diagnostic.pagesEstimated > 0 && (
+                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)', background: 'var(--brand-tint)', padding: '2px 8px', borderRadius: 20 }}>
+                      ~{diagnostic.pagesEstimated} pages
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5, marginBottom: diagnostic.sectionsFound.length > 0 ? 10 : 0 }}>{diagnostic.readVerdict}</div>
+                {diagnostic.sectionsFound.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Sections identified ({diagnostic.sectionsFound.length})</div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                      {diagnostic.sectionsFound.map((s, i) => (
+                        <div key={i} style={{ fontSize: 12, color: 'var(--ink-2)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                          <span style={{ color: 'var(--brand)', flexShrink: 0, fontWeight: 700 }}>·</span>
+                          <span style={{ lineHeight: 1.5 }}>{s}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Missing from notes */}
+              {diagnostic.missingFromNotes.length > 0 && (
+                <div style={{ borderRadius: 12, background: '#FEF2F2', border: '1px solid #FCA5A533', padding: '14px 16px' }}>
+                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#DC2626', marginBottom: 8 }}>Missing from Notes</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                    {diagnostic.missingFromNotes.map((item, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                        <span style={{ color: '#DC2626', flexShrink: 0, fontWeight: 700, fontSize: 13 }}>✕</span>
+                        <div style={{ fontSize: 13, color: '#7F1D1D', lineHeight: 1.5 }}>{item}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Re-run button */}
+              <button
+                onClick={onRun}
+                className="btn btn-ghost"
+                style={{ fontSize: 13, padding: '8px 16px', color: 'var(--ink-3)', alignSelf: 'center' }}
+              >
+                🔄 Re-run Diagnostic
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Map view ──────────────────────────────────────────────────
 
 function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onCourseMaterial, onRead, onPractice, onRegenerate }: {
@@ -2234,7 +2398,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, onContinueToRead, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, diagnostic, diagnosticLoading, onRunDiagnostic, onContinueToRead, onBack, onPractice, onRegenerate }: {
   documentReading:    DocumentReading;
   topic:              string;
   hasCache:           boolean;
@@ -2244,6 +2408,9 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   contentAudit:       ContentAudit | null;
   isCourse?:          boolean;   // true = Course Material (step 2); false/undefined = Read (step 3)
   hasCourseMaterial?: boolean;   // whether course material exists (for Read's step 2 indicator)
+  diagnostic?:        DocumentDiagnostic | null;
+  diagnosticLoading?: boolean;
+  onRunDiagnostic?:   () => void;
   onContinueToRead?:  () => void; // from Course Material → Read
   onBack:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
@@ -2252,6 +2419,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   type SubStatus = 'unread' | 'read' | 'learnt';
 
   const [statsOpen,         setStatsOpen]         = useState(false);
+  const [diagnosticOpen,    setDiagnosticOpen]    = useState(false);
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
@@ -3074,6 +3242,37 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
               </span>
             </button>
           )}
+          {/* Diagnostic button — only in Course Material view */}
+          {isCourse && onRunDiagnostic && (
+            <button
+              onClick={() => {
+                setDiagnosticOpen(true);
+                if (!diagnostic && !diagnosticLoading) onRunDiagnostic();
+              }}
+              aria-label="AI Diagnostic Report"
+              title="AI Diagnostic Report"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '5px 10px', borderRadius: 20,
+                background: diagnostic
+                  ? (diagnostic.notesCoverageScore >= 85 ? '#F0FDF4' : diagnostic.notesCoverageScore >= 65 ? '#FFFBEB' : '#FEF2F2')
+                  : 'var(--bg-tint)',
+                border: `1.5px solid ${diagnostic
+                  ? (diagnostic.notesCoverageScore >= 85 ? '#86EFAC' : diagnostic.notesCoverageScore >= 65 ? '#FCD34D' : '#FCA5A5')
+                  : 'var(--line)'}`,
+                cursor: 'pointer', fontSize: 11, fontWeight: 800,
+                color: diagnostic
+                  ? (diagnostic.notesCoverageScore >= 85 ? '#16A34A' : diagnostic.notesCoverageScore >= 65 ? '#D97706' : '#DC2626')
+                  : 'var(--ink-3)',
+              }}
+            >
+              {diagnosticLoading
+                ? <div style={{ width: 11, height: 11, border: '1.5px solid currentColor', borderTop: '1.5px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
+                : <span>🔬</span>
+              }
+              <span>{diagnosticLoading ? 'Testing…' : diagnostic ? `${diagnostic.notesCoverageScore}%` : 'Diagnose'}</span>
+            </button>
+          )}
           {hasCache && (
             <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
               <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
@@ -3081,6 +3280,16 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
           )}
         </div>
       </div>
+
+      {/* Diagnostic sheet */}
+      {diagnosticOpen && isCourse && (
+        <DiagnosticSheet
+          diagnostic={diagnostic ?? null}
+          loading={!!diagnosticLoading}
+          onClose={() => setDiagnosticOpen(false)}
+          onRun={() => { onRunDiagnostic?.(); }}
+        />
+      )}
 
       {/* Coverage stats overlay */}
       {statsOpen && (

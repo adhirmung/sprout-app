@@ -1096,3 +1096,82 @@ Return ONLY valid JSON — no markdown:
   }
   return parsed;
 }
+
+// ── Document Diagnostic ───────────────────────────────────────
+// Two-part quality test:
+//   1. Did the AI read the full document? (page/section inventory)
+//   2. Are those sections faithfully represented in the notes?
+
+export interface DocumentDiagnostic {
+  /** Estimated number of pages the AI processed (0 = could not determine) */
+  pagesEstimated: number;
+  /** Every major section / chapter the AI identified in the document */
+  sectionsFound: string[];
+  /** 0–100: how completely the *notes* cover the full document */
+  notesCoverageScore: number;
+  /** Specific topics / concepts present in the doc but absent from the notes */
+  missingFromNotes: string[];
+  /** One-sentence verdict on read completeness */
+  readVerdict: string;
+  /** One-sentence verdict on notes quality */
+  notesVerdict: string;
+}
+
+export async function generateDocumentDiagnostic(
+  topic:          string,
+  contentText:    string | null,
+  pdfBase64:      string | null,
+  courseMaterial: DocumentReading,
+): Promise<DocumentDiagnostic> {
+  // Flatten notes into readable text so Gemini can compare
+  const notesSummary = courseMaterial.topics.map(t =>
+    `## ${t.title}\n` +
+    t.subtopics.map(s => `- ${s.title}: ${s.content.slice(0, 300)}`).join('\n')
+  ).join('\n\n');
+
+  const prompt = `You are a document quality auditor. Perform a two-part diagnostic:
+
+TOPIC: "${topic}"
+${sourceBlock(contentText, !!pdfBase64)}
+
+--- GENERATED NOTES (what the AI produced) ---
+${notesSummary.slice(0, 6000)}
+--- END NOTES ---
+
+PART 1 — DID THE AI READ THE FULL DOCUMENT?
+• Estimate the total number of pages in the original document.
+• List EVERY major section, chapter, or topic heading you can identify in the document.
+• Did the content appear to cut off, or was the full document accessible?
+
+PART 2 — HOW COMPLETELY ARE THE NOTES?
+• What percentage (0–100) of the document's important, testable content appears in the notes?
+• List any specific topics, sections, facts, formulas, or named concepts that are in the document but ABSENT from the notes.
+
+Return ONLY valid JSON — no markdown:
+{
+  "pagesEstimated": <integer, 0 if unknown>,
+  "sectionsFound": ["Section name — brief description of content", "..."],
+  "notesCoverageScore": <0-100>,
+  "missingFromNotes": ["Specific missing topic or concept", "..."],
+  "readVerdict": "One sentence: did the AI read the full document?",
+  "notesVerdict": "One sentence: how complete are the notes?"
+}`;
+
+  const parts: Part[] = pdfBase64
+    ? [pdfPart(pdfBase64), textPart(prompt)]
+    : [textPart(prompt)];
+
+  const raw = await generateText(
+    SMART_MODEL,
+    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    parts,
+    3000,
+    'generateDocumentDiagnostic',
+  );
+
+  const parsed = parseJson<DocumentDiagnostic>(raw);
+  if (typeof parsed.notesCoverageScore !== 'number' || !Array.isArray(parsed.sectionsFound)) {
+    throw new Error('Invalid diagnostic response.');
+  }
+  return parsed;
+}
