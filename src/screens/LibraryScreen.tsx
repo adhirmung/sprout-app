@@ -135,7 +135,7 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
         reader.readAsText(file);
       } else if (isPDF) {
         const estPages = Math.max(1, Math.round(file.size / 102_400));
-        toast(estPages > 32 ? `PDF is ~${estPages} pages — only first 32 will be processed` : 'Reading PDF…', estPages > 32 ? 'error' : 'success');
+        toast('Reading PDF…', 'success');
         file.arrayBuffer().then(async buf => {
           const pdfBase64 = await new Promise<string>(resolve => {
             const reader = new FileReader();
@@ -151,7 +151,7 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
           }
 
           setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null, pdfBase64, storagePath } });
-          toast(`PDF uploaded ✓ (~${estPages} page${estPages !== 1 ? 's' : ''} — Claude reads it natively)`, 'success');
+          toast(`PDF uploaded ✓ (~${estPages} page${estPages !== 1 ? 's' : ''})`, 'success');
           setShowUpload(false);
         });
       } else if (fileType === 'DOCX' || fileType === 'DOC') {

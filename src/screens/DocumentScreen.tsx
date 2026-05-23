@@ -1096,11 +1096,6 @@ function DocIdleView({
             <Icon name="file" size={15} stroke="var(--ink-3)" /> {estPages} pages
           </div>
         )}
-        {fileType === 'PDF' && estPages && estPages > 32 && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', border: '1px dashed var(--coral-soft)', borderRadius: 12, fontSize: 12, color: 'var(--coral)' }}>
-            ⚠ Large PDF — first 32 pages only
-          </div>
-        )}
         {fileType !== 'PDF' && isLargeDoc && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '9px 14px', border: '1px dashed var(--line-2)', borderRadius: 12, fontSize: 12, color: 'var(--ink-3)' }}>
             📄 Large doc — key highlights only
