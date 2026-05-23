@@ -1207,6 +1207,111 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`,
   catch { return { score: 1, feedback: 'Partial credit — keep going!' }; }
 }
 
+// ── Course Material generator ─────────────────────────────────
+// Extracts verbatim passages from the source document, organised into
+// the same topic/subtopic structure as DocumentReading. The content
+// field for each subtopic contains exact sentences from the source —
+// no paraphrasing or AI rewriting.
+
+export async function generateCourseMaterial(
+  topic:       string,
+  contentText: string | null,
+  _pdfBase64:  string | null,  // verbatim extraction requires text; PDF binary not re-sent
+  contentMap:  ContentMap,
+): Promise<DocumentReading> {
+  if (!contentText) {
+    throw new Error('Course Material requires document text. Please upload a text-based file (DOCX, TXT, etc.).');
+  }
+
+  const client = getClient();
+  const MAX_TOPICS = 7;
+  const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
+
+  const topicResults = await Promise.all(
+    cappedTopics.map(async (t): Promise<TopicReading | null> => {
+      const topicContext =
+        `Topic overview: ${t.title} — ${t.summary}\n` +
+        t.subtopics.map(s => `• ${s.title}: ${s.summary}`).join('\n');
+
+      const subtopicList = t.subtopics.map(s => `• "${s.title}"`).join('\n');
+
+      const prompt = `You are an expert educational content organiser. Extract study content VERBATIM from the source document.
+
+Overall subject: "${topic}"
+SOURCE CONTENT — extract verbatim passages from this text:
+"""
+${contentText.slice(0, 8_000)}
+"""
+
+TOPIC CONTEXT (from content analysis):
+${topicContext}
+
+TOPIC (topicId: "${t.id}"): "${t.title}"
+SUBTOPICS TO COVER:
+${subtopicList}
+
+For EACH subtopic above:
+1. "content": Copy 3–5 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Use the EXACT words as written — do NOT paraphrase, reorder, simplify, or alter any wording. Prioritise definitions, key explanations, and factual statements. If you cannot find a relevant passage, copy the closest matching text.
+2. "quiz": one comprehension question based on the exact passage shown — 3 plausible options, 0-based answer index, 1-sentence explanation.
+
+Also:
+- "keyTerms": 3–5 key terms as they appear in the source, with definitions copied verbatim from the source where possible.
+- "whyItMatters": one sentence (you may write this) explaining this topic's significance.
+
+Rules: subtopic titles must match the outline exactly; quiz distractors must be plausible.
+
+Return ONLY valid JSON — no markdown:
+{
+  "topicId": "${t.id}",
+  "title": "${t.title}",
+  "subtopics": [
+    { "title": "Subtopic name (must match outline)", "content": "...", "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." } }
+  ],
+  "keyTerms": [{ "term": "...", "definition": "..." }],
+  "whyItMatters": "..."
+}`;
+
+      try {
+        const raw = await streamToText(client, {
+          model:      'claude-haiku-4-5-20251001',
+          max_tokens: 3000,  // verbatim passages can be longer than AI-written text
+          system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+          messages:   [{ role: 'user', content: prompt }],
+        }, 'generateCourseMaterial');
+
+        const start = raw.indexOf('{');
+        const end   = raw.lastIndexOf('}');
+        if (start === -1 || end === -1) {
+          console.error(`[generateCourseMaterial] topic "${t.title}" — no JSON`);
+          return null;
+        }
+
+        let parsed: TopicReading;
+        try {
+          parsed = JSON.parse(raw.slice(start, end + 1));
+        } catch {
+          try {
+            parsed = JSON.parse(repairJson(raw.slice(start)));
+          } catch {
+            console.error(`[generateCourseMaterial] topic "${t.title}" — parse failed`);
+            return null;
+          }
+        }
+
+        if (!Array.isArray(parsed.subtopics) || parsed.subtopics.length === 0) return null;
+        return { ...parsed, topicId: t.id, title: t.title };
+      } catch (e) {
+        console.error(`[generateCourseMaterial] topic "${t.title}" error:`, e);
+        return null;
+      }
+    })
+  );
+
+  const topics = topicResults.filter((t): t is TopicReading => t !== null && Array.isArray(t.subtopics) && t.subtopics.length > 0);
+  if (topics.length === 0) throw new Error('Failed to generate course material. Please retry.');
+  return { topics };
+}
+
 // ── Paragraph quiz (4–5 Qs per subtopic for Read → Test Me) ──
 
 export interface ParagraphQuestion {

@@ -17,6 +17,7 @@ import {
   generateBoosterCards,
   generateContentAudit,
   generateContentMap,
+  generateCourseMaterial,
   generateFeed,
   generateParagraphQuiz,
   generatePracticeQuiz,
@@ -55,10 +56,11 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'course-loading' | 'course' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
+  const [courseMaterial,  setCourseMaterial]  = useState<DocumentReading | null>(null);
   const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
@@ -120,6 +122,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     } else if (userId) {
       dbLoadContent<ContentAudit>(userId, sourceKey, 'audit')
         .then(data => { if (data && typeof data.coverageScore === 'number') { Store.set(`audit:${sourceKey}`, data); setContentAudit(data); } })
+        .catch(() => {});
+    }
+
+    const cachedCourse = Store.get<DocumentReading | null>(`course:${sourceKey}`, null);
+    if (cachedCourse?.topics?.length && cachedCourse.topics[0]?.subtopics?.length) {
+      setCourseMaterial(cachedCourse);
+    } else if (userId) {
+      dbLoadContent<DocumentReading>(userId, sourceKey, 'course')
+        .then(data => { if (data?.topics?.length && data.topics[0]?.subtopics?.length) { Store.set(`course:${sourceKey}`, data); setCourseMaterial(data); } })
         .catch(() => {});
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -497,6 +508,35 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   };
 
+  const startCourseMaterial = async (map: ContentMap) => {
+    const cached = Store.get<DocumentReading | null>(`course:${sourceKey}`, null);
+    if (cached?.topics?.length && cached.topics[0]?.subtopics?.length) {
+      setCourseMaterial(cached); setPhase('course'); return;
+    }
+    if (userId) {
+      const dbCached = await dbLoadContent<DocumentReading>(userId, sourceKey, 'course').catch(() => null);
+      if (dbCached?.topics?.length && dbCached.topics[0]?.subtopics?.length) {
+        Store.set(`course:${sourceKey}`, dbCached); setCourseMaterial(dbCached); setPhase('course'); return;
+      }
+    }
+    setPhase('course-loading');
+    setError('');
+    try {
+      let resolvedPdf = pdfBase64;
+      if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+      const cm = await generateCourseMaterial(topic, content, resolvedPdf, map);
+      Store.set(`course:${sourceKey}`, cm);
+      if (userId) dbSaveContent(userId, sourceKey, 'course', cm).catch(console.error);
+      setCourseMaterial(cm);
+      setPhase('course');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Failed to generate course material. Please retry.';
+      console.error('[startCourseMaterial] error:', e);
+      setError(msg);
+      setPhase('map');
+    }
+  };
+
   const next = () => { if (idx + 1 >= cards.length) { setPhase('done'); } else { setIdx(i => i + 1); } };
   const prev = () => { if (idx > 0) setIdx(i => i - 1); };
 
@@ -512,18 +552,43 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     </div>
   );
 
+  if (phase === 'course' && courseMaterial && contentMap) return (
+    <ReadView
+      documentReading={courseMaterial}
+      topic={topic}
+      hasCache={!!Store.get<DocumentReading | null>(`course:${sourceKey}`, null)}
+      profile={profile}
+      readEnhancing={false}
+      enhancementSummary={null}
+      contentAudit={null}
+      isCourse={true}
+      hasCourseMaterial={true}
+      onContinueToRead={() => startReading(contentMap)}
+      onBack={() => setPhase('map')}
+      onPractice={() => setPhase('practice')}
+      onRegenerate={async () => {
+        Store.del(`course:${sourceKey}`);
+        setCourseMaterial(null);
+        await startCourseMaterial(contentMap);
+      }}
+    />
+  );
+
   if (phase === 'map' && contentMap) return (
     <MapView
       contentMap={contentMap}
       topic={topic}
       hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
       hasReading={!!documentReading}
+      hasCourse={!!courseMaterial}
+      hasText={!!content}
       profile={profile}
       contentAudit={contentAudit}
       auditLoading={auditLoading}
       mapEnhancing={mapEnhancing}
       enhancementSummary={enhancementSummary}
       onBack={() => setPhase('idle')}
+      onCourseMaterial={() => startCourseMaterial(contentMap)}
       onRead={() => startReading(contentMap)}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
@@ -583,7 +648,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       readEnhancing={readEnhancing}
       enhancementSummary={enhancementSummary}
       contentAudit={contentAudit}
-      onBack={() => setPhase('map')}
+      isCourse={false}
+      hasCourseMaterial={!!courseMaterial}
+      onContinueToRead={undefined}
+      onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
         Store.del(`reading:${sourceKey}`);
@@ -601,7 +669,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           score={score} streak={streak}
           onBack={
             (phase === 'loading' || phase === 'mapping') ? () => { setPhase('idle'); setError(''); } :
-            phase === 'read-loading' ? () => { setPhase('map'); setError(''); } :
+            (phase === 'read-loading' || phase === 'course-loading') ? () => { setPhase('map'); setError(''); } :
             onBack
           }
         />
@@ -631,7 +699,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onStartExam={() => setPhase('exam')}
           />
         )}
-        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading') && <FeedLoading topic={topic} />}
+        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading' || phase === 'course-loading') && <FeedLoading topic={topic} />}
         {phase === 'running' && cards.length > 0 && cards[idx] && (
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CardView
@@ -1360,17 +1428,20 @@ function CoverageStatsOverlay({
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onRead, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onCourseMaterial, onRead, onPractice, onRegenerate }: {
   contentMap:         ContentMap;
   topic:              string;
   hasCache:           boolean;
   hasReading:         boolean;
+  hasCourse:          boolean;
+  hasText:            boolean;
   profile:            LearnerProfile | null;
   contentAudit:       ContentAudit | null;
   auditLoading:       boolean;
   mapEnhancing:       boolean;
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
   onBack:             () => void;
+  onCourseMaterial:   () => void;
   onRead:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:       () => void;
@@ -1400,7 +1471,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
         transition: 'all 0.2s',
       }}>{n}</div>
       <div style={{ fontSize: 10, fontWeight: 700, color: active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-        {n === 1 ? 'Map' : n === 2 ? 'Read' : 'Practice'}
+        {n === 1 ? 'Map' : n === 2 ? 'Notes' : n === 3 ? 'Read' : 'Practice'}
       </div>
     </div>
   );
@@ -1489,10 +1560,12 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
           {/* Step progress */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0, marginBottom: 24 }}>
             <StepDot n={1} active={true} />
-            <div style={{ width: isMobile ? 40 : 64, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <div style={{ width: isMobile ? 28 : 48, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
             <StepDot n={2} active={false} />
-            <div style={{ width: isMobile ? 40 : 64, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <div style={{ width: isMobile ? 28 : 48, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
             <StepDot n={3} active={false} />
+            <div style={{ width: isMobile ? 28 : 48, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <StepDot n={4} active={false} />
           </div>
 
           {/* Step 1 label */}
@@ -1512,7 +1585,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
             <div style={{ height: 8, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden', marginBottom: 6 }}>
               <div style={{ width: `${mapPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand) 0%, #7ed5a0 100%)' }} />
             </div>
-            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>content understanding · complete all 3 steps for 90%+</div>
+            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>content understanding · complete all 4 steps for 90%+</div>
           </div>
 
           {/* Cognitive tip */}
@@ -1622,7 +1695,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 320, width: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 420, width: '100%' }}>
           {/* Step 1 — Map (active) */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>1</div>
@@ -1630,22 +1703,33 @@ function MapView({ contentMap, topic, hasCache, hasReading, profile, contentAudi
           </div>
 
           {/* Line 1→2 */}
+          <div style={{ flex: 1, height: 2.5, background: hasCourse ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
+
+          {/* Step 2 — Notes/Course Material (clickable) */}
+          <button onClick={onCourseMaterial} title={!hasText ? 'Requires text document' : undefined} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: hasText ? 'pointer' : 'not-allowed', padding: '0 4px', opacity: hasText ? 1 : 0.45 }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasCourse ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasCourse ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: hasCourse ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: hasCourse ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>
+              {hasCourse ? '✓' : '2'}
+            </div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: hasCourse ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Notes</span>
+          </button>
+
+          {/* Line 2→3 */}
           <div style={{ flex: 1, height: 2.5, background: hasReading ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
 
-          {/* Step 2 — Read (clickable) */}
+          {/* Step 3 — Read (clickable) */}
           <button onClick={onRead} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasReading ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasReading ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: hasReading ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: hasReading ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>
-              {hasReading ? '✓' : '2'}
+              {hasReading ? '✓' : '3'}
             </div>
             <span style={{ fontSize: 11, fontWeight: 700, color: hasReading ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Read</span>
           </button>
 
-          {/* Line 2→3 */}
+          {/* Line 3→4 */}
           <div style={{ flex: 1, height: 2.5, background: 'var(--line)', borderRadius: 2, marginBottom: 18 }} />
 
-          {/* Step 3 — Practice (clickable) */}
+          {/* Step 4 — Practice (clickable) */}
           <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>4</div>
             <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Practice</span>
           </button>
         </div>
@@ -2155,7 +2239,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, onContinueToRead, onBack, onPractice, onRegenerate }: {
   documentReading:    DocumentReading;
   topic:              string;
   hasCache:           boolean;
@@ -2163,6 +2247,9 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   readEnhancing:      boolean;
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
   contentAudit:       ContentAudit | null;
+  isCourse?:          boolean;   // true = Course Material (step 2); false/undefined = Read (step 3)
+  hasCourseMaterial?: boolean;   // whether course material exists (for Read's step 2 indicator)
+  onContinueToRead?:  () => void; // from Course Material → Read
   onBack:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:       () => void;
@@ -2960,7 +3047,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
           <Icon name="arrow-left" size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Step 2 · Read</div>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>{isCourse ? 'Step 2 · Course Material' : 'Step 3 · Read'}</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -3039,7 +3126,7 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 320, width: '100%' }}>
+        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 420, width: '100%' }}>
           {/* Step 1 — Map (done, clickable) */}
           <button onClick={onBack} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', display: 'grid', placeItems: 'center', fontSize: 14, color: 'white', fontWeight: 800, boxShadow: '0 2px 8px rgba(47,158,94,0.3)' }}>✓</div>
@@ -3049,19 +3136,42 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
           {/* Line 1→2 */}
           <div style={{ flex: 1, height: 2.5, background: 'var(--brand)', borderRadius: 2, marginBottom: 18 }} />
 
-          {/* Step 2 — Read (active, not clickable) */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>2</div>
-            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Read</span>
-          </div>
+          {/* Step 2 — Notes (active if isCourse, done/clickable if hasCourseMaterial) */}
+          {isCourse ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
+              <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>2</div>
+              <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Notes</span>
+            </div>
+          ) : (
+            <button onClick={onBack} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: hasCourseMaterial ? 'pointer' : 'default', padding: '0 4px' }}>
+              <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasCourseMaterial ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasCourseMaterial ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 14, color: hasCourseMaterial ? 'white' : 'var(--ink-4)', fontWeight: 800, boxShadow: hasCourseMaterial ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>{hasCourseMaterial ? '✓' : '2'}</div>
+              <span style={{ fontSize: 11, fontWeight: 700, color: hasCourseMaterial ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em' }}>Notes</span>
+            </button>
+          )}
 
-          {/* Line 2→3 (fills green when 100% done) */}
-          <div style={{ flex: 1, height: 2.5, background: progressPct >= 100 ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
+          {/* Line 2→3 */}
+          <div style={{ flex: 1, height: 2.5, background: isCourse ? 'var(--line)' : 'var(--brand)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
 
-          {/* Step 3 — Practice (upcoming, clickable) */}
+          {/* Step 3 — Read (active if !isCourse, clickable from course) */}
+          {!isCourse ? (
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
+              <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>3</div>
+              <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Read</span>
+            </div>
+          ) : (
+            <button onClick={onContinueToRead} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+              <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Read</span>
+            </button>
+          )}
+
+          {/* Line 3→4 (fills green when 100% done, only in read mode) */}
+          <div style={{ flex: 1, height: 2.5, background: !isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
+
+          {/* Step 4 — Practice */}
           <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: progressPct >= 100 ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${progressPct >= 100 ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: progressPct >= 100 ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: progressPct >= 100 ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>3</div>
-            <span style={{ fontSize: 11, fontWeight: 700, color: progressPct >= 100 ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Practice</span>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: !isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${!isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: !isCourse && progressPct >= 100 ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: !isCourse && progressPct >= 100 ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>4</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: !isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Practice</span>
           </button>
         </div>
       </div>
