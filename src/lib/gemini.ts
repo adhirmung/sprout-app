@@ -3,10 +3,11 @@ import type { LearnerProfile } from './types';
 import { dbLogUsage } from './supabase';
 
 // ── Model config ──────────────────────────────────────────────
-// Smart  → complex structured tasks (map, reading, notes, audit)
-// Fast   → high-volume or conversational tasks (cards, quiz, chat)
-const SMART_MODEL = 'gemini-2.5-pro';
-const FAST_MODEL  = 'gemini-2.5-flash';
+// Both use Flash to stay within Netlify Edge Function's 26s timeout.
+// gemini-2.5-pro has mandatory thinking (can take 60s+) → times out.
+// gemini-2.5-flash with thinkingBudget:0 responds in ~5s.
+const SMART_MODEL = 'gemini-2.5-flash';
+const FAST_MODEL  = 'gemini-2.0-flash';
 
 // ── Current user (set once on auth, used for usage logging) ───
 let _currentUserId: string | null = null;
@@ -63,7 +64,14 @@ async function generateText(
   const response = await client.models.generateContent({
     model,
     contents: [{ role: 'user', parts }],
-    config:   { systemInstruction, maxOutputTokens, temperature: 0.1 },
+    config:   {
+      systemInstruction,
+      maxOutputTokens,
+      temperature: 0.1,
+      // Disable thinking tokens — keeps responses under Netlify's 26s edge-function limit.
+      // 2.5-pro has mandatory thinking (60s+); 2.5-flash has optional thinking.
+      thinkingConfig: { thinkingBudget: 0 },
+    },
   });
 
   const text = response.text ?? '';
