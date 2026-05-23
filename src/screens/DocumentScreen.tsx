@@ -581,7 +581,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
       hasReading={!!documentReading}
       hasCourse={!!courseMaterial}
-      hasText={!!content}
+      hasText={true}
       profile={profile}
       contentAudit={contentAudit}
       auditLoading={auditLoading}

@@ -1216,16 +1216,22 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`,
 export async function generateCourseMaterial(
   topic:       string,
   contentText: string | null,
-  _pdfBase64:  string | null,  // verbatim extraction requires text; PDF binary not re-sent
+  _pdfBase64:  string | null,
   contentMap:  ContentMap,
 ): Promise<DocumentReading> {
-  if (!contentText) {
-    throw new Error('Course Material requires document text. Please upload a text-based file (DOCX, TXT, etc.).');
-  }
-
   const client = getClient();
   const MAX_TOPICS = 7;
   const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
+
+  // Build a rich source from the content map summaries as fallback
+  const mapSource = contentMap.topics.map(t =>
+    `${t.title}: ${t.summary}\n` +
+    t.subtopics.map(s => `  - ${s.title}: ${s.summary}`).join('\n'),
+  ).join('\n\n');
+
+  // Prefer actual document text; fall back to structured map summaries
+  const sourceText = contentText ? contentText.slice(0, 8_000) : mapSource;
+  const isVerbatim = !!contentText;
 
   const topicResults = await Promise.all(
     cappedTopics.map(async (t): Promise<TopicReading | null> => {
@@ -1235,12 +1241,16 @@ export async function generateCourseMaterial(
 
       const subtopicList = t.subtopics.map(s => `• "${s.title}"`).join('\n');
 
-      const prompt = `You are an expert educational content organiser. Extract study content VERBATIM from the source document.
+      const contentInstruction = isVerbatim
+        ? `"content": Copy 3–5 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Use the EXACT words as written — do NOT paraphrase or alter any wording.`
+        : `"content": Write 3–5 clear, educational sentences explaining this subtopic based on the source material. Be factual and direct.`;
+
+      const prompt = `You are an expert educational content organiser. Create structured course notes.
 
 Overall subject: "${topic}"
-SOURCE CONTENT — extract verbatim passages from this text:
+SOURCE CONTENT:
 """
-${contentText.slice(0, 8_000)}
+${sourceText}
 """
 
 TOPIC CONTEXT (from content analysis):
@@ -1251,12 +1261,12 @@ SUBTOPICS TO COVER:
 ${subtopicList}
 
 For EACH subtopic above:
-1. "content": Copy 3–5 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Use the EXACT words as written — do NOT paraphrase, reorder, simplify, or alter any wording. Prioritise definitions, key explanations, and factual statements. If you cannot find a relevant passage, copy the closest matching text.
-2. "quiz": one comprehension question based on the exact passage shown — 3 plausible options, 0-based answer index, 1-sentence explanation.
+1. ${contentInstruction}
+2. "quiz": one comprehension question — 3 plausible options, 0-based answer index, 1-sentence explanation.
 
 Also:
-- "keyTerms": 3–5 key terms as they appear in the source, with definitions copied verbatim from the source where possible.
-- "whyItMatters": one sentence (you may write this) explaining this topic's significance.
+- "keyTerms": 3–5 key terms with definitions.
+- "whyItMatters": one sentence explaining this topic's significance.
 
 Rules: subtopic titles must match the outline exactly; quiz distractors must be plausible.
 
