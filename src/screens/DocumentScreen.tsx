@@ -506,9 +506,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     setPhase('read-loading');
     setError('');
     try {
+      // generateReading uses map context — PDF fetch is best-effort only.
       let resolvedPdf = pdfBase64;
       if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
-      if (fileType === 'PDF' && !resolvedPdf) throw new Error('Could not load PDF binary. Try re-uploading the file.');
       const wmScore = profile?.workingMemory.score ?? 60;
       const sentenceTarget = wmScore < 40 ? 2 : wmScore < 55 ? 3 : wmScore < 72 ? 4 : 5;
       const reading = await generateReading(topic, content, resolvedPdf, map, sentenceTarget);
