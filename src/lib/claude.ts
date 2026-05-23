@@ -662,25 +662,16 @@ Return ONLY valid JSON — no markdown fences:
 export async function generateReading(
   topic:          string,
   contentText:    string | null,
-  pdfBase64:      string | null,
+  _pdfBase64:     string | null,  // kept for API compatibility; not re-sent per-topic to avoid 7× data transfer
   contentMap:     ContentMap,
   sentenceTarget: number = 3,
   gapFill?:       string[],   // pass-2: concepts that must appear in the written content
 ): Promise<DocumentReading> {
   const client = getClient();
-  const hasPdf = !!pdfBase64;
 
-  // Cap topics to keep the response within token limits. Large content maps
-  // (8+ topics × 5 subtopics) exceed max_tokens: 8000 mid-string, which
-  // produces truncated JSON that repairJson cannot recover.
   const MAX_TOPICS = 7;
   const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
 
-  const mapOutline = cappedTopics.map(t =>
-    `- topicId: "${t.id}" | "${t.title}"\n${t.subtopics.map(s => `    • "${s.title}"`).join('\n')}`
-  ).join('\n');
-
-  // Keep sentences tight — high-WM users still get 4, not 4-5, to save tokens.
   const sentenceInstruction = sentenceTarget <= 2
     ? '2 concise sentences — one main idea, one supporting detail'
     : sentenceTarget <= 3
@@ -688,102 +679,105 @@ export async function generateReading(
       : '4 sentences — include elaboration and one concrete example';
 
   const gapBlock = gapFill?.length
-    ? `\n\nCRITICAL GAP-FILL REQUIREMENT:\nThe following concepts were identified as MISSING from an earlier draft. You MUST weave ALL of them explicitly into the appropriate subtopic content below:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
+    ? `\n\nCRITICAL GAP-FILL: The following concepts must be explicitly woven in where relevant:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
     : '';
 
-  const prompt = `You are an expert educational content writer. Write a structured study guide for each topic and subtopic listed below.
+  // Generate each topic in its own focused API call, all in parallel.
+  // A single call for 7 topics × 5 subtopics exceeds the model's ~8k output
+  // token limit and gets truncated — per-topic calls (max ~2500 tokens each)
+  // are reliable regardless of document size.
+  const topicResults = await Promise.all(
+    cappedTopics.map(async (t): Promise<TopicReading | null> => {
+      // Build per-topic source context.
+      // For text docs: include raw text (first 6k chars) + this topic's content-map summaries.
+      // For PDF-only docs: rely on the content-map summaries extracted during map generation.
+      const topicContext =
+        `Topic overview: ${t.title} — ${t.summary}\n` +
+        t.subtopics.map(s => `• ${s.title}: ${s.summary}`).join('\n');
 
-Topic: "${topic}"
-${sourceBlock(contentText, hasPdf)}${gapBlock}
+      const sourceCtx = contentText
+        ? `SOURCE CONTENT (use facts from this):\n"""\n${contentText.slice(0, 6_000)}\n"""\n\nTOPIC CONTEXT FROM CONTENT MAP:\n${topicContext}`
+        : `TOPIC CONTEXT (extracted from the source document):\n${topicContext}`;
 
-TOPICS AND SUBTOPICS TO COVER (use these exact topicId values):
-${mapOutline}
+      const subtopicList = t.subtopics.map(s => `• "${s.title}"`).join('\n');
 
-For EACH topic write:
-1. subtopics: for each subtopic listed above, write EXACTLY ${sentenceInstruction}. Use specific facts, figures, and named concepts from the source. Grade 9–10 reading level. Also generate one short quiz question testing the key idea of that subtopic — 3 answer options, exactly one correct, plus a 1-sentence explanation of the correct answer.
-2. keyTerms: 3–5 important terms from this topic with concise, accurate definitions (1–2 sentences each).
-3. whyItMatters: one sentence explaining why this topic matters in the broader context.
+      const prompt = `You are an expert educational content writer. Write study material for a single topic.
 
-Rules:
-- Ground everything in the source — no invented facts
-- Key terms must appear naturally in the subtopic content
-- The subtopic titles in your output must match the titles listed above exactly
-- Quiz distractors must be plausible — not obviously wrong
-- Quiz correctIndex is 0-based
+Overall subject: "${topic}"
+${sourceCtx}${gapBlock}
 
-Return ONLY valid JSON — no markdown fences:
+TOPIC (topicId: "${t.id}"): "${t.title}"
+SUBTOPICS TO COVER:
+${subtopicList}
+
+For EACH subtopic above write:
+1. "content": EXACTLY ${sentenceInstruction}. Grade 9–10 reading level. Use specific facts, figures, and named concepts.
+2. "quiz": one short comprehension question — 3 plausible options (exactly one correct), 0-based answer index, 1-sentence explanation.
+
+Also write:
+- "keyTerms": 3–5 key terms from this topic with 1–2 sentence definitions each.
+- "whyItMatters": one sentence on this topic's significance.
+
+Rules: ground all facts in the source; subtopic titles must match exactly; quiz distractors must be plausible.
+
+Return ONLY valid JSON — no markdown:
 {
-  "topics": [
+  "topicId": "${t.id}",
+  "title": "${t.title}",
+  "subtopics": [
     {
-      "topicId": "t1",
-      "title": "...",
-      "subtopics": [
-        {
-          "title": "Subtopic name from outline",
-          "content": "...",
-          "quiz": {
-            "question": "...",
-            "options": ["Option A", "Option B", "Option C"],
-            "answer": 0,
-            "explanation": "One sentence explaining why the correct answer is right."
-          }
-        }
-      ],
-      "keyTerms": [
-        { "term": "...", "definition": "..." },
-        { "term": "...", "definition": "..." },
-        { "term": "...", "definition": "..." }
-      ],
-      "whyItMatters": "..."
+      "title": "Subtopic name (must match outline)",
+      "content": "...",
+      "quiz": { "question": "...", "options": ["Option A", "Option B", "Option C"], "answer": 0, "explanation": "..." }
     }
-  ]
+  ],
+  "keyTerms": [{ "term": "...", "definition": "..." }],
+  "whyItMatters": "..."
 }`;
 
-  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
-  const userContent: MsgContent = pdfBase64
-    ? ([
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfBase64 } },
-        { type: 'text', text: prompt },
-      ] as MsgContent)
-    : prompt;
+      try {
+        const raw = await streamToText(client, {
+          model:      'claude-haiku-4-5-20251001',
+          max_tokens: 2500,  // per-topic; 5 subtopics × 4 sentences + quiz + terms ≈ 1700 tokens
+          system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+          messages:   [{ role: 'user', content: prompt }],
+        }, 'generateReading');
 
-  const raw = await streamToText(client, {
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 12000,  // raised from 8000 — large maps with 7 topics × 5 subs need ~9k tokens
-    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    messages:   [{ role: 'user', content: userContent }],
-  }, 'generateReading');
+        const start = raw.indexOf('{');
+        const end   = raw.lastIndexOf('}');
+        if (start === -1 || end === -1) {
+          console.error(`[generateReading] topic "${t.title}" — no JSON in response`);
+          return null;
+        }
 
-  const start = raw.indexOf('{');
-  const end   = raw.lastIndexOf('}');
-  if (start === -1 || end === -1) {
-    console.error('[generateReading] No JSON found in response. Raw (first 500):', raw.slice(0, 500));
-    throw new Error('Reading generation returned an empty response. Please retry.');
-  }
+        let parsed: TopicReading;
+        try {
+          parsed = JSON.parse(raw.slice(start, end + 1));
+        } catch {
+          try {
+            parsed = JSON.parse(repairJson(raw.slice(start)));
+          } catch {
+            console.error(`[generateReading] topic "${t.title}" — JSON parse failed. Tail:`, raw.slice(-200));
+            return null;
+          }
+        }
 
-  let parsed: DocumentReading;
-  try {
-    parsed = JSON.parse(raw.slice(start, end + 1));
-  } catch (e1) {
-    try {
-      parsed = JSON.parse(repairJson(raw.slice(start)));
-    } catch (e2) {
-      console.error('[generateReading] JSON parse failed. Raw tail (last 300):', raw.slice(-300));
-      console.error('Parse error:', e1);
-      throw new Error('Reading generation produced malformed JSON. Please retry.');
-    }
-  }
+        if (!Array.isArray(parsed.subtopics) || parsed.subtopics.length === 0) {
+          console.error(`[generateReading] topic "${t.title}" — no subtopics in response`);
+          return null;
+        }
 
-  if (!Array.isArray(parsed.topics) || parsed.topics.length === 0) {
-    console.error('[generateReading] topics missing or empty. parsed:', JSON.stringify(parsed).slice(0, 200));
-    throw new Error('Reading generation returned no topics. Please retry.');
-  }
+        return { ...parsed, topicId: t.id, title: t.title };
+      } catch (e) {
+        console.error(`[generateReading] topic "${t.title}" error:`, e);
+        return null;
+      }
+    })
+  );
 
-  // Strip out any topics that have no subtopics (can happen on truncation edge cases)
-  parsed.topics = parsed.topics.filter(t => Array.isArray(t.subtopics) && t.subtopics.length > 0);
-  if (parsed.topics.length === 0) throw new Error('No valid topic content was generated. Please retry.');
-
-  return parsed;
+  const topics = topicResults.filter((t): t is TopicReading => t !== null && Array.isArray(t.subtopics) && t.subtopics.length > 0);
+  if (topics.length === 0) throw new Error('Failed to generate reading material. Please retry.');
+  return { topics };
 }
 
 // ── Visual learning components ────────────────────────────────
