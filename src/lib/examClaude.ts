@@ -1,6 +1,9 @@
-import Anthropic from '@anthropic-ai/sdk';
-import { getApiKey } from './gemini';
+import { GoogleGenAI } from '@google/genai';
 import { dbLogUsage } from './supabase';
+
+// ── Model ──────────────────────────────────────────────────────
+// Use Flash for exam tasks — stays well within Netlify's 26s timeout.
+const EXAM_MODEL = 'gemini-2.5-flash';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -49,38 +52,55 @@ export interface ExamResults {
 
 // ── Client ─────────────────────────────────────────────────────
 
-function createClient(): Anthropic {
-  const apiKey = getApiKey();
+function getClient(): GoogleGenAI {
   const USE_PROXY = import.meta.env.VITE_USE_PROXY === 'true';
-  if (apiKey) return new Anthropic({ apiKey, dangerouslyAllowBrowser: true });
-  if (USE_PROXY) return new Anthropic({
-    apiKey:  'via-proxy',
-    baseURL: `${window.location.origin}/api`,
-    dangerouslyAllowBrowser: true,
-  });
-  throw new Error('NO_API_KEY');
+  if (USE_PROXY) {
+    return new GoogleGenAI({
+      apiKey:      'via-proxy',
+      httpOptions: { baseUrl: `${window.location.origin}/api/gemini` },
+    });
+  }
+  const apiKey =
+    (import.meta.env.VITE_GEMINI_API_KEY as string) ||
+    localStorage.getItem('sprout:geminiKey') ||
+    '';
+  if (!apiKey) throw new Error('NO_API_KEY');
+  return new GoogleGenAI({ apiKey });
 }
 
-// ── Streaming helper ────────────────────────────────────────────
+// ── Core helper ─────────────────────────────────────────────────
 
-async function streamToText(
-  client:  Anthropic,
-  params:  Parameters<typeof client.messages.create>[0],
-  fnName:  string,
-  userId:  string | null = null,
+type Part = { text: string } | { inlineData: { data: string; mimeType: string } };
+
+async function generateText(
+  parts:          Part[],
+  systemPrompt:   string,
+  maxTokens:      number,
+  fnName:         string,
+  userId:         string | null = null,
 ): Promise<string> {
-  let text         = '';
-  let inputTokens  = 0;
-  let outputTokens = 0;
+  const client = getClient();
 
-  const stream = await client.messages.create({ ...params, stream: true });
-  for await (const event of stream) {
-    if (event.type === 'message_start')                                               inputTokens  = event.message.usage.input_tokens;
-    else if (event.type === 'message_delta' && event.usage)                           outputTokens = event.usage.output_tokens;
-    else if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') text       += event.delta.text;
-  }
+  const response = await client.models.generateContent({
+    model:    EXAM_MODEL,
+    contents: [{ role: 'user', parts }],
+    config:   {
+      systemInstruction: systemPrompt,
+      maxOutputTokens:   maxTokens,
+      temperature:       0.1,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
 
-  void dbLogUsage(userId, fnName, params.model as string, inputTokens, outputTokens);
+  const text = response.text ?? '';
+
+  const usage = response.usageMetadata;
+  void dbLogUsage(
+    userId, fnName, EXAM_MODEL,
+    usage?.promptTokenCount     ?? 0,
+    usage?.candidatesTokenCount ?? 0,
+  );
+
   return text;
 }
 
@@ -104,19 +124,11 @@ export async function analyzeAndGenerateExam(
 ): Promise<GeneratedExam> {
   onProgress?.('Analysing your past exam papers…');
 
-  const client = createClient();
-
-  type MsgContent = Parameters<typeof client.messages.create>[0]['messages'][0]['content'];
-
-  const pdfBlocks = pdfBase64Array.map((b64, i) => ({
-    type:   'document' as const,
-    source: { type: 'base64' as const, media_type: 'application/pdf' as const, data: b64 },
-    title:  `Past Exam Paper ${i + 1}`,
+  const pdfParts: Part[] = pdfBase64Array.map(b64 => ({
+    inlineData: { data: b64, mimeType: 'application/pdf' },
   }));
 
-  const prompt = `You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer.
-
-I am providing ${pdfBase64Array.length} past exam papers. Analyse them carefully, then generate a completely NEW practice exam that:
+  const prompt = `I am providing ${pdfBase64Array.length} past exam papers. Analyse them carefully, then generate a completely NEW practice exam that:
 - Matches the exact style, structure, and format of these papers
 - Tests the same curriculum topics at the same difficulty and cognitive level
 - Has proportionally similar mark allocation, question types, and difficulty spread
@@ -168,7 +180,7 @@ Return ONLY valid JSON — no markdown fences, no explanation:
       "topic": "Topic name",
       "marks": 6,
       "stem": "Calculate the value of Z given that… Show all working.",
-      "modelAnswer": "Step 1: ...\nStep 2: ...\nAnswer: 42 units",
+      "modelAnswer": "Step 1: ...\\nStep 2: ...\\nAnswer: 42 units",
       "markingGuidance": "2 marks method, 2 marks substitution, 1 mark calculation, 1 mark units."
     }
   ]
@@ -184,18 +196,13 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
 
   onProgress?.('Generating your personalised practice exam…');
 
-  const raw = await streamToText(client, {
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 12000,
-    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    messages: [{
-      role:    'user',
-      content: [
-        ...(pdfBlocks as unknown as NonNullable<MsgContent>[]),
-        { type: 'text' as const, text: prompt },
-      ] as MsgContent,
-    }],
-  }, 'analyzeAndGenerateExam', userId ?? null);
+  const raw = await generateText(
+    [...pdfParts, { text: prompt }],
+    'You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer. Output only valid JSON — no markdown, no extra text.',
+    12000,
+    'analyzeAndGenerateExam',
+    userId ?? null,
+  );
 
   onProgress?.('Finalising exam…');
 
@@ -210,17 +217,16 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
     throw new Error('Failed to generate exam questions. Please retry.');
   }
 
-  // Ensure every question has required fields
   exam.questions = exam.questions.map((q, i) => ({
-    id:     q.id    ?? `q${i + 1}`,
-    number: q.number ?? String(i + 1),
-    type:   (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
-    topic:  q.topic ?? 'General',
-    marks:  typeof q.marks === 'number' ? q.marks : 2,
-    stem:   q.stem  ?? '',
-    context: q.context,
-    options: q.options,
-    modelAnswer:    q.modelAnswer    ?? '',
+    id:              q.id     ?? `q${i + 1}`,
+    number:          q.number ?? String(i + 1),
+    type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
+    topic:           q.topic  ?? 'General',
+    marks:           typeof q.marks === 'number' ? q.marks : 2,
+    stem:            q.stem   ?? '',
+    context:         q.context,
+    options:         q.options,
+    modelAnswer:     q.modelAnswer    ?? '',
     markingGuidance: q.markingGuidance,
   }));
 
@@ -233,9 +239,6 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
  * Generates a brand-new practice exam covering the same curriculum topics
  * as `sourceExam` but with completely different question stems, numbers,
  * scenarios, and stimulus material.
- *
- * Optionally pass `previousExams` (earlier variants) so Claude can avoid
- * repeating questions the student has already seen.
  */
 export async function generateExamVariant(
   sourceExam:    GeneratedExam,
@@ -245,14 +248,10 @@ export async function generateExamVariant(
 ): Promise<GeneratedExam> {
   onProgress?.('Generating a new exam variant…');
 
-  const client = createClient();
-
-  // Summarise the source exam's topics so Claude knows what curriculum to cover
   const topicRows = sourceExam.questions
     .map(q => `  Q${q.number} [${q.type}, ${q.marks}m, ${q.topic}]: ${q.stem.slice(0, 90)}`)
     .join('\n');
 
-  // Build an "already used" block from all previous variants
   const seenBlock = previousExams.length
     ? `\nPREVIOUS VARIANT QUESTIONS (do NOT reuse these stems or scenarios):\n` +
       previousExams.flatMap(e => e.questions).map(q =>
@@ -260,11 +259,9 @@ export async function generateExamVariant(
       ).join('\n')
     : '';
 
-  const variantNum = previousExams.length + 2; // source = 1, this = 2, 3, …
+  const variantNum = previousExams.length + 2;
 
-  const prompt = `You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer.
-
-I need Variant ${variantNum} of a ${sourceExam.subject} (${sourceExam.grade}) practice exam.
+  const prompt = `I need Variant ${variantNum} of a ${sourceExam.subject} (${sourceExam.grade}) practice exam.
 
 SOURCE EXAM STRUCTURE (replicate topics & mark distribution — NOT the questions):
 ${topicRows}
@@ -298,12 +295,13 @@ IMPORTANT: Sum of all question marks must equal ${sourceExam.totalMarks}.`;
 
   onProgress?.('Building variant questions…');
 
-  const raw = await streamToText(client, {
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 12000,
-    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    messages:   [{ role: 'user', content: prompt }],
-  }, 'generateExamVariant', userId ?? null);
+  const raw = await generateText(
+    [{ text: prompt }],
+    'You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer. Output only valid JSON — no markdown, no extra text.',
+    12000,
+    'generateExamVariant',
+    userId ?? null,
+  );
 
   onProgress?.('Finalising variant…');
 
@@ -337,7 +335,7 @@ IMPORTANT: Sum of all question marks must equal ${sourceExam.totalMarks}.`;
 // ── Marking ─────────────────────────────────────────────────────
 
 /**
- * Sends the completed exam + student answers to Claude for marking.
+ * Sends the completed exam + student answers to Gemini for marking.
  * Returns per-question scores, feedback, and an overall grade.
  */
 export async function markExamSubmission(
@@ -347,8 +345,6 @@ export async function markExamSubmission(
   userId?: string | null,
 ): Promise<ExamResults> {
   onProgress?.('Marking your answers…');
-
-  const client = createClient();
 
   const answerData = exam.questions.map(q => ({
     id:              q.id,
@@ -361,7 +357,7 @@ export async function markExamSubmission(
     studentAnswer:   answers[q.id] ?? '(no answer provided)',
   }));
 
-  const prompt = `You are an expert NSC marker. Mark these student answers strictly and fairly according to NSC marking guidelines.
+  const prompt = `Mark these student answers strictly and fairly according to NSC marking guidelines.
 
 EXAM: ${exam.subject} — ${exam.grade}
 TOTAL MARKS AVAILABLE: ${exam.totalMarks}
@@ -391,7 +387,7 @@ Return ONLY valid JSON — no markdown:
       "awarded": 2,
       "total": 2,
       "percentage": 100,
-      "feedback": "Correct! Great work. / specific constructive 1-2 sentence feedback",
+      "feedback": "Correct! / specific constructive 1-2 sentence feedback",
       "modelAnswer": "the correct answer / full worked solution"
     }
   ],
@@ -400,12 +396,13 @@ Return ONLY valid JSON — no markdown:
 
   onProgress?.('Calculating your results…');
 
-  const raw = await streamToText(client, {
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: 8000,
-    system:     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    messages:   [{ role: 'user', content: prompt }],
-  }, 'markExamSubmission', userId ?? null);
+  const raw = await generateText(
+    [{ text: prompt }],
+    'You are an expert NSC marker. Output only valid JSON — no markdown, no extra text.',
+    8000,
+    'markExamSubmission',
+    userId ?? null,
+  );
 
   let results: ExamResults;
   try {
@@ -418,7 +415,6 @@ Return ONLY valid JSON — no markdown:
     throw new Error('Invalid marking response. Please retry.');
   }
 
-  // Clamp values and fill gaps
   results.totalAwarded = Math.min(results.totalAwarded ?? 0, exam.totalMarks);
   results.percentage   = results.percentage ?? Math.round((results.totalAwarded / exam.totalMarks) * 1000) / 10;
   results.letterGrade  = results.letterGrade ?? gradeFromPct(results.percentage);
