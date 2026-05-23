@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { getApiKey } from './claude';
+import { getApiKey } from './gemini';
 import { dbLogUsage } from './supabase';
 
 // ── Types ──────────────────────────────────────────────────────

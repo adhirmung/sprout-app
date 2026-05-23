@@ -1,4 +1,4 @@
-import type { TimelineData } from '../lib/claude';
+import type { TimelineData } from '../lib/gemini';
 
 const COLORS = ['#aa3bff', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 
@@ -67,7 +67,7 @@ export function VisualTimeline({ data }: { data: TimelineData }) {
                   fontSize: 10, fontWeight: 800, color,
                   textTransform: 'uppercase', letterSpacing: '0.6px', marginBottom: 3,
                 }}>
-                  {ev.date}
+                  {ev.year}
                 </div>
                 <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-h)', marginBottom: 3, lineHeight: 1.3 }}>
                   {ev.title}

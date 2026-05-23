@@ -1,6 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import type { LearnerProfile, LibraryTree } from './types';
-import type { ChatMessage, FeedResult } from './claude';
+import type { ChatMessage, FeedResult } from './gemini';
 
 const SUPABASE_URL  = 'https://nocguvewcpbdasoinztk.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5vY2d1dmV3Y3BiZGFzb2luenRrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg1MzY4OTAsImV4cCI6MjA5NDExMjg5MH0.rDRX1WGTaNjlDwoWJCcJwbKP35WUsIyRuqXpCHBV4yg';
@@ -212,7 +212,7 @@ export async function dbSaveLibrary(userId: string, tree: LibraryTree): Promise<
 
 /**
  * Fire-and-forget insert into api_usage.
- * Called from claude.ts after every streamed response — never throws.
+ * Called from gemini.ts after every generation — never throws.
  */
 export async function dbLogUsage(
   userId:       string | null,

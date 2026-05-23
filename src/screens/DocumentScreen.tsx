@@ -26,8 +26,8 @@ import {
   hasApiKey,
   saveApiKey,
   streamCardChat,
-} from '../lib/claude';
-import type { ChatMessage, ContentAudit, ContentMap, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/claude';
+} from '../lib/gemini';
+import type { ChatMessage, ContentAudit, ContentMap, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -2170,7 +2170,7 @@ function PracticeView({
               {evaluating && (
                 <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-3)', fontSize: 13 }}>
                   <div style={{ width: 16, height: 16, borderRadius: '50%', border: '2.5px solid var(--brand)', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-                  Claude is reading your answer…
+                  Reviewing your answer…
                 </div>
               )}
             </div>
@@ -3893,21 +3893,21 @@ function ApiKeyGate({ onSave }: { onSave: () => void }) {
       <div style={{ width: '100%', maxWidth: 360, display: 'flex', flexDirection: 'column', gap: 16 }}>
         <div style={{ fontSize: 40, textAlign: 'center' }}>🔑</div>
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Connect Claude API</div>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 6 }}>Connect Gemini API</div>
           <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6 }}>
-            Sprout uses Claude to power AI features. Add your Anthropic API key to get started.
+            Sprout uses Gemini to power AI features. Add your Google AI API key to get started.
           </div>
         </div>
         <input className="input" value={key} onChange={e => setKey(e.target.value)}
-          placeholder="sk-ant-api03-…"
+          placeholder="AIza…"
           style={{ textAlign: 'center', fontFamily: 'var(--font-mono)', fontSize: 12 }}
-          aria-label="Anthropic API key" />
-        <button className="btn btn-primary btn-block" disabled={!key.startsWith('sk-')}
+          aria-label="Google AI API key" />
+        <button className="btn btn-primary btn-block" disabled={!key.startsWith('AIza')}
           onClick={() => { saveApiKey(key.trim()); onSave(); }}>
           Save key
         </button>
         <p style={{ fontSize: 11, color: 'var(--ink-3)', textAlign: 'center', lineHeight: 1.6, margin: 0 }}>
-          Get a key at <span style={{ fontFamily: 'var(--font-mono)' }}>console.anthropic.com</span>. Stored locally only.
+          Get a free key at <span style={{ fontFamily: 'var(--font-mono)' }}>aistudio.google.com</span>. Stored locally only.
         </p>
       </div>
     </div>

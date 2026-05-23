@@ -1,4 +1,4 @@
-import type { DiagramData } from '../lib/claude';
+import type { DiagramData } from '../lib/gemini';
 
 const NODE_STYLE: Record<string, { bg: string; border: string; color: string }> = {
   start:    { bg: '#ECFDF5', border: '#10B981', color: '#065f46' },

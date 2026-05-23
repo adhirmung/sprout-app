@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef } from 'react';
 import p5 from 'p5';
-import type { SimulationPayload } from '../lib/claude';
+import type { SimulationPayload } from '../lib/gemini';
 
 interface Props { payload: SimulationPayload }
 

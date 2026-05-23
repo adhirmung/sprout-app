@@ -1,4 +1,4 @@
-import type { ProcessData } from '../lib/claude';
+import type { ProcessData } from '../lib/gemini';
 
 const COLORS = ['#aa3bff', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
 

@@ -2,7 +2,7 @@ import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
-import type { ChartData } from '../lib/claude';
+import type { ChartData } from '../lib/gemini';
 
 const PALETTE = [
   '#aa3bff', '#3b82f6', '#10b981', '#f59e0b',
