@@ -14,13 +14,22 @@ export function setCurrentUserId(id: string | null): void { _currentUserId = id;
 
 // ── API key helpers ───────────────────────────────────────────
 
+const USE_PROXY = import.meta.env.VITE_USE_PROXY === 'true';
+
 export function getApiKey(): string {
   return (import.meta.env.VITE_GEMINI_API_KEY as string) || localStorage.getItem('sprout:geminiKey') || '';
 }
-export function hasApiKey(): boolean { return !!getApiKey(); }
+export function hasApiKey(): boolean { return !!getApiKey() || USE_PROXY; }
 export function saveApiKey(key: string) { localStorage.setItem('sprout:geminiKey', key); }
 
 function getClient(): GoogleGenAI {
+  if (USE_PROXY) {
+    // Key lives server-side in Netlify env — never in the browser bundle
+    return new GoogleGenAI({
+      apiKey:      'via-proxy',
+      httpOptions: { baseUrl: `${window.location.origin}/api/gemini` },
+    });
+  }
   const apiKey = getApiKey();
   if (!apiKey) throw new Error('NO_API_KEY');
   return new GoogleGenAI({ apiKey });

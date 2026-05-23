@@ -4,14 +4,19 @@
 
 [build.environment]
   NODE_VERSION   = "20"
-  VITE_USE_PROXY = "true"   # tells the SPA to route Claude calls through /api
+  VITE_USE_PROXY = "true"   # tells the SPA to route Gemini calls through /api/gemini
 
 [functions]
   directory = "netlify/functions"
 
-# ── Anthropic proxy ───────────────────────────────────────────
+# ── Gemini proxy ──────────────────────────────────────────────
 # Runs as an Edge Function (Deno) so SSE streams are never buffered.
-# ANTHROPIC_API_KEY must be set in Netlify UI > Environment variables (server-side only).
+# GEMINI_API_KEY must be set in Netlify UI > Environment variables (server-side only).
+[[edge_functions]]
+  path     = "/api/gemini/*"
+  function = "gemini-proxy"
+
+# ── Anthropic proxy (legacy — kept for reference) ─────────────
 [[edge_functions]]
   path     = "/api/v1/messages"
   function = "anthropic-proxy"
