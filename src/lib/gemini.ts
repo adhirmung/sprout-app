@@ -5,8 +5,8 @@ import { dbLogUsage } from './supabase';
 // ── Model config ──────────────────────────────────────────────
 // Smart  → complex structured tasks (map, reading, notes, audit)
 // Fast   → high-volume or conversational tasks (cards, quiz, chat)
-const SMART_MODEL = 'gemini-2.5-pro-preview-05-06';
-const FAST_MODEL  = 'gemini-2.5-flash-preview-05-20';
+const SMART_MODEL = 'gemini-1.5-pro-latest';
+const FAST_MODEL  = 'gemini-2.0-flash';
 
 // ── Current user (set once on auth, used for usage logging) ───
 let _currentUserId: string | null = null;
