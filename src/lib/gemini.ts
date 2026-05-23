@@ -963,6 +963,13 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`)],
 }
 
 // ── Course Material generator ─────────────────────────────────
+// Notes = verbatim content from the original document, reorganised by topic.
+// Students use Notes to study the actual source material (not an AI summary).
+// Map + Read provide the AI-interpreted versions.
+//
+// IMPORTANT: All topics are generated in ONE API call so the PDF is only sent
+// once through the Netlify edge function. Sending 7 parallel calls each with
+// the full PDF binary caused all 7 to hit the 26s edge-function timeout.
 
 export async function generateCourseMaterial(
   topic:       string,
@@ -973,89 +980,98 @@ export async function generateCourseMaterial(
   const MAX_TOPICS = 7;
   const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
 
-  // Notes = verbatim content from the original document, reorganised by topic.
-  // Students use Notes to study the actual source material (not an AI summary).
-  // Map + Read provide the AI-interpreted versions.
   const hasPdf  = !!pdfBase64;
   const hasText = !!contentText;
 
   // For text documents: send the full content (up to 60 000 chars — ~40 pages).
-  // Previously capped at 8 000 which cut off most real documents.
   const fullText = contentText?.slice(0, 60_000) ?? '';
 
-  const topicResults = await Promise.all(
-    cappedTopics.map(async (t): Promise<TopicReading | null> => {
-      const topicContext =
-        `Topic: ${t.title}\nOverview: ${t.summary}\n` +
-        t.subtopics.map(s => `• ${s.title}: ${s.summary}`).join('\n');
+  // Build a single outline for all topics so one prompt covers everything
+  const topicsOutline = cappedTopics.map((t, i) =>
+    `Topic ${i + 1} (topicId: "${t.id}", title: "${t.title}"):
+Overview: ${t.summary}
+Subtopics:
+${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}`
+  ).join('\n\n');
 
-      const subtopicList = t.subtopics.map(s => `• "${s.title}"`).join('\n');
+  const contentInstruction = hasPdf || hasText
+    ? `For each subtopic "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the ${hasPdf ? 'PDF document above' : 'SOURCE CONTENT above'} that directly explain this subtopic. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise.`
+    : `For each subtopic "content": write 3–5 clear sentences explaining the subtopic based on the topic analysis.`;
 
-      // Verbatim instruction — differ only in source label
-      const contentInstruction = hasPdf || hasText
-        ? `"content": Find and copy 3–6 CONSECUTIVE sentences VERBATIM from the ${hasPdf ? 'PDF document' : 'SOURCE CONTENT'} above that directly explain this subtopic. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise.`
-        : `"content": Write 3–5 clear sentences explaining this subtopic based on the topic analysis below.`;
+  const sourceSection = hasText
+    ? `SOURCE CONTENT (verbatim from the uploaded document):\n"""\n${fullText}\n"""\n\n`
+    : '';
 
-      const sourceBlock = hasText
-        ? `SOURCE CONTENT (verbatim from the uploaded document):\n"""\n${fullText}\n"""\n\n`
-        : '';
-
-      const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
+  const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
 
 SUBJECT: "${topic}"
-${sourceBlock}TOPIC CONTEXT (from content map analysis):
-${topicContext}
+${sourceSection}TOPIC OUTLINE (${cappedTopics.length} topics to process):
+${topicsOutline}
 
-TOPIC (topicId: "${t.id}"): "${t.title}"
-SUBTOPICS TO COVER:
-${subtopicList}
+INSTRUCTIONS:
+${contentInstruction}
 
-For EACH subtopic above:
-1. ${contentInstruction}
-2. "quiz": one comprehension question testing recall of the actual document content — 3 plausible options, 0-based answer index, 1-sentence explanation.
+For EVERY topic in the outline, and EVERY subtopic within it, produce:
+1. "content": verbatim sentences from the document (see instruction above).
+2. "quiz": one comprehension question — exactly 3 plausible options, 0-based answer index, 1-sentence explanation.
 
-Also:
-- "keyTerms": 3–5 key terms WITH their definitions as they appear in the document.
-- "whyItMatters": one sentence on why this topic matters (can be your own words).
+Also for each topic:
+- "keyTerms": 3–5 key terms with definitions as they appear in the document.
+- "whyItMatters": one sentence on why this topic matters.
 
-Rules: subtopic titles must match the outline exactly; content must come from the document, not invented; quiz distractors must be plausible.
+Rules:
+- Process ALL ${cappedTopics.length} topics — do not skip any.
+- Subtopic titles must match the outline EXACTLY.
+- Content must come from the document, not be invented.
+- Quiz distractors must be plausible, not obviously wrong.
 
-Return ONLY valid JSON — no markdown:
+Return ONLY valid JSON — no markdown fences:
 {
-  "topicId": "${t.id}",
-  "title": "${t.title}",
-  "subtopics": [
-    { "title": "Subtopic name (must match outline)", "content": "...", "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." } }
-  ],
-  "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "..."
+  "topics": [
+    {
+      "topicId": "t1",
+      "title": "Topic Title",
+      "subtopics": [
+        {
+          "title": "Subtopic name (must match outline exactly)",
+          "content": "...",
+          "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
+        }
+      ],
+      "keyTerms": [{ "term": "...", "definition": "..." }],
+      "whyItMatters": "..."
+    }
+  ]
 }`;
 
-      // Include the PDF if available so Gemini can extract verbatim text from it.
-      // For text documents the full text is already embedded in the prompt above.
-      const parts: Part[] = hasPdf
-        ? [pdfPart(pdfBase64!), textPart(prompt)]
-        : [textPart(prompt)];
+  // Send the PDF exactly once (not once per topic like the old parallel approach)
+  const parts: Part[] = hasPdf
+    ? [pdfPart(pdfBase64!), textPart(prompt)]
+    : [textPart(prompt)];
 
-      try {
-        const raw = await generateText(
-          SMART_MODEL,
-          'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-          parts,
-          4000,
-          'generateCourseMaterial',
-        );
-        const parsed = parseJson<TopicReading>(raw);
-        if (!Array.isArray(parsed.subtopics) || parsed.subtopics.length === 0) return null;
-        return { ...parsed, topicId: t.id, title: t.title };
-      } catch (e) {
-        console.error(`[generateCourseMaterial] topic "${t.title}" error:`, e);
-        return null;
-      }
-    })
+  const raw = await generateText(
+    SMART_MODEL,
+    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    parts,
+    16000,  // 7 topics × ~1500 tokens each + overhead
+    'generateCourseMaterial',
   );
 
-  const topics = topicResults.filter((t): t is TopicReading => t !== null && Array.isArray(t.subtopics) && t.subtopics.length > 0);
+  const parsed = parseJson<{ topics: TopicReading[] }>(raw);
+  if (!Array.isArray(parsed.topics) || parsed.topics.length === 0) {
+    throw new Error('Failed to generate course material. Please retry.');
+  }
+
+  // Enforce topicId and title from the content map (AI may drift on IDs)
+  const topics = parsed.topics
+    .map((tr, i) => {
+      const source = cappedTopics[i];
+      if (!source) return null;
+      if (!Array.isArray(tr.subtopics) || tr.subtopics.length === 0) return null;
+      return { ...tr, topicId: source.id, title: source.title } as TopicReading;
+    })
+    .filter((t): t is TopicReading => t !== null);
+
   if (topics.length === 0) throw new Error('Failed to generate course material. Please retry.');
   return { topics };
 }
