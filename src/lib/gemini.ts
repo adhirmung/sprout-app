@@ -965,21 +965,23 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`)],
 // ── Course Material generator ─────────────────────────────────
 
 export async function generateCourseMaterial(
-  topic:      string,
-  _unused1:   string | null,
-  _unused2:   string | null,
-  contentMap: ContentMap,
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+  contentMap:  ContentMap,
 ): Promise<DocumentReading> {
   const MAX_TOPICS = 7;
   const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
 
-  // Full map context — the map already read the complete document (all pages,
-  // all sections). Using it as the source ensures notes are comprehensive
-  // and consistent regardless of file type (PDF, DOCX, TXT).
-  const fullMapContext = contentMap.topics.map(t =>
-    `## ${t.title}\n${t.summary}\n` +
-    t.subtopics.map(s => `  • ${s.title}: ${s.summary}`).join('\n'),
-  ).join('\n\n');
+  // Notes = verbatim content from the original document, reorganised by topic.
+  // Students use Notes to study the actual source material (not an AI summary).
+  // Map + Read provide the AI-interpreted versions.
+  const hasPdf  = !!pdfBase64;
+  const hasText = !!contentText;
+
+  // For text documents: send the full content (up to 60 000 chars — ~40 pages).
+  // Previously capped at 8 000 which cut off most real documents.
+  const fullText = contentText?.slice(0, 60_000) ?? '';
 
   const topicResults = await Promise.all(
     cappedTopics.map(async (t): Promise<TopicReading | null> => {
@@ -989,29 +991,34 @@ export async function generateCourseMaterial(
 
       const subtopicList = t.subtopics.map(s => `• "${s.title}"`).join('\n');
 
-      const prompt = `You are an expert educational content writer. Create clear, student-friendly course notes.
+      // Verbatim instruction — differ only in source label
+      const contentInstruction = hasPdf || hasText
+        ? `"content": Find and copy 3–6 CONSECUTIVE sentences VERBATIM from the ${hasPdf ? 'PDF document' : 'SOURCE CONTENT'} above that directly explain this subtopic. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise.`
+        : `"content": Write 3–5 clear sentences explaining this subtopic based on the topic analysis below.`;
+
+      const sourceBlock = hasText
+        ? `SOURCE CONTENT (verbatim from the uploaded document):\n"""\n${fullText}\n"""\n\n`
+        : '';
+
+      const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
 
 SUBJECT: "${topic}"
-
-FULL DOCUMENT OVERVIEW (all topics the document covers):
-${fullMapContext}
-
-YOUR TASK — write notes for this specific topic:
-TOPIC (topicId: "${t.id}"): "${t.title}"
+${sourceBlock}TOPIC CONTEXT (from content map analysis):
 ${topicContext}
 
+TOPIC (topicId: "${t.id}"): "${t.title}"
 SUBTOPICS TO COVER:
 ${subtopicList}
 
-For EACH subtopic:
-1. "content": Write 3–5 sentences that EXPLAIN and SUMMARISE the subtopic in plain language a student can understand. Expand on the key ideas, give context, and highlight what's important to know. Do NOT copy verbatim from any source — synthesise and explain.
-2. "quiz": one comprehension question — 3 plausible options, 0-based answer index, 1-sentence explanation.
+For EACH subtopic above:
+1. ${contentInstruction}
+2. "quiz": one comprehension question testing recall of the actual document content — 3 plausible options, 0-based answer index, 1-sentence explanation.
 
-Also provide:
-- "keyTerms": 3–5 key terms with clear definitions.
-- "whyItMatters": one sentence explaining why this topic is important.
+Also:
+- "keyTerms": 3–5 key terms WITH their definitions as they appear in the document.
+- "whyItMatters": one sentence on why this topic matters (can be your own words).
 
-Rules: subtopic titles must match the outline exactly; quiz distractors must be plausible; content must be educational summaries, never raw copied text.
+Rules: subtopic titles must match the outline exactly; content must come from the document, not invented; quiz distractors must be plausible.
 
 Return ONLY valid JSON — no markdown:
 {
@@ -1024,11 +1031,17 @@ Return ONLY valid JSON — no markdown:
   "whyItMatters": "..."
 }`;
 
+      // Include the PDF if available so Gemini can extract verbatim text from it.
+      // For text documents the full text is already embedded in the prompt above.
+      const parts: Part[] = hasPdf
+        ? [pdfPart(pdfBase64!), textPart(prompt)]
+        : [textPart(prompt)];
+
       try {
         const raw = await generateText(
           SMART_MODEL,
           'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-          [textPart(prompt)],
+          parts,
           4000,
           'generateCourseMaterial',
         );
