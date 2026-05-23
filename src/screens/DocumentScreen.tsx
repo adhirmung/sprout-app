@@ -1706,7 +1706,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, 
           <div style={{ flex: 1, height: 2.5, background: hasCourse ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
 
           {/* Step 2 — Notes/Course Material (clickable) */}
-          <button onClick={onCourseMaterial} title={!hasText ? 'Requires text document' : undefined} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: hasText ? 'pointer' : 'not-allowed', padding: '0 4px', opacity: hasText ? 1 : 0.45 }}>
+          <button onClick={hasText ? onCourseMaterial : undefined} disabled={!hasText} title={!hasText ? 'Requires text document (DOCX, TXT)' : 'View course material'} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: hasText ? 'pointer' : 'not-allowed', padding: '0 4px', opacity: hasText ? 1 : 0.45 }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasCourse ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasCourse ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: hasCourse ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: hasCourse ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>
               {hasCourse ? '✓' : '2'}
             </div>

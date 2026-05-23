@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import mammoth from 'mammoth';
 import { Icon } from '../components/Icon';
 import { Modal } from '../components/Modal';
 import { EmptyState } from '../components/EmptyState';
@@ -151,6 +152,22 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
 
           setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null, pdfBase64, storagePath } });
           toast(`PDF uploaded ✓ (~${estPages} page${estPages !== 1 ? 's' : ''} — Claude reads it natively)`, 'success');
+          setShowUpload(false);
+        });
+      } else if (fileType === 'DOCX' || fileType === 'DOC') {
+        // Extract text from Word documents using mammoth
+        toast('Reading document…', 'success');
+        file.arrayBuffer().then(async buf => {
+          try {
+            const result = await mammoth.extractRawText({ arrayBuffer: buf });
+            const content = result.value.trim() || null;
+            setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content } });
+            toast('Document uploaded ✓', 'success');
+          } catch {
+            // If extraction fails, still save the file without content
+            setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null } });
+            toast('Uploaded (text extraction failed — map only)', 'error');
+          }
           setShowUpload(false);
         });
       } else {
