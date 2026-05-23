@@ -965,58 +965,53 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`)],
 // ── Course Material generator ─────────────────────────────────
 
 export async function generateCourseMaterial(
-  topic:       string,
-  contentText: string | null,
-  _pdfBase64:  string | null,
-  contentMap:  ContentMap,
+  topic:      string,
+  _unused1:   string | null,
+  _unused2:   string | null,
+  contentMap: ContentMap,
 ): Promise<DocumentReading> {
   const MAX_TOPICS = 7;
   const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
 
-  const mapSource = contentMap.topics.map(t =>
-    `${t.title}: ${t.summary}\n` +
-    t.subtopics.map(s => `  - ${s.title}: ${s.summary}`).join('\n'),
+  // Full map context — the map already read the complete document (all pages,
+  // all sections). Using it as the source ensures notes are comprehensive
+  // and consistent regardless of file type (PDF, DOCX, TXT).
+  const fullMapContext = contentMap.topics.map(t =>
+    `## ${t.title}\n${t.summary}\n` +
+    t.subtopics.map(s => `  • ${s.title}: ${s.summary}`).join('\n'),
   ).join('\n\n');
-
-  const sourceText  = contentText ? contentText.slice(0, 8_000) : mapSource;
-  const isVerbatim  = !!contentText;
 
   const topicResults = await Promise.all(
     cappedTopics.map(async (t): Promise<TopicReading | null> => {
       const topicContext =
-        `Topic overview: ${t.title} — ${t.summary}\n` +
+        `Topic: ${t.title}\nOverview: ${t.summary}\n` +
         t.subtopics.map(s => `• ${s.title}: ${s.summary}`).join('\n');
 
       const subtopicList = t.subtopics.map(s => `• "${s.title}"`).join('\n');
 
-      const contentInstruction = isVerbatim
-        ? `"content": Copy 3–5 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Use the EXACT words as written — do NOT paraphrase or alter any wording.`
-        : `"content": Write 3–5 clear, educational sentences explaining this subtopic based on the source material. Be factual and direct.`;
+      const prompt = `You are an expert educational content writer. Create clear, student-friendly course notes.
 
-      const prompt = `You are an expert educational content organiser. Create structured course notes.
+SUBJECT: "${topic}"
 
-Overall subject: "${topic}"
-SOURCE CONTENT:
-"""
-${sourceText}
-"""
+FULL DOCUMENT OVERVIEW (all topics the document covers):
+${fullMapContext}
 
-TOPIC CONTEXT (from content analysis):
+YOUR TASK — write notes for this specific topic:
+TOPIC (topicId: "${t.id}"): "${t.title}"
 ${topicContext}
 
-TOPIC (topicId: "${t.id}"): "${t.title}"
 SUBTOPICS TO COVER:
 ${subtopicList}
 
-For EACH subtopic above:
-1. ${contentInstruction}
+For EACH subtopic:
+1. "content": Write 3–5 sentences that EXPLAIN and SUMMARISE the subtopic in plain language a student can understand. Expand on the key ideas, give context, and highlight what's important to know. Do NOT copy verbatim from any source — synthesise and explain.
 2. "quiz": one comprehension question — 3 plausible options, 0-based answer index, 1-sentence explanation.
 
-Also:
-- "keyTerms": 3–5 key terms with definitions.
-- "whyItMatters": one sentence explaining this topic's significance.
+Also provide:
+- "keyTerms": 3–5 key terms with clear definitions.
+- "whyItMatters": one sentence explaining why this topic is important.
 
-Rules: subtopic titles must match the outline exactly; quiz distractors must be plausible.
+Rules: subtopic titles must match the outline exactly; quiz distractors must be plausible; content must be educational summaries, never raw copied text.
 
 Return ONLY valid JSON — no markdown:
 {
