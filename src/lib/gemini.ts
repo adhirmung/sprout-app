@@ -7,7 +7,7 @@ import { dbLogUsage } from './supabase';
 // gemini-2.5-pro has mandatory thinking (can take 60s+) → times out.
 // gemini-2.5-flash with thinkingBudget:0 responds in ~5s.
 const SMART_MODEL = 'gemini-2.5-flash';
-const FAST_MODEL  = 'gemini-2.0-flash';
+const FAST_MODEL  = 'gemini-2.5-flash';
 
 // ── Current user (set once on auth, used for usage logging) ───
 let _currentUserId: string | null = null;
