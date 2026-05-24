@@ -595,51 +595,170 @@ Return ONLY valid JSON — no markdown fences:
 
 // ── Content map generator ─────────────────────────────────────
 
-export async function generateContentMap(
-  topic:      string,
+// ── Heading parser ────────────────────────────────────────────
+// Walks the markdown produced by extractPdfContent and extracts every
+// heading (# / ## / ###) together with a short snippet of the body text
+// that follows it.  This gives us the authentic document structure so
+// generateContentMap never has to "invent" topics.
+
+interface ParsedSection {
+  level:   1 | 2 | 3;
+  title:   string;
+  snippet: string; // first ~200 chars of body text under this heading
+}
+
+function parseSectionsFromMarkdown(text: string): ParsedSection[] {
+  const lines   = text.split('\n');
+  const sections: ParsedSection[] = [];
+  let level     = 0 as 0 | 1 | 2 | 3;
+  let title     = '';
+  let body: string[] = [];
+
+  const flush = () => {
+    if (level > 0 && title) {
+      const snippet = body
+        .filter(l => l.trim() && !l.startsWith('#'))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 200);
+      sections.push({ level: level as 1 | 2 | 3, title, snippet });
+    }
+    body = [];
+  };
+
+  for (const line of lines) {
+    const m = line.match(/^(#{1,3})\s+(.+)$/);
+    if (m) {
+      flush();
+      level = Math.min(m[1].length, 3) as 1 | 2 | 3;
+      title = m[2].trim();
+    } else {
+      body.push(line);
+    }
+  }
+  flush();
+  return sections;
+}
+
+// ── Heading-based map builder ─────────────────────────────────
+// The model's only job here is writing 1-sentence summaries.
+// Topic structure is determined by the document's own headings.
+
+async function generateMapFromHeadings(
+  topic:    string,
+  sections: ParsedSection[],
+): Promise<ContentMap> {
+  // Build a compact listing of every heading + snippet for the model
+  const listing = sections.map(s => {
+    const indent = s.level === 1 ? '' : '  ';
+    const bullet = s.level === 1 ? '●' : '○';
+    const hint   = s.snippet ? ` — ${s.snippet.slice(0, 120)}` : '';
+    return `${indent}${bullet} ${s.title}${hint}`;
+  }).join('\n');
+
+  const prompt = `Document: "${topic}"
+
+These are the EXACT section headings from the document (● = main section, ○ = sub-section):
+${listing}
+
+Your task:
+1. Write a 2-sentence synthesis describing the overall document.
+2. Write ONE short sentence summarising each section listed above.
+
+Rules:
+- Do NOT add, remove, rename, or reorder any section.
+- Every key in "summaries" must match the section title exactly as shown above.
+- Keep every summary to 1 sentence (max 20 words).
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "synthesis": "Two sentences about the document.",
+  "summaries": {
+    "Exact Section Title": "One-sentence summary.",
+    "Another Section Title": "One-sentence summary."
+  }
+}`;
+
+  const raw = await generateText(
+    SMART_MODEL,
+    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    [textPart(prompt)],
+    6000,
+    'generateContentMap',
+  );
+
+  const parsed = parseJson<{ synthesis: string; summaries: Record<string, string> }>(raw);
+  const summaries = parsed.summaries ?? {};
+
+  // Assemble ContentMap from the parsed headings
+  const topics: Topic[] = [];
+  let topicIdx = 0;
+
+  for (const section of sections) {
+    const summary = summaries[section.title] ?? `Covers ${section.title}.`;
+
+    if (section.level === 1) {
+      topicIdx++;
+      topics.push({ id: `t${topicIdx}`, title: section.title, summary, subtopics: [] });
+    } else {
+      // level 2 or 3 — attach to the last topic, or promote to topic if none yet
+      if (topics.length === 0) {
+        topicIdx++;
+        topics.push({ id: `t${topicIdx}`, title: section.title, summary, subtopics: [] });
+      } else {
+        const parent = topics[topics.length - 1];
+        parent.subtopics.push({
+          id:      `${parent.id}s${parent.subtopics.length + 1}`,
+          title:   section.title,
+          summary,
+        });
+      }
+    }
+  }
+
+  return { synthesis: parsed.synthesis ?? '', topics };
+}
+
+// ── Model-driven map builder (fallback) ───────────────────────
+// Used for essays / articles / any doc that lacks markdown headings.
+
+async function generateMapFromModel(
+  topic:       string,
   contentText: string | null,
-  pdfBase64:  string | null,
-  gapFill?:   string[],
+  pdfBase64:   string | null,
+  gapFill?:    string[],
 ): Promise<ContentMap> {
   const hasPdf = !!pdfBase64;
 
   const gapBlock = gapFill?.length
-    ? `\n\nCRITICAL GAP-FILL REQUIREMENT:\nA coverage audit identified the following concepts as MISSING from an earlier version of this map.\nYou MUST explicitly include ALL of these in appropriate topics and subtopics — do not skip any:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}\nIf a concept doesn't fit existing topics, add a new subtopic or topic to accommodate it.`
+    ? `\n\nAlso include these missing concepts:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
     : '';
 
-  // For map generation we need to see the full document — use 120K chars (3× the
-  // general sourceBlock limit) so that long handbooks/textbooks are fully covered.
-  const MAP_TEXT_LIMIT = 120_000;
   const mapSource = hasPdf
     ? 'The full document (text + images) is attached above.'
     : contentText
-      ? `SOURCE CONTENT — use ONLY facts from this text:\n"""\n${contentText.slice(0, MAP_TEXT_LIMIT)}\n"""`
-      : '(No source — use accurate general knowledge for this topic.)';
+      ? `SOURCE CONTENT:\n"""\n${contentText.slice(0, 120_000)}\n"""`
+      : '(No source content provided.)';
 
-  const prompt = `You are an expert educational content analyst. Analyze this document and extract a structured learning map.
+  const prompt = `Analyse this document and create a structured learning map.
 
 Topic: "${topic}"
 ${mapSource}${gapBlock}
 
-Extract a comprehensive hierarchical topic map covering the COMPLETE document.
-
-TOPIC COUNT RULES — choose the right approach based on document type:
-- Reference documents, handbooks, guides, textbooks, curricula, or documents with many named sections/chapters: identify EVERY distinct named section as its own topic. There is no maximum — full coverage matters more than brevity. These documents may have 15–40 topics.
-- Essays, reports, articles, or continuous documents: identify the main arguments and themes (typically 4–8 topics).
-
-Cover the FULL document proportionally — include topics from the beginning, middle, and end.
-Each topic should have 1–4 subtopics capturing its key points or sub-sections.
+Identify every distinct section or theme. Cover beginning, middle, and end.
+Each topic: 2–3 subtopics. Summaries: 1 sentence each.
 
 Return ONLY valid JSON — no markdown fences:
 {
-  "synthesis": "3–4 sentences: the document's main theme, key arguments, overall structure, and why it matters to a student",
+  "synthesis": "Two sentences about this document.",
   "topics": [
     {
       "id": "t1",
-      "title": "Major Topic Name",
-      "summary": "1–2 sentences describing what this topic covers and its significance",
+      "title": "Topic Name",
+      "summary": "One sentence.",
       "subtopics": [
-        { "id": "t1s1", "title": "Subtopic Name", "summary": "1–2 sentences on this specific subtopic" }
+        { "id": "t1s1", "title": "Subtopic", "summary": "One sentence." }
       ]
     }
   ]
@@ -653,7 +772,7 @@ Return ONLY valid JSON — no markdown fences:
     SMART_MODEL,
     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     parts,
-    8000,
+    12000,
     'generateContentMap',
   );
 
@@ -662,6 +781,33 @@ Return ONLY valid JSON — no markdown fences:
     throw new Error('Invalid topic map response. Please retry.');
   }
   return parsed;
+}
+
+// ── generateContentMap (public entry point) ───────────────────
+// If the extracted text has ≥ 5 markdown headings, we parse the
+// document's own structure and only ask the model to write summaries.
+// Otherwise we fall back to the model-driven approach for unstructured docs.
+
+export async function generateContentMap(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+  gapFill?:    string[],
+): Promise<ContentMap> {
+  const sections  = contentText ? parseSectionsFromMarkdown(contentText) : [];
+  const hasStructure = sections.length >= 5;
+
+  if (hasStructure) {
+    // Promote all ##/### to topics if there are no # headings
+    const h1Count = sections.filter(s => s.level === 1).length;
+    const normalised = h1Count === 0
+      ? sections.map(s => ({ ...s, level: 1 as const }))
+      : sections;
+    return generateMapFromHeadings(topic, normalised);
+  }
+
+  // Fallback: unstructured document — let the model figure out the topics
+  return generateMapFromModel(topic, contentText, pdfBase64, gapFill);
 }
 
 // ── Document reading generator ────────────────────────────────
