@@ -369,7 +369,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       }
 
       setPhase('mapping');
-      const map = await generateContentMap(topic, textForMap, textForMap ? null : resolvedPdf);
+      const map = await generateContentMap(topic, textForMap, resolvedPdf);
       Store.set(mapKey, map);
       if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
       setContentMap(map);
@@ -410,7 +410,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     setMapEnhancing(true);
     try {
       const enhanced = await generateContentMap(
-        topic, content, content ? null : resolvedPdf, audit.missedConcepts,
+        topic, content, resolvedPdf, audit.missedConcepts,
       );
       Store.set(mapKey, enhanced);
       if (userId) dbSaveContent(userId, sourceKey, 'map', enhanced).catch(console.error);
@@ -501,7 +501,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
     if (!map?.synthesis) {
       try {
-        map = await generateContentMap(topic, content, content ? null : resolvedPdf);
+        map = await generateContentMap(topic, content, resolvedPdf);
         Store.set(`map:${sourceKey}`, map);
         setContentMap(map);
         if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
