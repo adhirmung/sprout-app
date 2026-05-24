@@ -760,7 +760,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   );
 
   if (phase === 'exam') return (
-    <ExamScreen userId={userId} onBack={() => setPhase('idle')} />
+    <ExamScreen
+      userId={userId}
+      onBack={() => setPhase('idle')}
+      extractedText={extractedText ?? content}
+      topic={topic}
+    />
   );
 
   if (phase === 'read' && documentReading && contentMap) return (

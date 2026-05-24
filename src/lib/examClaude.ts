@@ -422,6 +422,127 @@ Return ONLY valid JSON — no markdown:
   return results;
 }
 
+// ── Exam from notes ─────────────────────────────────────────────
+
+/**
+ * Generates a practice exam using the student's own extracted document
+ * text as the sole source — no past papers required.
+ */
+export async function generateExamFromNotes(
+  extractedText: string,
+  topic:         string,
+  onProgress?:   (msg: string) => void,
+  userId?:       string | null,
+): Promise<GeneratedExam> {
+  onProgress?.('Reading your notes…');
+
+  // Cap to 80 000 chars — comfortably within the model's context window
+  const source = extractedText.slice(0, 80_000);
+
+  const prompt = `You are creating a practice exam for a student who is studying the following material.
+
+SUBJECT / TOPIC: "${topic}"
+
+STUDY MATERIAL:
+"""
+${source}
+"""
+
+Generate a comprehensive practice exam that tests ONLY facts, concepts, and skills explicitly present in the study material above. Do not introduce topics not covered in the text.
+
+Requirements:
+- 15–25 questions spread across multiple types (mcq, short, essay)
+- Every question must be directly answerable from the study material
+- Spread questions across the full range of topics covered
+- Include MCQ, short-answer, and at least 2 essay / extended questions
+- Mark allocation should reflect question complexity
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "title": "Practice Exam: ${topic}",
+  "subject": "${topic}",
+  "grade": "General",
+  "totalMarks": 100,
+  "durationMinutes": 90,
+  "instructions": [
+    "Answer ALL questions.",
+    "Read each question carefully before answering.",
+    "Base your answers only on the study material provided."
+  ],
+  "questions": [
+    {
+      "id": "q1",
+      "number": "1",
+      "type": "mcq",
+      "topic": "Topic name from the material",
+      "marks": 2,
+      "stem": "Question text?",
+      "options": ["A. Option one", "B. Option two", "C. Option three", "D. Option four"],
+      "modelAnswer": "B",
+      "markingGuidance": "Award 2 marks for B."
+    },
+    {
+      "id": "q2",
+      "number": "2",
+      "type": "short",
+      "topic": "Topic name",
+      "marks": 4,
+      "stem": "Explain...",
+      "modelAnswer": "Key points the student should cover.",
+      "markingGuidance": "1 mark per valid point, max 4."
+    },
+    {
+      "id": "q3",
+      "number": "3",
+      "type": "essay",
+      "topic": "Topic name",
+      "marks": 10,
+      "stem": "Discuss...",
+      "modelAnswer": "A well-structured answer would include...",
+      "markingGuidance": "Content 6 marks, structure 2 marks, language 2 marks."
+    }
+  ]
+}`;
+
+  onProgress?.('Generating exam from your notes…');
+
+  const raw = await generateText(
+    [{ text: prompt }],
+    'You are an expert exam paper designer. Generate questions ONLY from the provided study material. Output only valid JSON — no markdown, no extra text.',
+    12000,
+    'generateExamFromNotes',
+    userId ?? null,
+  );
+
+  onProgress?.('Finalising exam…');
+
+  let exam: GeneratedExam;
+  try {
+    exam = JSON.parse(extractJson(raw)) as GeneratedExam;
+  } catch {
+    throw new Error('Failed to parse exam from AI response. Please retry.');
+  }
+
+  if (!Array.isArray(exam.questions) || exam.questions.length === 0) {
+    throw new Error('Failed to generate exam questions. Please retry.');
+  }
+
+  exam.questions = exam.questions.map((q, i) => ({
+    id:              q.id     ?? `q${i + 1}`,
+    number:          q.number ?? String(i + 1),
+    type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
+    topic:           q.topic  ?? 'General',
+    marks:           typeof q.marks === 'number' ? q.marks : 2,
+    stem:            q.stem   ?? '',
+    context:         q.context,
+    options:         q.options,
+    modelAnswer:     q.modelAnswer    ?? '',
+    markingGuidance: q.markingGuidance,
+  }));
+
+  return exam;
+}
+
 function gradeFromPct(pct: number): string {
   if (pct >= 80) return 'A';
   if (pct >= 70) return 'B';

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
-import { analyzeAndGenerateExam, generateExamVariant, markExamSubmission } from '../lib/examClaude';
+import { analyzeAndGenerateExam, generateExamFromNotes, generateExamVariant, markExamSubmission } from '../lib/examClaude';
 import type { ExamQuestion, ExamResults, GeneratedExam } from '../lib/examClaude';
 import {
   dbDeleteExamSet,
@@ -273,11 +273,13 @@ function typeChip(type: string): { bg: string; fg: string } {
 // ── Main screen ────────────────────────────────────────────────
 
 interface ExamScreenProps {
-  userId?: string;
-  onBack:  () => void;
+  userId?:        string;
+  onBack:         () => void;
+  extractedText?: string | null;   // document text — enables "from my notes" mode
+  topic?:         string;          // document title shown in the exam
 }
 
-export function ExamScreen({ userId, onBack }: ExamScreenProps) {
+export function ExamScreen({ userId, onBack, extractedText, topic }: ExamScreenProps) {
   // ── DB state ─────────────────────────────────────────────────
   const [examSets,         setExamSets]         = useState<StoredExamSet[]>([]);
   const [attemptSummaries, setAttemptSummaries] = useState<Record<string, AttemptSummary>>({});
@@ -286,6 +288,7 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
   const [loadingSets,      setLoadingSets]      = useState(false);
 
   // ── Session state ─────────────────────────────────────────────
+  const [examSource,       setExamSource]       = useState<'papers' | 'notes'>('papers');
   const [phase,            setPhase]            = useState<ExamPhase>('upload');
   const [papers,           setPapers]           = useState<UploadedPaper[]>([]);
   const [dragging,         setDragging]         = useState(false);
@@ -406,16 +409,15 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
   // ── Generate exam ─────────────────────────────────────────────
 
   const handleGenerate = async () => {
-    if (papers.length < 2) return;
+    if (examSource === 'papers' && papers.length < 2) return;
+    if (examSource === 'notes' && !extractedText) return;
     setPhase('generating');
     setError(null);
     setSavingError(null);
     try {
-      const generated = await analyzeAndGenerateExam(
-        papers.map(p => p.base64),
-        setProgressMsg,
-        userId,
-      );
+      const generated = examSource === 'notes'
+        ? await generateExamFromNotes(extractedText!, topic ?? 'Document', setProgressMsg, userId)
+        : await analyzeAndGenerateExam(papers.map(p => p.base64), setProgressMsg, userId);
       setExam(generated);
       setAnswers({});
 
@@ -729,6 +731,10 @@ export function ExamScreen({ userId, onBack }: ExamScreenProps) {
               savingError={savingError}
               guestMode={!userId}
               fileInputRef={fileInputRef}
+              examSource={examSource}
+              extractedText={extractedText ?? null}
+              notesToTopic={topic ?? null}
+              onSourceChange={setExamSource}
               onDragOver={() => setDragging(true)}
               onDragLeave={() => setDragging(false)}
               onDrop={handleDrop}
@@ -1028,25 +1034,56 @@ function HowItWorks() {
 
 // ── Upload panel (homepage) ────────────────────────────────────
 
-function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInputRef, onDragOver, onDragLeave, onDrop, onFileInput, onRemovePaper, onGenerate }: {
-  papers:        UploadedPaper[];
-  dragging:      boolean;
-  error:         string | null;
-  savingError:   string | null;
-  guestMode:     boolean;
-  fileInputRef:  React.RefObject<HTMLInputElement | null>;
-  onDragOver:    () => void;
-  onDragLeave:   () => void;
-  onDrop:        (e: React.DragEvent) => void;
-  onFileInput:   (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onRemovePaper: (i: number) => void;
-  onGenerate:    () => void;
+function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInputRef, examSource, extractedText, notesToTopic, onSourceChange, onDragOver, onDragLeave, onDrop, onFileInput, onRemovePaper, onGenerate }: {
+  papers:          UploadedPaper[];
+  dragging:        boolean;
+  error:           string | null;
+  savingError:     string | null;
+  guestMode:       boolean;
+  fileInputRef:    React.RefObject<HTMLInputElement | null>;
+  examSource:      'papers' | 'notes';
+  extractedText:   string | null;
+  notesToTopic:    string | null;
+  onSourceChange:  (s: 'papers' | 'notes') => void;
+  onDragOver:      () => void;
+  onDragLeave:     () => void;
+  onDrop:          (e: React.DragEvent) => void;
+  onFileInput:     (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onRemovePaper:   (i: number) => void;
+  onGenerate:      () => void;
 }) {
+  const notesReady = examSource === 'notes' && !!extractedText;
+
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '24px 24px' }}>
       <div style={{ maxWidth: 640, margin: '0 auto' }}>
 
-        {/* ── Hero CTA ── */}
+        {/* ── Source toggle ── */}
+        <div style={{
+          display: 'flex', gap: 8, marginBottom: 22,
+          background: 'var(--card)', border: '1.5px solid var(--line)',
+          borderRadius: 14, padding: 5,
+        }}>
+          {(['papers', 'notes'] as const).map(src => (
+            <button
+              key={src}
+              type="button"
+              onClick={() => onSourceChange(src)}
+              disabled={src === 'notes' && !extractedText}
+              style={{
+                flex: 1, border: 'none', cursor: src === 'notes' && !extractedText ? 'not-allowed' : 'pointer',
+                borderRadius: 10, padding: '9px 16px', fontSize: 13, fontWeight: 700,
+                transition: 'background 0.15s, color 0.15s',
+                background: examSource === src ? 'var(--brand)' : 'transparent',
+                color: examSource === src ? '#fff' : src === 'notes' && !extractedText ? 'var(--ink-4)' : 'var(--ink-3)',
+              }}
+            >
+              {src === 'papers' ? '📄 Past Papers' : '📒 My Notes'}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Hero CTA — changes based on source ── */}
         <div style={{
           display: 'flex', alignItems: 'center', gap: 18,
           padding: '20px 24px', marginBottom: 24,
@@ -1054,24 +1091,30 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
           border: '1.5px solid var(--brand)',
           borderRadius: 18,
         }}>
-          <span style={{ fontSize: 44, flexShrink: 0 }}>📝</span>
+          <span style={{ fontSize: 44, flexShrink: 0 }}>{examSource === 'notes' ? '📒' : '📝'}</span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ fontSize: 17, fontWeight: 800, color: 'var(--ink)', marginBottom: 5 }}>
-              Generate a New Examination
+              {examSource === 'notes' ? 'Exam from My Notes' : 'Generate a New Examination'}
             </div>
             <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.55 }}>
-              Upload 2–5 past NSC papers and AI will analyse them, then create a
-              timed practice exam that mirrors their style and difficulty.
+              {examSource === 'notes'
+                ? notesToTopic
+                  ? `AI will design an exam based solely on your uploaded notes for "${notesToTopic}".`
+                  : 'Open a document first, then come back here to generate an exam from its content.'
+                : 'Upload 2–5 past NSC papers and AI will analyse them, then create a timed practice exam that mirrors their style and difficulty.'
+              }
             </div>
           </div>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => fileInputRef.current?.click()}
-            style={{ fontSize: 13, padding: '10px 18px', borderRadius: 10, flexShrink: 0 }}
-          >
-            Upload Papers
-          </button>
+          {examSource === 'papers' && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => fileInputRef.current?.click()}
+              style={{ fontSize: 13, padding: '10px 18px', borderRadius: 10, flexShrink: 0 }}
+            >
+              Upload Papers
+            </button>
+          )}
         </div>
 
         {/* How it works */}
@@ -1092,100 +1135,126 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
         )}
 
         {/* Drop zone */}
-        <div
-          onDragOver={e => { e.preventDefault(); onDragOver(); }}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
-          style={{
-            border: `2.5px dashed ${dragging ? 'var(--brand)' : 'var(--line)'}`,
-            borderRadius: 18, padding: '36px 24px',
-            textAlign: 'center', cursor: 'pointer',
-            background: dragging ? 'var(--brand-tint)' : 'var(--card)',
-            transition: 'border-color 0.18s, background 0.18s',
-            marginBottom: 18,
-          }}
-        >
-          <div style={{ marginBottom: 10, color: dragging ? 'var(--brand)' : 'var(--ink-3)', display: 'flex', justifyContent: 'center' }}>
-            <Icon name="upload" size={32} stroke="currentColor" />
-          </div>
-          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 5 }}>
-            Drop PDF files here or click to browse
-          </div>
-          <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 2–5 past exam papers (PDF only)</div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".pdf,application/pdf"
-            multiple
-            style={{ display: 'none' }}
-            onChange={onFileInput}
-          />
-        </div>
-
-        {/* Uploaded papers */}
-        {papers.length > 0 && (
-          <div style={{ marginBottom: 18 }}>
-            <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)', marginBottom: 10 }}>
-              Uploaded Papers ({papers.length}/5)
+        {/* ── Past-papers mode: drop zone + paper list ── */}
+        {examSource === 'papers' && (<>
+          <div
+            onDragOver={e => { e.preventDefault(); onDragOver(); }}
+            onDragLeave={onDragLeave}
+            onDrop={onDrop}
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              border: `2.5px dashed ${dragging ? 'var(--brand)' : 'var(--line)'}`,
+              borderRadius: 18, padding: '36px 24px',
+              textAlign: 'center', cursor: 'pointer',
+              background: dragging ? 'var(--brand-tint)' : 'var(--card)',
+              transition: 'border-color 0.18s, background 0.18s',
+              marginBottom: 18,
+            }}
+          >
+            <div style={{ marginBottom: 10, color: dragging ? 'var(--brand)' : 'var(--ink-3)', display: 'flex', justifyContent: 'center' }}>
+              <Icon name="upload" size={32} stroke="currentColor" />
             </div>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {papers.map((p, i) => (
-                <div key={i} style={{
-                  display: 'flex', alignItems: 'center', gap: 12,
-                  padding: '12px 16px',
-                  background: 'var(--card)', border: '1.5px solid var(--line)', borderRadius: 12,
-                }}>
-                  <span style={{ fontSize: 22, flexShrink: 0 }}>📋</span>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {p.name}
+            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 5 }}>
+              Drop PDF files here or click to browse
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 2–5 past exam papers (PDF only)</div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,application/pdf"
+              multiple
+              style={{ display: 'none' }}
+              onChange={onFileInput}
+            />
+          </div>
+
+          {papers.length > 0 && (
+            <div style={{ marginBottom: 18 }}>
+              <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--ink-4)', marginBottom: 10 }}>
+                Uploaded Papers ({papers.length}/5)
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {papers.map((p, i) => (
+                  <div key={i} style={{
+                    display: 'flex', alignItems: 'center', gap: 12,
+                    padding: '12px 16px',
+                    background: 'var(--card)', border: '1.5px solid var(--line)', borderRadius: 12,
+                  }}>
+                    <span style={{ fontSize: 22, flexShrink: 0 }}>📋</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {p.name}
+                      </div>
+                      <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
+                        {p.sizeMB.toFixed(1)} MB · PDF
+                      </div>
                     </div>
-                    <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
-                      {p.sizeMB.toFixed(1)} MB · PDF
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => onRemovePaper(i)}
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 8, borderRadius: 8, color: 'var(--ink-3)', display: 'flex', alignItems: 'center' }}
+                      aria-label="Remove"
+                    >
+                      <Icon name="close" size={16} stroke="currentColor" />
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => onRemovePaper(i)}
-                    style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 8, borderRadius: 8, color: 'var(--ink-3)', display: 'flex', alignItems: 'center' }}
-                    aria-label="Remove"
-                  >
-                    <Icon name="close" size={16} stroke="currentColor" />
-                  </button>
-                </div>
-              ))}
+                ))}
+              </div>
+            </div>
+          )}
+
+          {papers.length < 2 && papers.length > 0 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px', background: '#FFFBEB',
+              border: '1.5px solid #FDE68A', borderRadius: 12, marginBottom: 16,
+            }}>
+              <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
+              <span style={{ fontSize: 13, color: '#92400E' }}>
+                Upload 1 more paper to enable exam generation.
+              </span>
+            </div>
+          )}
+
+          {papers.length >= 2 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '12px 16px', background: '#ECFDF5',
+              border: '1.5px solid #A7F3D0', borderRadius: 12, marginBottom: 16,
+            }}>
+              <Icon name="check" size={18} stroke="#059669" />
+              <span style={{ fontSize: 13, color: '#065F46', fontWeight: 600 }}>
+                {papers.length} papers ready. AI will analyse all of them.
+              </span>
+            </div>
+          )}
+        </>)}
+
+        {/* ── Notes mode: ready state ── */}
+        {examSource === 'notes' && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 14,
+            padding: '16px 20px', marginBottom: 18,
+            background: notesReady ? '#ECFDF5' : 'var(--card)',
+            border: `1.5px solid ${notesReady ? '#A7F3D0' : 'var(--line)'}`,
+            borderRadius: 14,
+          }}>
+            <span style={{ fontSize: 26, flexShrink: 0 }}>{notesReady ? '✅' : '📭'}</span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: notesReady ? '#065F46' : 'var(--ink)', marginBottom: 3 }}>
+                {notesReady ? `"${notesToTopic}" — notes loaded` : 'No notes available'}
+              </div>
+              <div style={{ fontSize: 12, color: notesReady ? '#059669' : 'var(--ink-4)' }}>
+                {notesReady
+                  ? `${Math.round(extractedText!.length / 5).toLocaleString()} words of content will be used to set the exam.`
+                  : 'Open a document and let it finish loading, then return here.'
+                }
+              </div>
             </div>
           </div>
         )}
 
-        {/* Status banners */}
-        {papers.length < 2 && papers.length > 0 && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '12px 16px', background: '#FFFBEB',
-            border: '1.5px solid #FDE68A', borderRadius: 12, marginBottom: 16,
-          }}>
-            <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
-            <span style={{ fontSize: 13, color: '#92400E' }}>
-              Upload 1 more paper to enable exam generation.
-            </span>
-          </div>
-        )}
-
-        {papers.length >= 2 && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 10,
-            padding: '12px 16px', background: '#ECFDF5',
-            border: '1.5px solid #A7F3D0', borderRadius: 12, marginBottom: 16,
-          }}>
-            <Icon name="check" size={18} stroke="#059669" />
-            <span style={{ fontSize: 13, color: '#065F46', fontWeight: 600 }}>
-              {papers.length} papers ready. AI will analyse all of them.
-            </span>
-          </div>
-        )}
-
+        {/* Shared error / saving banners */}
         {error && (
           <div style={{
             display: 'flex', alignItems: 'flex-start', gap: 10,
@@ -1212,7 +1281,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
         )}
 
         {/* Generate button */}
-        {papers.length >= 2 && (
+        {(examSource === 'notes' ? notesReady : papers.length >= 2) && (
           <button
             type="button"
             className="btn btn-primary"
@@ -1223,7 +1292,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
             }}
           >
             <Icon name="sparkle" size={18} stroke="currentColor" />
-            Generate Examination
+            {examSource === 'notes' ? 'Generate Exam from My Notes' : 'Generate Examination'}
           </button>
         )}
       </div>
