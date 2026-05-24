@@ -784,26 +784,81 @@ Return ONLY valid JSON — no markdown fences:
 }
 
 // ── Heading-list extractor ────────────────────────────────────
-// When markdown parsing yields too few headings (e.g. the PDF used
-// coloured banners instead of text headings), we ask the model one
-// focused question: "List every section heading in order."
-// The output is tiny (just titles) so it's fast and never truncates.
+// For PDFs: uses streaming generateContentStream (same mechanism as
+// extractPdfContent) so the model reads the document progressively —
+// non-streaming calls on large PDFs scan an inconsistent portion of the
+// document on each run, producing different heading counts every time.
+// Streaming forces a full sequential pass.  Output format is simple
+// markdown heading lines (# / ##) which are very compact and never
+// truncate, then parsed by parseSectionsFromMarkdown.
+//
+// For text-only (no PDF): falls back to a single JSON-returning call.
 
 async function extractSectionHeadings(
   topic:       string,
   contentText: string | null,
   pdfBase64:   string | null,
 ): Promise<ParsedSection[]> {
-  const hasPdf = !!pdfBase64;
+  const client = getClient();
 
-  const source = hasPdf
-    ? 'The PDF document is attached.'
-    : contentText
-      ? `Document text:\n"""\n${contentText.slice(0, 80_000)}\n"""`
-      : '(No content provided.)';
+  if (pdfBase64) {
+    // ── PDF path: stream heading lines ────────────────────────
+    const prompt = `You are reading the document titled "${topic}".
+
+Your ONLY task: list every section heading and sub-section heading in the order they appear.
+
+Output rules — follow exactly:
+- Write ONLY heading lines, nothing else (no body text, no commentary, no blank lines between headings)
+- Use a single # for each main section heading
+- Use ## for each sub-section heading
+- Copy heading text EXACTLY as it appears in the document — do not paraphrase or rename
+- Do NOT skip any heading
+
+Example of correct output:
+# Introduction
+## Background
+## Scope
+# Methods
+
+Begin listing all headings now:`;
+
+    const stream = await client.models.generateContentStream({
+      model:    SMART_MODEL,
+      contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
+      config:   {
+        systemInstruction: 'Output ONLY # and ## heading lines. Absolutely no other text.',
+        maxOutputTokens:   8000,
+        temperature:       0.0,
+        thinkingConfig:    { thinkingBudget: 0 },
+      },
+    });
+
+    let accumulated  = '';
+    let inputTokens  = 0;
+    let outputTokens = 0;
+    for await (const chunk of stream) {
+      accumulated += chunk.text ?? '';
+      if (chunk.usageMetadata) {
+        inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+        outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+      }
+    }
+    void dbLogUsage(_currentUserId, 'extractSectionHeadings', SMART_MODEL, inputTokens, outputTokens);
+
+    const sections = parseSectionsFromMarkdown(accumulated);
+    if (sections.length > 0) return sections;
+    // Fall through to text-based path if streaming produced nothing
+  }
+
+  // ── Text path: single JSON call ────────────────────────────
+  if (!contentText) return [];
 
   const prompt = `Document: "${topic}"
-${source}
+
+Document text:
+"""
+${contentText.slice(0, 80_000)}
+"""
 
 List EVERY named section heading and sub-section heading from this document, in the exact order they appear.
 
@@ -811,7 +866,6 @@ Rules:
 - Include ALL sections — do not skip, merge, group, or rename any heading.
 - Use level 1 for main section titles, level 2 for sub-sections under them.
 - Copy the title text exactly as it appears in the document.
-- If the document has 25 named sections, your list must have 25 entries.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
 {
@@ -821,14 +875,10 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   ]
 }`;
 
-  const parts: Part[] = pdfBase64
-    ? [pdfPart(pdfBase64), textPart(prompt)]
-    : [textPart(prompt)];
-
   const raw = await generateText(
     SMART_MODEL,
     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    parts,
+    [textPart(prompt)],
     4000,
     'extractSectionHeadings',
   );
