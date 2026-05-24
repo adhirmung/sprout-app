@@ -684,7 +684,7 @@ Return ONLY valid JSON — no markdown fences:
     SMART_MODEL,
     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     [textPart(prompt)],
-    6000,
+    16000,
     'generateContentMap',
   );
 
@@ -855,11 +855,10 @@ export async function generateContentMap(
   gapFill?:    string[],
 ): Promise<ContentMap> {
 
-  // ── Path 1: markdown heading parse (no API call) ──────────
-  const sections    = contentText ? parseSectionsFromMarkdown(contentText) : [];
-  const hasStructure = sections.length >= 5;
-
-  if (hasStructure) {
+  // ── Path 1: markdown heading parse (no API call) ──────────────
+  // Works when extractPdfContent produced clean # / ## headings.
+  const sections = contentText ? parseSectionsFromMarkdown(contentText) : [];
+  if (sections.length > 0) {
     const h1Count   = sections.filter(s => s.level === 1).length;
     const normalised = h1Count === 0
       ? sections.map(s => ({ ...s, level: 1 as const }))
@@ -867,9 +866,11 @@ export async function generateContentMap(
     return generateMapFromHeadings(topic, normalised);
   }
 
-  // ── Path 2: focused heading extraction (one small API call) ──
+  // ── Path 2: focused heading extraction via model (one API call) ─
+  // Used when the PDF has coloured banners / non-standard heading styles
+  // that extractPdfContent didn't convert to markdown.
   const headings = await extractSectionHeadings(topic, contentText, pdfBase64);
-  if (headings.length >= 3) {
+  if (headings.length > 0) {
     const h1Count   = headings.filter(h => h.level === 1).length;
     const normalised = h1Count === 0
       ? headings.map(h => ({ ...h, level: 1 as const }))
@@ -877,7 +878,9 @@ export async function generateContentMap(
     return generateMapFromHeadings(topic, normalised);
   }
 
-  // ── Path 3: full model-driven map (unstructured docs) ────────
+  // ── Path 3: full model-driven map — last resort ───────────────
+  // For truly unstructured content (essays, articles) with no discernible
+  // heading structure at all.
   return generateMapFromModel(topic, contentText, pdfBase64, gapFill);
 }
 
