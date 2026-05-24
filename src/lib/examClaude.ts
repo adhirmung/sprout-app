@@ -454,7 +454,7 @@ Return ONLY valid JSON — no markdown fences:
   "subject": "${topic}",
   "grade": "General",
   "totalMarks": 100,
-  "durationMinutes": 90,
+  "durationMinutes": 60,
   "instructions": [
     "Answer ALL questions.",
     "Read each question carefully before answering.",
