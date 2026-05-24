@@ -82,8 +82,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [error,     setError]     = useState('');
   const [fromCache, setFromCache] = useState(false);
   const [needsKey,  setNeedsKey]  = useState(!hasApiKey());
-  const [showTutor,        setShowTutor]        = useState(false);
-  const [diagnostic,       setDiagnostic]       = useState<DocumentDiagnostic | null>(null);
+  const [showTutor,         setShowTutor]         = useState(false);
+  const [courseProgressMsg, setCourseProgressMsg] = useState('');
+  const [diagnostic,        setDiagnostic]        = useState<DocumentDiagnostic | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   const retryRef = useRef<HTMLButtonElement>(null);
 
@@ -539,11 +540,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       }
     }
     setPhase('course-loading');
+    setCourseProgressMsg('Reading your document…');
     setError('');
     try {
       let resolvedPdf = pdfBase64;
       if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
-      const cm = await generateCourseMaterial(topic, content, resolvedPdf, map);
+      const cm = await generateCourseMaterial(topic, content, resolvedPdf, map, setCourseProgressMsg);
       Store.set(`course:${sourceKey}`, cm);
       if (userId) dbSaveContent(userId, sourceKey, 'course', cm).catch(console.error);
       setCourseMaterial(cm);
@@ -722,7 +724,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onStartExam={() => setPhase('exam')}
           />
         )}
-        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading' || phase === 'course-loading') && <FeedLoading topic={topic} />}
+        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading' || phase === 'course-loading') && (
+          <FeedLoading topic={topic} message={phase === 'course-loading' ? courseProgressMsg : undefined} />
+        )}
         {phase === 'running' && cards.length > 0 && cards[idx] && (
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CardView
@@ -3430,14 +3434,15 @@ function QualityBadge({ audit }: { audit: FeedAudit }) {
 
 // ── Feed loading ──────────────────────────────────────────────
 
-function FeedLoading({ topic }: { topic: string }) {
+function FeedLoading({ topic, message }: { topic: string; message?: string }) {
   const STEPS = ['Reading your content…', 'Matching to your learning profile…', 'Crafting your feed…'];
   const [step, setStep] = useState(0);
   useEffect(() => {
+    if (message) return; // don't cycle steps when an external progress message is shown
     const id = setInterval(() => setStep(s => Math.min(s + 1, STEPS.length - 1)), 3500);
     return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [message]);
 
   return (
     <div style={{ display: 'grid', placeItems: 'center', height: '100%', padding: 24 }}>
@@ -3448,23 +3453,32 @@ function FeedLoading({ topic }: { topic: string }) {
             <SproutMark size={52} />
           </div>
         </div>
-        <h2 className="display" style={{ fontSize: 22, marginBottom: 6 }}>Generating your feed</h2>
-        <p style={{ fontSize: 13, color: 'var(--ink-3)', marginBottom: 24 }}>{topic} · Usually 10–20 s</p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, textAlign: 'left' }}>
-          {STEPS.map((s, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 14, color: i <= step ? 'var(--ink)' : 'var(--ink-4)', transition: 'color 0.4s' }}>
-              <div style={{
-                width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
-                display: 'grid', placeItems: 'center', transition: 'background 0.4s',
-                background: i < step ? 'var(--brand)' : i === step ? 'var(--brand-tint)' : 'var(--line)',
-                border: i === step ? '2px solid var(--brand)' : 'none',
-              }}>
-                {i < step && <Icon name="check" size={12} stroke="white" />}
+        <h2 className="display" style={{ fontSize: 22, marginBottom: 6 }}>
+          {message ? 'Building your notes' : 'Generating your feed'}
+        </h2>
+        <p style={{ fontSize: 13, color: 'var(--ink-3)', marginBottom: 24 }}>{topic} · Usually 20–40 s</p>
+        {message ? (
+          /* Notes batch progress — shows the live "topics X–Y of N" message */
+          <div style={{ fontSize: 14, color: 'var(--ink-2)', fontWeight: 500, padding: '10px 16px', background: 'var(--brand-soft)', borderRadius: 10 }}>
+            {message}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, textAlign: 'left' }}>
+            {STEPS.map((s, i) => (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 14, color: i <= step ? 'var(--ink)' : 'var(--ink-4)', transition: 'color 0.4s' }}>
+                <div style={{
+                  width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                  display: 'grid', placeItems: 'center', transition: 'background 0.4s',
+                  background: i < step ? 'var(--brand)' : i === step ? 'var(--brand-tint)' : 'var(--line)',
+                  border: i === step ? '2px solid var(--brand)' : 'none',
+                }}>
+                  {i < step && <Icon name="check" size={12} stroke="white" />}
+                </div>
+                <span style={{ fontWeight: i <= step ? 600 : 400 }}>{s}</span>
               </div>
-              <span style={{ fontWeight: i <= step ? 600 : 400 }}>{s}</span>
-            </div>
-          ))}
-        </div>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

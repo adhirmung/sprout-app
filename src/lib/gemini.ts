@@ -967,60 +967,80 @@ Return ONLY: { "score": 0, "feedback": "Warm 1-2 sentence feedback." }`)],
 // Students use Notes to study the actual source material (not an AI summary).
 // Map + Read provide the AI-interpreted versions.
 //
-// IMPORTANT: All topics are generated in ONE API call so the PDF is only sent
-// once through the Netlify edge function. Sending 7 parallel calls each with
-// the full PDF binary caused all 7 to hit the 26s edge-function timeout.
+// BATCHING STRATEGY (beats Netlify's 26s edge-function timeout):
+//   • Topics are split into sequential batches of BATCH_SIZE (3).
+//   • Each batch: PDF sent once + ~3 topics of output ≈ 2 100 tokens → ~10s.
+//   • Total for 7 topics: 3 sequential calls × ~10s = ~30s user wait.
+//   • Sending all 7 topics in one call (7 × 700 = 4 900 tokens + PDF overhead)
+//     still risks hitting 26s; parallel calls multiply the risk × 7.
 
 export async function generateCourseMaterial(
   topic:       string,
   contentText: string | null,
   pdfBase64:   string | null,
   contentMap:  ContentMap,
+  onProgress?: (msg: string) => void,
 ): Promise<DocumentReading> {
+  const BATCH_SIZE = 3;   // topics per edge-function call — safe at ~10s each
   const MAX_TOPICS = 7;
   const cappedTopics = contentMap.topics.slice(0, MAX_TOPICS);
 
   const hasPdf  = !!pdfBase64;
   const hasText = !!contentText;
-
-  // For text documents: send the full content (up to 60 000 chars — ~40 pages).
   const fullText = contentText?.slice(0, 60_000) ?? '';
 
-  // Build a single outline for all topics so one prompt covers everything
-  const topicsOutline = cappedTopics.map((t, i) =>
-    `Topic ${i + 1} (topicId: "${t.id}", title: "${t.title}"):
+  // Split into sequential batches
+  const batches: typeof cappedTopics[] = [];
+  for (let i = 0; i < cappedTopics.length; i += BATCH_SIZE) {
+    batches.push(cappedTopics.slice(i, i + BATCH_SIZE));
+  }
+
+  const allTopics: TopicReading[] = [];
+
+  for (let b = 0; b < batches.length; b++) {
+    const batch    = batches[b];
+    const startNum = b * BATCH_SIZE + 1;
+    const endNum   = Math.min(startNum + batch.length - 1, cappedTopics.length);
+    onProgress?.(`Extracting notes — topics ${startNum}–${endNum} of ${cappedTopics.length}…`);
+
+    // Outline for this batch only
+    const topicsOutline = batch.map((t, i) =>
+      `Topic ${i + 1} (topicId: "${t.id}", title: "${t.title}"):
 Overview: ${t.summary}
 Subtopics:
 ${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}`
-  ).join('\n\n');
+    ).join('\n\n');
 
-  const contentInstruction = hasPdf || hasText
-    ? `For each subtopic "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the ${hasPdf ? 'PDF document above' : 'SOURCE CONTENT above'} that directly explain this subtopic. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise.`
-    : `For each subtopic "content": write 3–5 clear sentences explaining the subtopic based on the topic analysis.`;
+    // Verbatim instruction differs by source type
+    const contentInstruction = hasText
+      ? `For each subtopic "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise.`
+      : hasPdf
+        ? `For each subtopic "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the PDF document above that directly explain this subtopic. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise.`
+        : `For each subtopic "content": write 4–6 clear, specific, factually accurate sentences based on the topic context.`;
 
-  const sourceSection = hasText
-    ? `SOURCE CONTENT (verbatim from the uploaded document):\n"""\n${fullText}\n"""\n\n`
-    : '';
+    const sourceSection = hasText
+      ? `SOURCE CONTENT (verbatim from the uploaded document):\n"""\n${fullText}\n"""\n\n`
+      : '';
 
-  const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
+    const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
 
 SUBJECT: "${topic}"
-${sourceSection}TOPIC OUTLINE (${cappedTopics.length} topics to process):
+${sourceSection}TOPIC OUTLINE (${batch.length} topics in this batch):
 ${topicsOutline}
 
 INSTRUCTIONS:
 ${contentInstruction}
 
 For EVERY topic in the outline, and EVERY subtopic within it, produce:
-1. "content": verbatim sentences from the document (see instruction above).
+1. "content": ${hasText || hasPdf ? 'VERBATIM sentences from the document (see instruction above).' : '4–6 educational sentences grounded in the topic context.'}
 2. "quiz": one comprehension question — exactly 3 plausible options, 0-based answer index, 1-sentence explanation.
 
 Also for each topic:
-- "keyTerms": 3–5 key terms with definitions as they appear in the document.
-- "whyItMatters": one sentence on why this topic matters.
+- "keyTerms": 3–5 key terms with clear, document-grounded definitions.
+- "whyItMatters": one sentence on why this topic matters to a student.
 
 Rules:
-- Process ALL ${cappedTopics.length} topics — do not skip any.
+- Process ALL ${batch.length} topics in this batch — do not skip any.
 - Subtopic titles must match the outline EXACTLY.
 - Content must come from the document, not be invented.
 - Quiz distractors must be plausible, not obviously wrong.
@@ -1044,36 +1064,40 @@ Return ONLY valid JSON — no markdown fences:
   ]
 }`;
 
-  // Send the PDF exactly once (not once per topic like the old parallel approach)
-  const parts: Part[] = hasPdf
-    ? [pdfPart(pdfBase64!), textPart(prompt)]
-    : [textPart(prompt)];
+    // For PDFs: send the binary once per batch (small output keeps each call <26s).
+    // For text docs: embed the full text in the prompt — no binary needed.
+    const parts: Part[] = hasPdf
+      ? [pdfPart(pdfBase64!), textPart(prompt)]
+      : [textPart(prompt)];
 
-  const raw = await generateText(
-    SMART_MODEL,
-    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    parts,
-    16000,  // 7 topics × ~1500 tokens each + overhead
-    'generateCourseMaterial',
-  );
+    const raw = await generateText(
+      SMART_MODEL,
+      'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      parts,
+      4000,  // 3 topics × ~700 tokens = ~2 100 + overhead ≈ 10s — well under 26s
+      'generateCourseMaterial',
+    );
 
-  const parsed = parseJson<{ topics: TopicReading[] }>(raw);
-  if (!Array.isArray(parsed.topics) || parsed.topics.length === 0) {
-    throw new Error('Failed to generate course material. Please retry.');
+    const parsed = parseJson<{ topics: TopicReading[] }>(raw);
+    if (!Array.isArray(parsed.topics) || parsed.topics.length === 0) {
+      throw new Error(`Failed to generate notes for topics ${startNum}–${endNum}. Please retry.`);
+    }
+
+    // Enforce topicId / title from the content map so IDs never drift
+    const batchTopics = parsed.topics
+      .map((tr, i) => {
+        const source = batch[i];
+        if (!source) return null;
+        if (!Array.isArray(tr.subtopics) || tr.subtopics.length === 0) return null;
+        return { ...tr, topicId: source.id, title: source.title } as TopicReading;
+      })
+      .filter((t): t is TopicReading => t !== null);
+
+    allTopics.push(...batchTopics);
   }
 
-  // Enforce topicId and title from the content map (AI may drift on IDs)
-  const topics = parsed.topics
-    .map((tr, i) => {
-      const source = cappedTopics[i];
-      if (!source) return null;
-      if (!Array.isArray(tr.subtopics) || tr.subtopics.length === 0) return null;
-      return { ...tr, topicId: source.id, title: source.title } as TopicReading;
-    })
-    .filter((t): t is TopicReading => t !== null);
-
-  if (topics.length === 0) throw new Error('Failed to generate course material. Please retry.');
-  return { topics };
+  if (allTopics.length === 0) throw new Error('Failed to generate course material. Please retry.');
+  return { topics: allTopics };
 }
 
 // ── Paragraph quiz ────────────────────────────────────────────
