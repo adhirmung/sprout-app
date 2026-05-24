@@ -805,20 +805,33 @@ async function extractSectionHeadings(
     // ── PDF path: stream heading lines ────────────────────────
     const prompt = `You are reading the document titled "${topic}".
 
-Your ONLY task: list every section heading and sub-section heading in the order they appear.
+Your ONLY task: list every chapter/section heading AND every named sub-section within each chapter, in the order they appear.
 
 Output rules — follow exactly:
 - Write ONLY heading lines, nothing else (no body text, no commentary, no blank lines between headings)
-- Use a single # for each main section heading
-- Use ## for each sub-section heading
+- Use # for each main chapter or section title (e.g., PUNCTUATION, NOUNS, VERBS, FIGURES OF SPEECH)
+- Use ## for EVERY named sub-section within a chapter, including:
+  - Lettered sub-sections: A. CAPITAL LETTERS, B. FULL STOPS, H. QUOTATION MARKS
+  - Numbered sub-sections: 1. COMMON NOUNS, 2. PROPER NOUNS, 4. AUXILIARY VERBS
+  - Named sub-categories under a numbered point (e.g., COMPARISONS, SOUND DEVICES, CONTRADICTIONS)
 - Copy heading text EXACTLY as it appears in the document — do not paraphrase or rename
-- Do NOT skip any heading
+- Do NOT skip any chapter, lettered section, or numbered sub-section
+- If a chapter has no sub-sections, just output the # heading alone
 
-Example of correct output:
-# Introduction
-## Background
-## Scope
-# Methods
+Example of correct output for a grammar handbook:
+# Punctuation
+## A. Capital Letters
+## B. Full Stops
+## C. Commas
+# Nouns
+## 1. Common Nouns
+## 2. Proper Nouns
+## 3. Abstract Nouns
+## 4. Collective Nouns
+# Verbs
+## 1. The Three Tenses
+## 2. Finite Verbs
+## 3. The Infinitive
 
 Begin listing all headings now:`;
 
@@ -835,7 +848,7 @@ Begin listing all headings now:`;
           model:    SMART_MODEL,
           contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
           config:   {
-            systemInstruction: 'Output ONLY # and ## heading lines. Absolutely no other text.',
+            systemInstruction: 'Output ONLY # and ## heading lines. Treat every lettered (A. B. C.) and numbered (1. 2. 3.) sub-section as a ## heading. Absolutely no other text.',
             maxOutputTokens:   8000,
             temperature:       0.0,
             thinkingConfig:    { thinkingBudget: 0 },
