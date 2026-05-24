@@ -825,6 +825,8 @@ Return ONLY valid JSON — no markdown fences, no explanation:
     ? [pdfPart(pdfBase64), textPart(prompt)]
     : [textPart(prompt)];
 
+  console.log(`[extractSectionHeadings] mode=${hasPdf ? 'PDF' : 'text'} pdfLen=${pdfBase64?.length ?? 0}`);
+
   const raw = await generateText(
     SMART_MODEL,
     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
@@ -833,12 +835,17 @@ Return ONLY valid JSON — no markdown fences, no explanation:
     'extractSectionHeadings',
   );
 
+  console.log(`[extractSectionHeadings] raw response (first 400 chars):`, raw.slice(0, 400));
+
   const parsed = parseJson<{ headings: { level: number; title: string }[] }>(raw);
-  return (parsed.headings ?? []).map(h => ({
+  const result = (parsed.headings ?? []).map(h => ({
     level: Math.min(Math.max(h.level ?? 1, 1), 3) as 1 | 2 | 3,
     title: String(h.title ?? '').trim(),
     snippet: '',
   })).filter(h => h.title.length > 0);
+
+  console.log(`[extractSectionHeadings] found ${result.length} headings`);
+  return result;
 }
 
 // ── generateContentMap (public entry point) ───────────────────
@@ -862,6 +869,7 @@ export async function generateContentMap(
   // markdown headings, missing most of the document.
   if (!pdfBase64) {
     const sections = contentText ? parseSectionsFromMarkdown(contentText) : [];
+    console.log(`[generateContentMap] Path 1 (no PDF): found ${sections.length} markdown headings`);
     if (sections.length > 0) {
       const h1Count   = sections.filter(s => s.level === 1).length;
       const normalised = h1Count === 0
@@ -869,6 +877,8 @@ export async function generateContentMap(
         : sections;
       return generateMapFromHeadings(topic, normalised);
     }
+  } else {
+    console.log(`[generateContentMap] PDF present (len=${pdfBase64.length}), skipping Path 1 → going to Path 2`);
   }
 
   // ── Path 2: focused heading extraction via model (one API call) ─
