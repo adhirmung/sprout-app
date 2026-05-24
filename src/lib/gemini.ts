@@ -894,8 +894,17 @@ Classification rules:
 - SUBTOPIC = the FIRST level of named sub-categories within the current topic, such as:
     Lettered sections:  A. Capital Letters, B. Full Stops
     Numbered sections:  1. Common Nouns, 2. Proper Nouns, 1. Comparisons, 2. Sound Devices
-    Named categories:   Co-ordinating Conjunctions, Definite Article, Positive Degree
+    Named categories:   Co-ordinating Conjunctions, Definite Article
+    Grammar table columns: Positive Degree, Comparative Degree, Superlative Degree
 - Everything else = body text, rules, examples, individual items inside a subtopic → emit NOTHING
+
+Special rules:
+1. Elaborating subtitle — if a heading is clearly a continuation or elaboration of the immediately
+   preceding TOPIC (e.g. "PREPOSITIONS USUALLY REFER TO PLACE, POSITION, TIME, MANNER OR REASON"
+   appears right after the TOPIC "PREPOSITIONS"), emit it as SUBTOPIC of that TOPIC, NOT as a new TOPIC.
+2. Grammar-comparison tables — if a section contains a table whose columns represent named grammatical
+   forms or degrees (e.g. Positive / Comparative / Superlative inside DEGREES OF COMPARISON), emit
+   those column names as individual SUBTOPIC lines.
 
 The critical rule — depth limit:
 Once you emit a SUBTOPIC, any further sub-items nested inside it are body text. Emit NOTHING for them.
@@ -904,7 +913,7 @@ Once you emit a SUBTOPIC, any further sub-items nested inside it are body text. 
 ✓ Emit  SUBTOPIC: A. Capital Letters
 ✗ Do NOT emit  the numbered rules below it (they are inside a subtopic — emit nothing)
 
-Reference lists, vocabulary tables, and example lists with no named sub-categories:
+Reference/vocabulary lists and irregular-verb tables with no named sub-categories:
 emit the TOPIC line only — no SUBTOPIC lines.
 
 Output one line per item, no blank lines, no other text:
@@ -915,6 +924,12 @@ SUBTOPIC: B. Full Stops | How full stops end sentences and mark abbreviations.
 TOPIC: NOUNS | Defines nouns as naming words and categorises their types.
 SUBTOPIC: 1. Common Nouns | Ordinary everyday naming words identified by a, an, or the.
 SUBTOPIC: 2. Proper Nouns | Names of specific people, places, or things requiring capitals.
+TOPIC: PREPOSITIONS | Defines prepositions as small words that relate two words or phrases.
+SUBTOPIC: Place, Position, Time, Manner or Reason | The main categories of meaning prepositions express.
+TOPIC: DEGREES OF COMPARISON | Explains how adjectives compare nouns using three forms.
+SUBTOPIC: Positive Degree | The base form of the adjective with no comparison implied.
+SUBTOPIC: Comparative Degree | Compares two nouns, typically formed by adding -er or 'more'.
+SUBTOPIC: Superlative Degree | Compares three or more nouns, typically formed by adding -est or 'most'.
 
 Begin scanning from the very first page now:`;
 
