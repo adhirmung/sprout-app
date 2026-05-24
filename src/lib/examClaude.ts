@@ -497,13 +497,35 @@ Return ONLY valid JSON — no markdown fences:
 
   onProgress?.('Generating exam from your document…');
 
-  const raw = await generateText(
-    [{ inlineData: { data: pdfBase64, mimeType: 'application/pdf' } }, { text: prompt }],
-    'You are an expert exam paper designer. Generate questions ONLY from the attached PDF. Output only valid JSON — no markdown, no extra text.',
-    12000,
-    'generateExamFromNotes',
-    userId ?? null,
-  );
+  // Use streaming — same reason as extractSectionHeadings: a non-streaming
+  // call on a large PDF scans an inconsistent portion of the document each
+  // run. Streaming forces a full sequential read before the JSON is emitted.
+  const client = getClient();
+  const stream = await client.models.generateContentStream({
+    model:    EXAM_MODEL,
+    contents: [{ role: 'user', parts: [
+      { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
+      { text: prompt },
+    ]}],
+    config: {
+      systemInstruction: 'You are an expert exam paper designer. Generate questions ONLY from the attached PDF. Output only valid JSON — no markdown, no extra text.',
+      maxOutputTokens:   12000,
+      temperature:       0.1,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  let raw          = '';
+  let inputTokens  = 0;
+  let outputTokens = 0;
+  for await (const chunk of stream) {
+    raw += chunk.text ?? '';
+    if (chunk.usageMetadata) {
+      inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+    }
+  }
+  void dbLogUsage(userId ?? null, 'generateExamFromNotes', EXAM_MODEL, inputTokens, outputTokens);
 
   onProgress?.('Finalising exam…');
 
