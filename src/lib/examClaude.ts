@@ -422,39 +422,30 @@ Return ONLY valid JSON — no markdown:
   return results;
 }
 
-// ── Exam from notes ─────────────────────────────────────────────
+// ── Exam from document PDF ───────────────────────────────────────
 
 /**
- * Generates a practice exam using the student's own extracted document
- * text as the sole source — no past papers required.
+ * Generates a practice exam by sending the full PDF directly to the model —
+ * the same approach ChatGPT/Claude use. The entire document is in context,
+ * so no truncation and no hallucinations from partial extraction.
  */
 export async function generateExamFromNotes(
-  extractedText: string,
-  topic:         string,
-  onProgress?:   (msg: string) => void,
-  userId?:       string | null,
+  pdfBase64:   string,
+  topic:       string,
+  onProgress?: (msg: string) => void,
+  userId?:     string | null,
 ): Promise<GeneratedExam> {
-  onProgress?.('Reading your notes…');
+  onProgress?.('Reading your document…');
 
-  // Cap to 80 000 chars — comfortably within the model's context window
-  const source = extractedText.slice(0, 80_000);
+  const prompt = `The full PDF document titled "${topic}" is attached above.
 
-  const prompt = `You are creating a practice exam for a student who is studying the following material.
-
-SUBJECT / TOPIC: "${topic}"
-
-STUDY MATERIAL:
-"""
-${source}
-"""
-
-Generate a comprehensive practice exam that tests ONLY facts, concepts, and skills explicitly present in the study material above. Do not introduce topics not covered in the text.
+Generate a comprehensive practice exam that tests ONLY facts, concepts, rules, and skills explicitly stated in this document. Do not introduce anything not covered in the PDF.
 
 Requirements:
-- 15–25 questions spread across multiple types (mcq, short, essay)
-- Every question must be directly answerable from the study material
-- Spread questions across the full range of topics covered
-- Include MCQ, short-answer, and at least 2 essay / extended questions
+- 15–25 questions spread proportionally across ALL sections of the document
+- Include a mix of types: mcq, short (2–6 marks), and essay (8–15 marks)
+- Every question must be directly and precisely answerable from the document
+- Distractors for MCQ must be plausible but clearly wrong per the document
 - Mark allocation should reflect question complexity
 
 Return ONLY valid JSON — no markdown fences:
@@ -467,14 +458,14 @@ Return ONLY valid JSON — no markdown fences:
   "instructions": [
     "Answer ALL questions.",
     "Read each question carefully before answering.",
-    "Base your answers only on the study material provided."
+    "Base your answers only on what is stated in the study material."
   ],
   "questions": [
     {
       "id": "q1",
       "number": "1",
       "type": "mcq",
-      "topic": "Topic name from the material",
+      "topic": "Section name from the document",
       "marks": 2,
       "stem": "Question text?",
       "options": ["A. Option one", "B. Option two", "C. Option three", "D. Option four"],
@@ -485,7 +476,7 @@ Return ONLY valid JSON — no markdown fences:
       "id": "q2",
       "number": "2",
       "type": "short",
-      "topic": "Topic name",
+      "topic": "Section name",
       "marks": 4,
       "stem": "Explain...",
       "modelAnswer": "Key points the student should cover.",
@@ -495,7 +486,7 @@ Return ONLY valid JSON — no markdown fences:
       "id": "q3",
       "number": "3",
       "type": "essay",
-      "topic": "Topic name",
+      "topic": "Section name",
       "marks": 10,
       "stem": "Discuss...",
       "modelAnswer": "A well-structured answer would include...",
@@ -504,11 +495,11 @@ Return ONLY valid JSON — no markdown fences:
   ]
 }`;
 
-  onProgress?.('Generating exam from your notes…');
+  onProgress?.('Generating exam from your document…');
 
   const raw = await generateText(
-    [{ text: prompt }],
-    'You are an expert exam paper designer. Generate questions ONLY from the provided study material. Output only valid JSON — no markdown, no extra text.',
+    [{ inlineData: { data: pdfBase64, mimeType: 'application/pdf' } }, { text: prompt }],
+    'You are an expert exam paper designer. Generate questions ONLY from the attached PDF. Output only valid JSON — no markdown, no extra text.',
     12000,
     'generateExamFromNotes',
     userId ?? null,

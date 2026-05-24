@@ -273,13 +273,14 @@ function typeChip(type: string): { bg: string; fg: string } {
 // ── Main screen ────────────────────────────────────────────────
 
 interface ExamScreenProps {
-  userId?:        string;
-  onBack:         () => void;
-  extractedText?: string | null;   // document text — enables "from my notes" mode
-  topic?:         string;          // document title shown in the exam
+  userId?:     string;
+  onBack:      () => void;
+  /** Returns the full PDF base64 for the current document (fetches from storage if needed). Null when no document is open. */
+  resolvePdf?: (() => Promise<string | null>) | null;
+  topic?:      string;
 }
 
-export function ExamScreen({ userId, onBack, extractedText, topic }: ExamScreenProps) {
+export function ExamScreen({ userId, onBack, resolvePdf, topic }: ExamScreenProps) {
   // ── DB state ─────────────────────────────────────────────────
   const [examSets,         setExamSets]         = useState<StoredExamSet[]>([]);
   const [attemptSummaries, setAttemptSummaries] = useState<Record<string, AttemptSummary>>({});
@@ -410,14 +411,20 @@ export function ExamScreen({ userId, onBack, extractedText, topic }: ExamScreenP
 
   const handleGenerate = async () => {
     if (examSource === 'papers' && papers.length < 2) return;
-    if (examSource === 'notes' && !extractedText) return;
+    if (examSource === 'notes' && !resolvePdf) return;
     setPhase('generating');
     setError(null);
     setSavingError(null);
     try {
-      const generated = examSource === 'notes'
-        ? await generateExamFromNotes(extractedText!, topic ?? 'Document', setProgressMsg, userId)
-        : await analyzeAndGenerateExam(papers.map(p => p.base64), setProgressMsg, userId);
+      let generated: GeneratedExam;
+      if (examSource === 'notes') {
+        setProgressMsg('Loading your document…');
+        const pdf = await resolvePdf!();
+        if (!pdf) throw new Error('Could not load the document PDF. Try re-opening the document.');
+        generated = await generateExamFromNotes(pdf, topic ?? 'Document', setProgressMsg, userId);
+      } else {
+        generated = await analyzeAndGenerateExam(papers.map(p => p.base64), setProgressMsg, userId);
+      }
       setExam(generated);
       setAnswers({});
 
@@ -732,7 +739,7 @@ export function ExamScreen({ userId, onBack, extractedText, topic }: ExamScreenP
               guestMode={!userId}
               fileInputRef={fileInputRef}
               examSource={examSource}
-              extractedText={extractedText ?? null}
+              hasPdf={!!resolvePdf}
               notesToTopic={topic ?? null}
               onSourceChange={setExamSource}
               onDragOver={() => setDragging(true)}
@@ -1034,7 +1041,7 @@ function HowItWorks() {
 
 // ── Upload panel (homepage) ────────────────────────────────────
 
-function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInputRef, examSource, extractedText, notesToTopic, onSourceChange, onDragOver, onDragLeave, onDrop, onFileInput, onRemovePaper, onGenerate }: {
+function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInputRef, examSource, hasPdf, notesToTopic, onSourceChange, onDragOver, onDragLeave, onDrop, onFileInput, onRemovePaper, onGenerate }: {
   papers:          UploadedPaper[];
   dragging:        boolean;
   error:           string | null;
@@ -1042,7 +1049,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
   guestMode:       boolean;
   fileInputRef:    React.RefObject<HTMLInputElement | null>;
   examSource:      'papers' | 'notes';
-  extractedText:   string | null;
+  hasPdf:          boolean;
   notesToTopic:    string | null;
   onSourceChange:  (s: 'papers' | 'notes') => void;
   onDragOver:      () => void;
@@ -1052,7 +1059,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
   onRemovePaper:   (i: number) => void;
   onGenerate:      () => void;
 }) {
-  const notesReady = examSource === 'notes' && !!extractedText;
+  const notesReady = examSource === 'notes' && hasPdf;
 
   return (
     <div style={{ flex: 1, overflowY: 'auto', padding: '24px 24px' }}>
@@ -1069,13 +1076,13 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
               key={src}
               type="button"
               onClick={() => onSourceChange(src)}
-              disabled={src === 'notes' && !extractedText}
+              disabled={src === 'notes' && !hasPdf}
               style={{
-                flex: 1, border: 'none', cursor: src === 'notes' && !extractedText ? 'not-allowed' : 'pointer',
+                flex: 1, border: 'none', cursor: src === 'notes' && !hasPdf ? 'not-allowed' : 'pointer',
                 borderRadius: 10, padding: '9px 16px', fontSize: 13, fontWeight: 700,
                 transition: 'background 0.15s, color 0.15s',
                 background: examSource === src ? 'var(--brand)' : 'transparent',
-                color: examSource === src ? '#fff' : src === 'notes' && !extractedText ? 'var(--ink-4)' : 'var(--ink-3)',
+                color: examSource === src ? '#fff' : src === 'notes' && !hasPdf ? 'var(--ink-4)' : 'var(--ink-3)',
               }}
             >
               {src === 'papers' ? '📄 Past Papers' : '📒 My Notes'}
@@ -1246,8 +1253,8 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
               </div>
               <div style={{ fontSize: 12, color: notesReady ? '#059669' : 'var(--ink-4)' }}>
                 {notesReady
-                  ? `${Math.round(extractedText!.length / 5).toLocaleString()} words of content will be used to set the exam.`
-                  : 'Open a document and let it finish loading, then return here.'
+                  ? 'Full document loaded — AI will read every page to set the exam.'
+                  : 'Open a document first, then return here to generate an exam from it.'
                 }
               </div>
             </div>

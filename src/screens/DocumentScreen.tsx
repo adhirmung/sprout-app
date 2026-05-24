@@ -763,8 +763,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     <ExamScreen
       userId={userId}
       onBack={() => setPhase('idle')}
-      extractedText={extractedText ?? content}
       topic={topic}
+      resolvePdf={pdfBase64 || storagePath ? async () => {
+        if (pdfBase64) return pdfBase64;
+        if (storagePath) return fetchPdfBase64FromStorage(storagePath).catch(() => null);
+        return null;
+      } : null}
     />
   );
 
