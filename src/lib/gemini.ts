@@ -607,10 +607,19 @@ export async function generateContentMap(
     ? `\n\nCRITICAL GAP-FILL REQUIREMENT:\nA coverage audit identified the following concepts as MISSING from an earlier version of this map.\nYou MUST explicitly include ALL of these in appropriate topics and subtopics — do not skip any:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}\nIf a concept doesn't fit existing topics, add a new subtopic or topic to accommodate it.`
     : '';
 
+  // For map generation we need to see the full document — use 120K chars (3× the
+  // general sourceBlock limit) so that long handbooks/textbooks are fully covered.
+  const MAP_TEXT_LIMIT = 120_000;
+  const mapSource = hasPdf
+    ? 'The full document (text + images) is attached above.'
+    : contentText
+      ? `SOURCE CONTENT — use ONLY facts from this text:\n"""\n${contentText.slice(0, MAP_TEXT_LIMIT)}\n"""`
+      : '(No source — use accurate general knowledge for this topic.)';
+
   const prompt = `You are an expert educational content analyst. Analyze this document and extract a structured learning map.
 
 Topic: "${topic}"
-${sourceBlock(contentText, hasPdf)}${gapBlock}
+${mapSource}${gapBlock}
 
 Extract a comprehensive hierarchical topic map covering the COMPLETE document.
 
