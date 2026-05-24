@@ -783,103 +783,119 @@ Return ONLY valid JSON — no markdown fences:
   return parsed;
 }
 
-// ── Heading-list extractor ────────────────────────────────────
-// For PDFs: uses streaming generateContentStream (same mechanism as
-// extractPdfContent) so the model reads the document progressively —
-// non-streaming calls on large PDFs scan an inconsistent portion of the
-// document on each run, producing different heading counts every time.
-// Streaming forces a full sequential pass.  Output format is simple
-// markdown heading lines (# / ##) which are very compact and never
-// truncate, then parsed by parseSectionsFromMarkdown.
-//
-// For text-only (no PDF): falls back to a single JSON-returning call.
+// ── PDF structure extractor (unified, single streaming call) ─────
+// Replaces the old two-step approach (extract headings → generate summaries).
+// The model reads the full PDF and outputs the complete ContentMap JSON
+// in one streaming pass — using content understanding, not visual formatting,
+// to determine what is a chapter vs. a subsection vs. a reference list.
+// Streaming avoids Netlify's 26s edge-function timeout on large PDFs.
+
+async function extractDocumentStructure(
+  topic:     string,
+  pdfBase64: string,
+): Promise<ContentMap | null> {
+  const client = getClient();
+
+  const prompt = `Analyse the document titled "${topic}" and output its complete topic structure as JSON.
+
+For each major chapter or section in the document:
+- Write a 1-sentence summary
+- List EVERY named sub-section within it as a subtopic, including:
+  - Numbered sub-sections (e.g., 1. Common Nouns, 2. Proper Nouns)
+  - Lettered sub-sections (e.g., A. Capital Letters, B. Full Stops)
+  - Named sub-categories (e.g., Comparisons, Sound Devices, Co-ordinating Conjunctions)
+  - Named degree/level categories within a table (e.g., Positive Degree, Comparative Degree, Superlative Degree)
+- Write a 1-sentence summary for each subtopic
+
+Rules:
+- Use your understanding of the content to determine hierarchy — NOT just visual formatting
+- A main chapter/section = a standalone concept block with its own title page or bold heading (e.g., NOUNS, VERBS, PUNCTUATION)
+- A subtopic = a named sub-category, numbered point, or lettered section WITHIN a chapter
+- Descriptive labels, table captions, or reference lists inside a chapter are NOT separate top-level topics
+- Vocabulary lists, appendices, and pure reference tables with no named sub-categories get an empty subtopics array []
+- Copy all titles exactly as they appear in the document
+- Do NOT invent, skip, merge, or rename any section
+
+Return ONLY valid JSON — no markdown fences, no explanation:
+{
+  "synthesis": "Two sentences describing the overall document.",
+  "topics": [
+    {
+      "id": "t1",
+      "title": "Chapter title exactly as in the document",
+      "summary": "One sentence.",
+      "subtopics": [
+        { "id": "t1s1", "title": "Subsection title exactly as in document", "summary": "One sentence." }
+      ]
+    }
+  ]
+}`;
+
+  let accumulated  = '';
+  let inputTokens  = 0;
+  let outputTokens = 0;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      accumulated  = '';
+      inputTokens  = 0;
+      outputTokens = 0;
+      const stream = await client.models.generateContentStream({
+        model:    SMART_MODEL,
+        contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
+        config:   {
+          systemInstruction: 'You are a precise JSON generator. Output ONLY valid JSON — no markdown fences, no explanation, no extra text.',
+          maxOutputTokens:   16000,
+          temperature:       0.0,
+          thinkingConfig:    { thinkingBudget: 0 },
+        },
+      });
+      for await (const chunk of stream) {
+        accumulated += chunk.text ?? '';
+        if (chunk.usageMetadata) {
+          inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+          outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+        }
+      }
+      break;
+    } catch (err) {
+      const msg         = String(err);
+      const isRetryable = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('timed out');
+      if (!isRetryable || attempt === 3) throw err;
+      await new Promise(r => setTimeout(r, attempt * 1000));
+    }
+  }
+
+  void dbLogUsage(_currentUserId, 'extractDocumentStructure', SMART_MODEL, inputTokens, outputTokens);
+
+  try {
+    const parsed = parseJson<ContentMap>(accumulated);
+    if (Array.isArray(parsed.topics) && parsed.topics.length > 0) {
+      // Re-stamp IDs so they are always consistent
+      const topics = parsed.topics.map((t, ti) => ({
+        ...t,
+        id:        `t${ti + 1}`,
+        subtopics: (t.subtopics ?? []).map((s, si) => ({
+          ...s,
+          id: `t${ti + 1}s${si + 1}`,
+        })),
+      }));
+      return { synthesis: parsed.synthesis ?? '', topics };
+    }
+  } catch (e) {
+    console.error('[extractDocumentStructure] parse error:', e);
+  }
+  return null;
+}
+
+// ── Text-only heading extractor (no PDF) ─────────────────────────
+// Used when there is no PDF — extracts section structure from extracted
+// text via a single JSON call. No streaming needed (no binary upload).
 
 async function extractSectionHeadings(
   topic:       string,
-  contentText: string | null,
-  pdfBase64:   string | null,
+  contentText: string,
 ): Promise<ParsedSection[]> {
-  const client = getClient();
-
-  if (pdfBase64) {
-    // ── PDF path: stream heading lines ────────────────────────
-    const prompt = `You are reading the document titled "${topic}".
-
-Your ONLY task: list every chapter/section heading AND every named sub-section within each chapter, in the order they appear.
-
-Output rules — follow exactly:
-- Write ONLY heading lines, nothing else (no body text, no commentary, no blank lines between headings)
-- Use # for each main chapter or section title (e.g., PUNCTUATION, NOUNS, VERBS, FIGURES OF SPEECH)
-- Use ## for EVERY named sub-section within a chapter, including:
-  - Lettered sub-sections: A. CAPITAL LETTERS, B. FULL STOPS, H. QUOTATION MARKS
-  - Numbered sub-sections: 1. COMMON NOUNS, 2. PROPER NOUNS, 4. AUXILIARY VERBS
-  - Named sub-categories under a numbered point (e.g., COMPARISONS, SOUND DEVICES, CONTRADICTIONS)
-- Copy heading text EXACTLY as it appears in the document — do not paraphrase or rename
-- Do NOT skip any chapter, lettered section, or numbered sub-section
-- If a chapter has no sub-sections, just output the # heading alone
-
-Example of correct output for a grammar handbook:
-# Punctuation
-## A. Capital Letters
-## B. Full Stops
-## C. Commas
-# Nouns
-## 1. Common Nouns
-## 2. Proper Nouns
-## 3. Abstract Nouns
-## 4. Collective Nouns
-# Verbs
-## 1. The Three Tenses
-## 2. Finite Verbs
-## 3. The Infinitive
-
-Begin listing all headings now:`;
-
-    // Retry up to 3 times — Google returns transient 503s on large PDFs
-    let accumulated  = '';
-    let inputTokens  = 0;
-    let outputTokens = 0;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        accumulated  = '';
-        inputTokens  = 0;
-        outputTokens = 0;
-        const stream = await client.models.generateContentStream({
-          model:    SMART_MODEL,
-          contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
-          config:   {
-            systemInstruction: 'Output ONLY # and ## heading lines. Treat every lettered (A. B. C.) and numbered (1. 2. 3.) sub-section as a ## heading. Absolutely no other text.',
-            maxOutputTokens:   8000,
-            temperature:       0.0,
-            thinkingConfig:    { thinkingBudget: 0 },
-          },
-        });
-        for await (const chunk of stream) {
-          accumulated += chunk.text ?? '';
-          if (chunk.usageMetadata) {
-            inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
-            outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
-          }
-        }
-        break; // success — exit retry loop
-      } catch (err) {
-        const msg = String(err);
-        const isRetryable = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('timed out');
-        if (!isRetryable || attempt === 3) throw err;
-        // Wait briefly before retrying (1s, then 2s)
-        await new Promise(r => setTimeout(r, attempt * 1000));
-      }
-    }
-    void dbLogUsage(_currentUserId, 'extractSectionHeadings', SMART_MODEL, inputTokens, outputTokens);
-
-    const sections = parseSectionsFromMarkdown(accumulated);
-    if (sections.length > 0) return sections;
-    // Fall through to text-based path if streaming produced nothing
-  }
-
-  // ── Text path: single JSON call ────────────────────────────
-  if (!contentText) return [];
-
   const prompt = `Document: "${topic}"
 
 Document text:
@@ -912,8 +928,8 @@ Return ONLY valid JSON — no markdown fences, no explanation:
 
   const parsed = parseJson<{ headings: { level: number; title: string }[] }>(raw);
   return (parsed.headings ?? []).map(h => ({
-    level: Math.min(Math.max(h.level ?? 1, 1), 3) as 1 | 2 | 3,
-    title: String(h.title ?? '').trim(),
+    level:   Math.min(Math.max(h.level ?? 1, 1), 3) as 1 | 2 | 3,
+    title:   String(h.title ?? '').trim(),
     snippet: '',
   })).filter(h => h.title.length > 0);
 }
@@ -921,9 +937,9 @@ Return ONLY valid JSON — no markdown fences, no explanation:
 // ── generateContentMap (public entry point) ───────────────────
 // Three-path strategy:
 //  1. Parse markdown headings from extracted text (instant, no API call).
-//  2. Ask the model for headings only (small, fast, reliable) — used when
-//     the PDF has non-standard heading formatting (coloured banners etc.).
-//  3. Full model-driven map — last resort for unstructured docs (essays, articles).
+//  2. PDF → single streaming JSON call: model outputs full ContentMap
+//     using content understanding, not visual formatting heuristics.
+//  3. Full model-driven map — last resort for unstructured docs with no PDF.
 
 export async function generateContentMap(
   topic:       string,
@@ -933,14 +949,12 @@ export async function generateContentMap(
 ): Promise<ContentMap> {
 
   // ── Path 1: markdown heading parse (no API call) ──────────────
-  // Only reliable when there is NO PDF — otherwise the PDF's non-standard
-  // headings (coloured banners etc.) won't appear in the extracted text
-  // and Path 1 returns only the few sections that happen to look like
-  // markdown headings, missing most of the document.
+  // Only used when there is NO PDF — PDFs with coloured/visual headings
+  // won't produce useful markdown headings from text extraction.
   if (!pdfBase64) {
     const sections = contentText ? parseSectionsFromMarkdown(contentText) : [];
     if (sections.length > 0) {
-      const h1Count   = sections.filter(s => s.level === 1).length;
+      const h1Count    = sections.filter(s => s.level === 1).length;
       const normalised = h1Count === 0
         ? sections.map(s => ({ ...s, level: 1 as const }))
         : sections;
@@ -948,16 +962,24 @@ export async function generateContentMap(
     }
   }
 
-  // ── Path 2: focused heading extraction via model (one API call) ─
-  // Always used when a PDF is present — the model reads the raw PDF and
-  // lists every heading verbatim, regardless of visual formatting style.
-  const headings = await extractSectionHeadings(topic, contentText, pdfBase64);
-  if (headings.length > 0) {
-    const h1Count   = headings.filter(h => h.level === 1).length;
-    const normalised = h1Count === 0
-      ? headings.map(h => ({ ...h, level: 1 as const }))
-      : headings;
-    return generateMapFromHeadings(topic, normalised);
+  // ── Path 2: unified PDF structure extraction ──────────────────
+  // Single streaming call — model reads the PDF and outputs the full
+  // ContentMap JSON directly, handling any heading style universally.
+  if (pdfBase64) {
+    const map = await extractDocumentStructure(topic, pdfBase64);
+    if (map) return map;
+  }
+
+  // ── Path 2b: text-only heading extraction (no PDF, no markdown) ─
+  if (contentText) {
+    const headings = await extractSectionHeadings(topic, contentText);
+    if (headings.length > 0) {
+      const h1Count    = headings.filter(h => h.level === 1).length;
+      const normalised = h1Count === 0
+        ? headings.map(h => ({ ...h, level: 1 as const }))
+        : headings;
+      return generateMapFromHeadings(topic, normalised);
+    }
   }
 
   // ── Path 3: full model-driven map — last resort ───────────────
