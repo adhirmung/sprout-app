@@ -201,6 +201,55 @@ export async function streamCardChat(
   void dbLogUsage(_currentUserId, 'streamCardChat', FAST_MODEL, inputTokens, outputTokens);
 }
 
+// ── PDF extractor ─────────────────────────────────────────────
+// Streams the full document content (text + tables + image descriptions)
+// via Gemini multimodal. Returns rich markdown. Because we stream, the
+// Netlify 26s edge-function timeout never fires — chunks arrive continuously.
+
+export async function extractPdfContent(
+  pdfBase64: string,
+  onChunk?:  (accumulated: string, newChunk: string) => void,
+): Promise<string> {
+  const client = getClient();
+
+  const prompt = `Extract the COMPLETE text content of this document. Include every heading, subheading, body paragraph, table cell, caption, label, and footnote.
+- Format tables as Markdown tables (| col | col | format)
+- For charts, diagrams, or images: write a brief description in [square brackets] explaining what is shown
+- Use # for main headings, ## for subheadings, ### for smaller headings
+- Reproduce ALL text verbatim — do not skip, summarise, or paraphrase any section
+- Do NOT add commentary, notes, or your own interpretation`;
+
+  const stream = await client.models.generateContentStream({
+    model:    SMART_MODEL,
+    contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
+    config:   {
+      systemInstruction: 'You are a precise document transcription assistant. Reproduce every word of the document faithfully.',
+      maxOutputTokens:   32000,
+      temperature:       0.0,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  let accumulated  = '';
+  let inputTokens  = 0;
+  let outputTokens = 0;
+
+  for await (const chunk of stream) {
+    const t = chunk.text ?? '';
+    if (t) {
+      accumulated += t;
+      onChunk?.(accumulated, t);
+    }
+    if (chunk.usageMetadata) {
+      inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+    }
+  }
+
+  void dbLogUsage(_currentUserId, 'extractPdfContent', SMART_MODEL, inputTokens, outputTokens);
+  return accumulated;
+}
+
 // ── Types ─────────────────────────────────────────────────────
 
 export interface SubTopic {
@@ -563,8 +612,14 @@ export async function generateContentMap(
 Topic: "${topic}"
 ${sourceBlock(contentText, hasPdf)}${gapBlock}
 
-Extract a hierarchical topic map. Cover the FULL document proportionally — topics from the beginning, middle, and end.
-Generate 4–8 major topics, each with 2–5 subtopics.
+Extract a comprehensive hierarchical topic map covering the COMPLETE document.
+
+TOPIC COUNT RULES — choose the right approach based on document type:
+- Reference documents, handbooks, guides, textbooks, curricula, or documents with many named sections/chapters: identify EVERY distinct named section as its own topic. There is no maximum — full coverage matters more than brevity. These documents may have 15–40 topics.
+- Essays, reports, articles, or continuous documents: identify the main arguments and themes (typically 4–8 topics).
+
+Cover the FULL document proportionally — include topics from the beginning, middle, and end.
+Each topic should have 1–4 subtopics capturing its key points or sub-sections.
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -589,7 +644,7 @@ Return ONLY valid JSON — no markdown fences:
     SMART_MODEL,
     'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
     parts,
-    4000,
+    8000,
     'generateContentMap',
   );
 
@@ -1094,6 +1149,119 @@ Return ONLY valid JSON — no markdown fences:
       .filter((t): t is TopicReading => t !== null);
 
     allTopics.push(...batchTopics);
+  }
+
+  if (allTopics.length === 0) throw new Error('Failed to generate course material. Please retry.');
+  return { topics: allTopics };
+}
+
+// ── Streaming course material (new architecture) ──────────────
+// Generates notes one topic at a time using extractedText (no PDF binary).
+// Each call is text-only + small output ≈ 3–5 s — well within the 26s limit.
+// Topics stream in progressively; the UI can switch to 'course' after topic 1.
+
+export async function streamCourseMaterial(
+  topic:           string,
+  extractedText:   string,
+  contentMap:      ContentMap,
+  onTopicComplete: (tr: TopicReading) => void,
+  onProgress?:     (msg: string) => void,
+): Promise<DocumentReading> {
+  const allTopics:  TopicReading[] = [];
+  const totalTopics = contentMap.topics.length;
+  // Send up to 150 K chars of extracted text per call (covers most documents)
+  const TEXT_LIMIT  = 150_000;
+  const textSlice   = extractedText.slice(0, TEXT_LIMIT);
+
+  for (let i = 0; i < totalTopics; i++) {
+    const t = contentMap.topics[i];
+    onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
+
+    const topicOutline = `Topic (topicId: "${t.id}", title: "${t.title}"):
+Overview: ${t.summary}
+Subtopics:
+${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}`;
+
+    const prompt = `You are an expert educational content organiser. EXTRACT content from the original document — do NOT rewrite or paraphrase.
+
+SUBJECT: "${topic}"
+SOURCE CONTENT (verbatim from the uploaded document):
+"""
+${textSlice}
+"""
+
+TOPIC OUTLINE:
+${topicOutline}
+
+INSTRUCTIONS:
+For each subtopic "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Use the EXACT words — do NOT paraphrase or reword.
+
+Produce for this topic:
+1. "content": VERBATIM sentences from the document for each subtopic.
+2. "quiz": one comprehension question — exactly 3 plausible options, 0-based answer index, 1-sentence explanation.
+
+Also:
+- "keyTerms": 3–5 key terms with clear, document-grounded definitions.
+- "whyItMatters": one sentence on why this topic matters to a student.
+
+Rules: subtopic titles must match the outline EXACTLY; content must come from the document.
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "topicId": "${t.id}",
+  "title": "${t.title}",
+  "subtopics": [
+    {
+      "title": "Subtopic name (must match outline exactly)",
+      "content": "...",
+      "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
+    }
+  ],
+  "keyTerms": [{ "term": "...", "definition": "..." }],
+  "whyItMatters": "..."
+}`;
+
+    try {
+      const client = getClient();
+      const stream = await client.models.generateContentStream({
+        model:    SMART_MODEL,
+        contents: [{ role: 'user', parts: [textPart(prompt)] }],
+        config:   {
+          systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+          maxOutputTokens:   2000,
+          temperature:       0.1,
+          thinkingConfig:    { thinkingBudget: 0 },
+        },
+      });
+
+      let raw          = '';
+      let inputTokens  = 0;
+      let outputTokens = 0;
+
+      for await (const chunk of stream) {
+        const chunkText = chunk.text ?? '';
+        if (chunkText) raw += chunkText;
+        if (chunk.usageMetadata) {
+          inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+          outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+        }
+      }
+
+      void dbLogUsage(_currentUserId, 'streamCourseMaterial', SMART_MODEL, inputTokens, outputTokens);
+
+      const parsed = parseJson<TopicReading>(raw);
+      if (!Array.isArray(parsed.subtopics) || parsed.subtopics.length === 0) {
+        console.error(`[streamCourseMaterial] topic "${t.title}" — no subtopics`);
+        continue;
+      }
+
+      const tr: TopicReading = { ...parsed, topicId: t.id, title: t.title };
+      allTopics.push(tr);
+      onTopicComplete(tr);
+    } catch (e) {
+      console.error(`[streamCourseMaterial] topic "${t.title}" error:`, e);
+      // continue — partial results are better than nothing
+    }
   }
 
   if (allTopics.length === 0) throw new Error('Failed to generate course material. Please retry.');

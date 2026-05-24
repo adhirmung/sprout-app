@@ -14,10 +14,10 @@ import { VisualBiology } from '../components/VisualBiology';
 import {
   buildChatSystemPrompt,
   evaluateWrittenAnswer,
+  extractPdfContent,
   generateBoosterCards,
   generateContentAudit,
   generateContentMap,
-  generateCourseMaterial,
   generateDocumentDiagnostic,
   generateFeed,
   generateParagraphQuiz,
@@ -27,8 +27,9 @@ import {
   hasApiKey,
   saveApiKey,
   streamCardChat,
+  streamCourseMaterial,
 } from '../lib/gemini';
-import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -57,7 +58,7 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'mapping' | 'map' | 'course-loading' | 'course' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
@@ -84,6 +85,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [needsKey,  setNeedsKey]  = useState(!hasApiKey());
   const [showTutor,         setShowTutor]         = useState(false);
   const [courseProgressMsg, setCourseProgressMsg] = useState('');
+  const [extractedText,    setExtractedText]    = useState<string | null>(null);
+  const [courseStreaming,   setCourseStreaming]   = useState(false);
   const [diagnostic,        setDiagnostic]        = useState<DocumentDiagnostic | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   const retryRef = useRef<HTMLButtonElement>(null);
@@ -135,6 +138,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     } else if (userId) {
       dbLoadContent<DocumentReading>(userId, sourceKey, 'course')
         .then(data => { if (data?.topics?.length && data.topics[0]?.subtopics?.length) { Store.set(`course:${sourceKey}`, data); setCourseMaterial(data); } })
+        .catch(() => {});
+    }
+
+    // Preload extracted text (PDF extraction cache)
+    const cachedExtract = Store.get<string | null>(`extract:${sourceKey}`, null);
+    if (cachedExtract) {
+      setExtractedText(cachedExtract);
+    } else if (userId) {
+      dbLoadContent<{ text: string }>(userId, sourceKey, 'extract')
+        .then(data => { if (data?.text) { Store.set(`extract:${sourceKey}`, data.text); setExtractedText(data.text); } })
         .catch(() => {});
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -279,6 +292,43 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   };
 
+  // ── ensureExtractedText ───────────────────────────────────────
+  // Returns cached extracted text or streams a fresh Gemini extraction.
+  // Caller must have already set an appropriate phase/progress message before calling.
+  const ensureExtractedText = async (resolvedPdf: string): Promise<string> => {
+    // 1. In-memory state
+    if (extractedText) return extractedText;
+
+    // 2. localStorage
+    const cached = Store.get<string | null>(`extract:${sourceKey}`, null);
+    if (cached) { setExtractedText(cached); return cached; }
+
+    // 3. Supabase
+    if (userId) {
+      const dbCached = await dbLoadContent<{ text: string }>(userId, sourceKey, 'extract').catch(() => null);
+      if (dbCached?.text) {
+        Store.set(`extract:${sourceKey}`, dbCached.text);
+        setExtractedText(dbCached.text);
+        return dbCached.text;
+      }
+    }
+
+    // 4. Stream extraction from PDF via Gemini multimodal
+    let chunkCount = 0;
+    const text = await extractPdfContent(resolvedPdf, (accumulated, _chunk) => {
+      chunkCount++;
+      if (chunkCount % 4 === 0) {
+        const words = Math.round(accumulated.split(/\s+/).length / 100) * 100;
+        setCourseProgressMsg(`Reading your document… ~${words.toLocaleString()} words extracted`);
+      }
+    });
+
+    setExtractedText(text);
+    Store.set(`extract:${sourceKey}`, text);
+    if (userId) dbSaveContent(userId, sourceKey, 'extract', { text }).catch(console.error);
+    return text;
+  };
+
   const startLearning = async () => {
     const mapKey = `map:${sourceKey}`;
     // Serve from localStorage cache if available
@@ -298,7 +348,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         return;
       }
     }
-    setPhase('mapping');
     setError('');
     try {
       let resolvedPdf = pdfBase64;
@@ -308,7 +357,19 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (fileType === 'PDF' && !resolvedPdf) {
         throw new Error('Could not load PDF binary. Try re-uploading the file.');
       }
-      const map = await generateContentMap(topic, content, resolvedPdf);
+
+      // For PDF-only docs: extract text first so the map captures every section.
+      // The extracted text is cached — subsequent calls are instant.
+      let textForMap = content;
+      if (!textForMap && resolvedPdf) {
+        setPhase('extracting');
+        setCourseProgressMsg('Reading your document…');
+        textForMap = await ensureExtractedText(resolvedPdf);
+        setCourseProgressMsg('');
+      }
+
+      setPhase('mapping');
+      const map = await generateContentMap(topic, textForMap, textForMap ? null : resolvedPdf);
       Store.set(mapKey, map);
       if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
       setContentMap(map);
@@ -539,18 +600,54 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         Store.set(`course:${sourceKey}`, dbCached); setCourseMaterial(dbCached); setPhase('course'); return;
       }
     }
+
     setPhase('course-loading');
-    setCourseProgressMsg('Reading your document…');
+    setCourseProgressMsg('Preparing notes…');
     setError('');
+
     try {
-      let resolvedPdf = pdfBase64;
-      if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
-      const cm = await generateCourseMaterial(topic, content, resolvedPdf, map, setCourseProgressMsg);
+      // ── Get the text source ───────────────────────────────────
+      // Priority: in-memory extractedText → content text → extract PDF
+      let et: string = extractedText ?? content ?? '';
+      if (!et) {
+        let resolvedPdf = pdfBase64;
+        if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
+        if (!resolvedPdf) throw new Error('No document content available to generate notes from.');
+        setPhase('extracting');
+        setCourseProgressMsg('Reading your document…');
+        et = await ensureExtractedText(resolvedPdf);
+        setPhase('course-loading');
+        setCourseProgressMsg('Building notes…');
+      }
+
+      // ── Stream topics one by one ──────────────────────────────
+      // Switch to 'course' phase after the first topic arrives so the user
+      // can start reading while the remaining topics are still being generated.
+      setCourseStreaming(true);
+      const allTopics: TopicReading[] = [];
+
+      await streamCourseMaterial(
+        topic, et, map,
+        (tr) => {
+          allTopics.push(tr);
+          setCourseMaterial(prev =>
+            prev ? { topics: [...prev.topics, tr] } : { topics: [tr] },
+          );
+          // Reveal the notes view the moment the first topic is ready
+          if (allTopics.length === 1) setPhase('course');
+        },
+        (msg) => setCourseProgressMsg(msg),
+      );
+
+      setCourseStreaming(false);
+
+      // Cache the complete set now that all topics have arrived
+      const cm = { topics: allTopics };
       Store.set(`course:${sourceKey}`, cm);
       if (userId) dbSaveContent(userId, sourceKey, 'course', cm).catch(console.error);
-      setCourseMaterial(cm);
-      setPhase('course');
+
     } catch (e) {
+      setCourseStreaming(false);
       const msg = e instanceof Error ? e.message : 'Failed to generate course material. Please retry.';
       console.error('[startCourseMaterial] error:', e);
       setError(msg);
@@ -584,13 +681,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       contentAudit={null}
       isCourse={true}
       hasCourseMaterial={true}
+      courseStreaming={courseStreaming}
       diagnostic={diagnostic}
       diagnosticLoading={diagnosticLoading}
       onRunDiagnostic={runDiagnostic}
       onContinueToRead={() => startReading(contentMap)}
-      onBack={() => setPhase('map')}
+      onBack={() => { if (!courseStreaming) setPhase('map'); }}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
+        if (courseStreaming) return; // don't allow while streaming
         Store.del(`course:${sourceKey}`);
         setCourseMaterial(null);
         setDiagnostic(null);
@@ -694,6 +793,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           score={score} streak={streak}
           onBack={
             (phase === 'loading' || phase === 'mapping') ? () => { setPhase('idle'); setError(''); } :
+            (phase === 'extracting') ? () => { contentMap ? setPhase('map') : setPhase('idle'); setError(''); } :
             (phase === 'read-loading' || phase === 'course-loading') ? () => { setPhase('map'); setError(''); } :
             onBack
           }
@@ -724,8 +824,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onStartExam={() => setPhase('exam')}
           />
         )}
-        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading' || phase === 'course-loading') && (
-          <FeedLoading topic={topic} message={phase === 'course-loading' ? courseProgressMsg : undefined} />
+        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading' || phase === 'course-loading' || phase === 'extracting') && (
+          <FeedLoading
+            topic={topic}
+            message={(phase === 'course-loading' || phase === 'extracting') ? courseProgressMsg : undefined}
+            isExtracting={phase === 'extracting'}
+          />
         )}
         {phase === 'running' && cards.length > 0 && cards[idx] && (
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
@@ -2402,7 +2506,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, diagnostic, diagnosticLoading, onRunDiagnostic, onContinueToRead, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, onContinueToRead, onBack, onPractice, onRegenerate }: {
   documentReading:    DocumentReading;
   topic:              string;
   hasCache:           boolean;
@@ -2410,8 +2514,9 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
   readEnhancing:      boolean;
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
   contentAudit:       ContentAudit | null;
-  isCourse?:          boolean;   // true = Course Material (step 2); false/undefined = Read (step 3)
-  hasCourseMaterial?: boolean;   // whether course material exists (for Read's step 2 indicator)
+  isCourse?:          boolean;    // true = Course Material (step 2); false/undefined = Read (step 3)
+  hasCourseMaterial?: boolean;    // whether course material exists (for Read's step 2 indicator)
+  courseStreaming?:    boolean;    // true while topics are still being streamed in
   diagnostic?:        DocumentDiagnostic | null;
   diagnosticLoading?: boolean;
   onRunDiagnostic?:   () => void;
@@ -3026,6 +3131,32 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
             </div>
           );
         })}
+
+        {/* Streaming indicator — visible while notes topics are still being generated */}
+        {courseStreaming && (
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 14,
+            padding: '18px 20px', borderRadius: 16,
+            border: '1.5px dashed var(--brand-soft)',
+            background: 'var(--brand-tint)',
+            marginTop: 8,
+          }}>
+            <div style={{
+              width: 32, height: 32, borderRadius: '50%', flexShrink: 0,
+              border: '3px solid var(--brand-soft)', borderTopColor: 'var(--brand)',
+              animation: 'spin 1s linear infinite',
+            }} />
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--brand)', marginBottom: 2 }}>
+                Generating more topics…
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>
+                You can start reading — new topics will appear below as they're ready.
+              </div>
+            </div>
+          </div>
+        )}
+
         </>)}
       </div>
     </div>
@@ -3434,7 +3565,7 @@ function QualityBadge({ audit }: { audit: FeedAudit }) {
 
 // ── Feed loading ──────────────────────────────────────────────
 
-function FeedLoading({ topic, message }: { topic: string; message?: string }) {
+function FeedLoading({ topic, message, isExtracting }: { topic: string; message?: string; isExtracting?: boolean }) {
   const STEPS = ['Reading your content…', 'Matching to your learning profile…', 'Crafting your feed…'];
   const [step, setStep] = useState(0);
   useEffect(() => {
@@ -3444,23 +3575,31 @@ function FeedLoading({ topic, message }: { topic: string; message?: string }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [message]);
 
+  const heading = isExtracting
+    ? 'Reading your document'
+    : message
+      ? 'Building your notes'
+      : 'Generating your feed';
+
+  const timeHint = isExtracting
+    ? 'Extracting text, tables & images — one-time, then cached'
+    : 'Usually 20–40 s';
+
   return (
     <div style={{ display: 'grid', placeItems: 'center', height: '100%', padding: 24 }}>
-      <div style={{ textAlign: 'center', maxWidth: 360 }}>
+      <div style={{ textAlign: 'center', maxWidth: 380 }}>
         <div style={{ position: 'relative', width: 96, height: 96, margin: '0 auto 24px' }}>
           <div style={{ position: 'absolute', inset: 0, borderRadius: '50%', border: '4px solid var(--brand-soft)', borderTopColor: 'var(--brand)', animation: 'spin 1s linear infinite' }} />
           <div style={{ position: 'absolute', inset: 0, display: 'grid', placeItems: 'center' }}>
             <SproutMark size={52} />
           </div>
         </div>
-        <h2 className="display" style={{ fontSize: 22, marginBottom: 6 }}>
-          {message ? 'Building your notes' : 'Generating your feed'}
-        </h2>
-        <p style={{ fontSize: 13, color: 'var(--ink-3)', marginBottom: 24 }}>{topic} · Usually 20–40 s</p>
+        <h2 className="display" style={{ fontSize: 22, marginBottom: 6 }}>{heading}</h2>
+        <p style={{ fontSize: 13, color: 'var(--ink-3)', marginBottom: 24 }}>{topic} · {timeHint}</p>
         {message ? (
-          /* Notes batch progress — shows the live "topics X–Y of N" message */
+          /* Live progress message (extraction / notes generation) */
           <div style={{ fontSize: 14, color: 'var(--ink-2)', fontWeight: 500, padding: '10px 16px', background: 'var(--brand-soft)', borderRadius: 10 }}>
-            {message}
+            {message || (isExtracting ? 'Reading your document…' : 'Starting…')}
           </div>
         ) : (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10, textAlign: 'left' }}>
