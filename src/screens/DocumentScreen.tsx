@@ -764,11 +764,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       userId={userId}
       onBack={() => setPhase('idle')}
       topic={topic}
-      resolvePdf={pdfBase64 || storagePath ? async () => {
-        if (pdfBase64) return pdfBase64;
-        if (storagePath) return fetchPdfBase64FromStorage(storagePath).catch(() => null);
-        return null;
-      } : null}
+      topicTitles={contentMap?.topics.flatMap(t => [
+        t.title,
+        ...t.subtopics.map(s => s.title),
+      ]) ?? null}
     />
   );
 

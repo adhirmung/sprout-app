@@ -822,25 +822,39 @@ Example of correct output:
 
 Begin listing all headings now:`;
 
-    const stream = await client.models.generateContentStream({
-      model:    SMART_MODEL,
-      contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
-      config:   {
-        systemInstruction: 'Output ONLY # and ## heading lines. Absolutely no other text.',
-        maxOutputTokens:   8000,
-        temperature:       0.0,
-        thinkingConfig:    { thinkingBudget: 0 },
-      },
-    });
-
+    // Retry up to 3 times — Google returns transient 503s on large PDFs
     let accumulated  = '';
     let inputTokens  = 0;
     let outputTokens = 0;
-    for await (const chunk of stream) {
-      accumulated += chunk.text ?? '';
-      if (chunk.usageMetadata) {
-        inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
-        outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        accumulated  = '';
+        inputTokens  = 0;
+        outputTokens = 0;
+        const stream = await client.models.generateContentStream({
+          model:    SMART_MODEL,
+          contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
+          config:   {
+            systemInstruction: 'Output ONLY # and ## heading lines. Absolutely no other text.',
+            maxOutputTokens:   8000,
+            temperature:       0.0,
+            thinkingConfig:    { thinkingBudget: 0 },
+          },
+        });
+        for await (const chunk of stream) {
+          accumulated += chunk.text ?? '';
+          if (chunk.usageMetadata) {
+            inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+            outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+          }
+        }
+        break; // success — exit retry loop
+      } catch (err) {
+        const msg = String(err);
+        const isRetryable = msg.includes('503') || msg.includes('UNAVAILABLE') || msg.includes('timed out');
+        if (!isRetryable || attempt === 3) throw err;
+        // Wait briefly before retrying (1s, then 2s)
+        await new Promise(r => setTimeout(r, attempt * 1000));
       }
     }
     void dbLogUsage(_currentUserId, 'extractSectionHeadings', SMART_MODEL, inputTokens, outputTokens);

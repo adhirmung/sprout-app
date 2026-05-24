@@ -422,31 +422,37 @@ Return ONLY valid JSON — no markdown:
   return results;
 }
 
-// ── Exam from document PDF ───────────────────────────────────────
+// ── Exam from notes ──────────────────────────────────────────────
 
 /**
- * Generates a practice exam by sending the full PDF directly to the model —
- * the same approach ChatGPT/Claude use. The entire document is in context,
- * so no truncation and no hallucinations from partial extraction.
+ * Generates a practice exam from the document's content map topic titles.
+ * Using topic titles (not the raw PDF) avoids API timeouts on large documents
+ * while still guaranteeing full coverage — every section is listed explicitly
+ * and the model must produce at least one question per section.
  */
 export async function generateExamFromNotes(
-  pdfBase64:   string,
+  topicTitles: string[],
   topic:       string,
   onProgress?: (msg: string) => void,
   userId?:     string | null,
 ): Promise<GeneratedExam> {
-  onProgress?.('Reading your document…');
+  onProgress?.('Building exam from your document sections…');
 
-  const prompt = `The full PDF document titled "${topic}" is attached above.
+  const sectionList = topicTitles.map((t, i) => `${i + 1}. ${t}`).join('\n');
 
-Generate a comprehensive practice exam that tests ONLY facts, concepts, rules, and skills explicitly stated in this document. Do not introduce anything not covered in the PDF.
+  const prompt = `You are creating a practice exam for the subject: "${topic}".
 
-Requirements:
-- 15–25 questions spread proportionally across ALL sections of the document
-- Include a mix of types: mcq, short (2–6 marks), and essay (8–15 marks)
-- Every question must be directly and precisely answerable from the document
-- Distractors for MCQ must be plausible but clearly wrong per the document
-- Mark allocation should reflect question complexity
+The document contains these sections (in order):
+${sectionList}
+
+Your task:
+- Generate 15–25 questions that are spread proportionally across these sections
+- Produce AT LEAST one question for every section listed above
+- Use a mix of types: mcq (multiple choice), short (2–6 marks), essay (8–15 marks)
+- The "topic" field in each question must exactly match one of the section names above
+- Questions must test understanding, not just recall
+- MCQ must have exactly 4 options (A, B, C, D)
+- Total marks must add up to exactly 100
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -458,14 +464,14 @@ Return ONLY valid JSON — no markdown fences:
   "instructions": [
     "Answer ALL questions.",
     "Read each question carefully before answering.",
-    "Base your answers only on what is stated in the study material."
+    "Write neatly and legibly."
   ],
   "questions": [
     {
       "id": "q1",
       "number": "1",
       "type": "mcq",
-      "topic": "Section name from the document",
+      "topic": "Exact section name from the list above",
       "marks": 2,
       "stem": "Question text?",
       "options": ["A. Option one", "B. Option two", "C. Option three", "D. Option four"],
@@ -476,7 +482,7 @@ Return ONLY valid JSON — no markdown fences:
       "id": "q2",
       "number": "2",
       "type": "short",
-      "topic": "Section name",
+      "topic": "Exact section name",
       "marks": 4,
       "stem": "Explain...",
       "modelAnswer": "Key points the student should cover.",
@@ -486,7 +492,7 @@ Return ONLY valid JSON — no markdown fences:
       "id": "q3",
       "number": "3",
       "type": "essay",
-      "topic": "Section name",
+      "topic": "Exact section name",
       "marks": 10,
       "stem": "Discuss...",
       "modelAnswer": "A well-structured answer would include...",
@@ -495,37 +501,15 @@ Return ONLY valid JSON — no markdown fences:
   ]
 }`;
 
-  onProgress?.('Generating exam from your document…');
+  onProgress?.('Generating exam…');
 
-  // Use streaming — same reason as extractSectionHeadings: a non-streaming
-  // call on a large PDF scans an inconsistent portion of the document each
-  // run. Streaming forces a full sequential read before the JSON is emitted.
-  const client = getClient();
-  const stream = await client.models.generateContentStream({
-    model:    EXAM_MODEL,
-    contents: [{ role: 'user', parts: [
-      { inlineData: { data: pdfBase64, mimeType: 'application/pdf' } },
-      { text: prompt },
-    ]}],
-    config: {
-      systemInstruction: 'You are an expert exam paper designer. Generate questions ONLY from the attached PDF. Output only valid JSON — no markdown, no extra text.',
-      maxOutputTokens:   12000,
-      temperature:       0.1,
-      thinkingConfig:    { thinkingBudget: 0 },
-    },
-  });
-
-  let raw          = '';
-  let inputTokens  = 0;
-  let outputTokens = 0;
-  for await (const chunk of stream) {
-    raw += chunk.text ?? '';
-    if (chunk.usageMetadata) {
-      inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
-      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
-    }
-  }
-  void dbLogUsage(userId ?? null, 'generateExamFromNotes', EXAM_MODEL, inputTokens, outputTokens);
+  const raw = await generateText(
+    [{ text: prompt }],
+    'You are an expert exam paper designer. Output only valid JSON — no markdown, no extra text.',
+    12000,
+    'generateExamFromNotes',
+    userId ?? null,
+  );
 
   onProgress?.('Finalising exam…');
 

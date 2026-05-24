@@ -273,14 +273,14 @@ function typeChip(type: string): { bg: string; fg: string } {
 // ── Main screen ────────────────────────────────────────────────
 
 interface ExamScreenProps {
-  userId?:     string;
-  onBack:      () => void;
-  /** Returns the full PDF base64 for the current document (fetches from storage if needed). Null when no document is open. */
-  resolvePdf?: (() => Promise<string | null>) | null;
-  topic?:      string;
+  userId?:      string;
+  onBack:       () => void;
+  /** Topic titles from the content map — used as the source for "from my notes" exam generation. */
+  topicTitles?: string[] | null;
+  topic?:       string;
 }
 
-export function ExamScreen({ userId, onBack, resolvePdf, topic }: ExamScreenProps) {
+export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenProps) {
   // ── DB state ─────────────────────────────────────────────────
   const [examSets,         setExamSets]         = useState<StoredExamSet[]>([]);
   const [attemptSummaries, setAttemptSummaries] = useState<Record<string, AttemptSummary>>({});
@@ -411,17 +411,14 @@ export function ExamScreen({ userId, onBack, resolvePdf, topic }: ExamScreenProp
 
   const handleGenerate = async () => {
     if (examSource === 'papers' && papers.length < 2) return;
-    if (examSource === 'notes' && !resolvePdf) return;
+    if (examSource === 'notes' && !topicTitles?.length) return;
     setPhase('generating');
     setError(null);
     setSavingError(null);
     try {
       let generated: GeneratedExam;
       if (examSource === 'notes') {
-        setProgressMsg('Loading your document…');
-        const pdf = await resolvePdf!();
-        if (!pdf) throw new Error('Could not load the document PDF. Try re-opening the document.');
-        generated = await generateExamFromNotes(pdf, topic ?? 'Document', setProgressMsg, userId);
+        generated = await generateExamFromNotes(topicTitles!, topic ?? 'Document', setProgressMsg, userId);
       } else {
         generated = await analyzeAndGenerateExam(papers.map(p => p.base64), setProgressMsg, userId);
       }
@@ -739,7 +736,7 @@ export function ExamScreen({ userId, onBack, resolvePdf, topic }: ExamScreenProp
               guestMode={!userId}
               fileInputRef={fileInputRef}
               examSource={examSource}
-              hasPdf={!!resolvePdf}
+              hasPdf={!!topicTitles?.length}
               notesToTopic={topic ?? null}
               onSourceChange={setExamSource}
               onDragOver={() => setDragging(true)}
