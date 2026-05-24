@@ -783,53 +783,140 @@ Return ONLY valid JSON — no markdown fences:
   return parsed;
 }
 
-// ── PDF structure extractor (unified, single streaming call) ─────
-// Replaces the old two-step approach (extract headings → generate summaries).
-// The model reads the full PDF and outputs the complete ContentMap JSON
-// in one streaming pass — using content understanding, not visual formatting,
-// to determine what is a chapter vs. a subsection vs. a reference list.
-// Streaming avoids Netlify's 26s edge-function timeout on large PDFs.
+// ── Streaming TOC scanner ─────────────────────────────────────
+//
+// Architecture: AI classifies, code assembles.
+//
+// The model scans the PDF sequentially from start to finish. At each
+// piece of text it makes a single local decision:
+//   TOPIC    → a major standalone chapter heading
+//   SUBTOPIC → a named sub-section within the current topic (first level only)
+//   (silence) → body text, examples, rules, or items nested inside a subtopic
+//
+// Critical rule the model enforces: once it emits a SUBTOPIC, any further
+// sub-items within that subtopic are silence. This prevents Figures of Speech
+// from producing 39 subtopics (individual figures) instead of 5 (categories).
+//
+// Output format is maximally compact — one labelled line per structural element
+// with an inline summary — so streaming never truncates and no second API call
+// is needed to add summaries.
+//
+// Example output the model produces:
+//   SYNTHESIS: A grammar handbook covering punctuation, parts of speech...
+//   TOPIC: PUNCTUATION | Covers the correct usage of punctuation marks.
+//   SUBTOPIC: A. Capital Letters | Rules for capitalising words in sentences.
+//   SUBTOPIC: B. Full Stops | How full stops end sentences and abbreviations.
+//   TOPIC: FIGURES OF SPEECH | Introduces rhetorical devices for expressive writing.
+//   SUBTOPIC: 1. Comparisons | Simile, metaphor, and personification as comparison tools.
+//   SUBTOPIC: 2. Sound Devices | Alliteration, assonance, onomatopoeia, and rhyme.
 
-async function extractDocumentStructure(
+// ── TOC line parser (code half of the AI/code split) ──────────
+
+interface TOCEntry {
+  type:    'synthesis' | 'topic' | 'subtopic';
+  title:   string;
+  summary: string;
+}
+
+function parseTOCLines(raw: string): TOCEntry[] {
+  const entries: TOCEntry[] = [];
+  for (const line of raw.split('\n')) {
+    const trimmed = line.trim();
+    let prefix: TOCEntry['type'] | null = null;
+    let rest = '';
+
+    if (trimmed.startsWith('SYNTHESIS:')) { prefix = 'synthesis'; rest = trimmed.slice('SYNTHESIS:'.length).trim(); }
+    else if (trimmed.startsWith('TOPIC:'))    { prefix = 'topic';     rest = trimmed.slice('TOPIC:'.length).trim(); }
+    else if (trimmed.startsWith('SUBTOPIC:')) { prefix = 'subtopic';  rest = trimmed.slice('SUBTOPIC:'.length).trim(); }
+
+    if (!prefix || !rest) continue;
+
+    const pipe    = rest.indexOf(' | ');
+    const title   = pipe >= 0 ? rest.slice(0, pipe).trim() : rest.trim();
+    const summary = pipe >= 0 ? rest.slice(pipe + 3).trim() : '';
+    if (title) entries.push({ type: prefix, title, summary });
+  }
+  return entries;
+}
+
+// ── ContentMap assembler (code half of the AI/code split) ──────
+
+function assembleTOC(entries: TOCEntry[]): ContentMap {
+  let synthesis = '';
+  const topics: Topic[] = [];
+  let topicIdx = 0;
+
+  for (const entry of entries) {
+    if (entry.type === 'synthesis') {
+      synthesis = entry.title + (entry.summary ? ' ' + entry.summary : '');
+      continue;
+    }
+    if (entry.type === 'topic') {
+      topicIdx++;
+      topics.push({
+        id:        `t${topicIdx}`,
+        title:     entry.title,
+        summary:   entry.summary || `Covers ${entry.title}.`,
+        subtopics: [],
+      });
+    } else if (entry.type === 'subtopic' && topics.length > 0) {
+      const parent = topics[topics.length - 1];
+      parent.subtopics.push({
+        id:      `t${topicIdx}s${parent.subtopics.length + 1}`,
+        title:   entry.title,
+        summary: entry.summary || `Covers ${entry.title}.`,
+      });
+    }
+  }
+
+  return { synthesis, topics };
+}
+
+// ── buildStreamingTOC (AI half — streams labelled lines) ───────
+
+async function buildStreamingTOC(
   topic:     string,
   pdfBase64: string,
 ): Promise<ContentMap | null> {
   const client = getClient();
 
-  const prompt = `Analyse the document titled "${topic}" and output its complete topic structure as JSON.
+  const prompt = `Scan the document "${topic}" from start to finish and build a Table of Contents.
 
-For each major chapter or section in the document:
-- Write a 1-sentence summary
-- List EVERY named sub-section within it as a subtopic, including:
-  - Numbered sub-sections (e.g., 1. Common Nouns, 2. Proper Nouns)
-  - Lettered sub-sections (e.g., A. Capital Letters, B. Full Stops)
-  - Named sub-categories (e.g., Comparisons, Sound Devices, Co-ordinating Conjunctions)
-  - Named degree/level categories within a table (e.g., Positive Degree, Comparative Degree, Superlative Degree)
-- Write a 1-sentence summary for each subtopic
+As you read each piece of text, classify it and emit exactly one of these line types — or emit nothing:
 
-Rules:
-- Use your understanding of the content to determine hierarchy — NOT just visual formatting
-- A main chapter/section = a standalone concept block with its own title page or bold heading (e.g., NOUNS, VERBS, PUNCTUATION)
-- A subtopic = a named sub-category, numbered point, or lettered section WITHIN a chapter
-- Descriptive labels, table captions, or reference lists inside a chapter are NOT separate top-level topics
-- Vocabulary lists, appendices, and pure reference tables with no named sub-categories get an empty subtopics array []
-- Copy all titles exactly as they appear in the document
-- Do NOT invent, skip, merge, or rename any section
+  SYNTHESIS: [two sentences about the whole document]        ← emit once, at the very start
+  TOPIC: [exact title] | [one sentence summary]             ← a major chapter or section
+  SUBTOPIC: [exact title] | [one sentence summary]          ← a named sub-section within the current topic
 
-Return ONLY valid JSON — no markdown fences, no explanation:
-{
-  "synthesis": "Two sentences describing the overall document.",
-  "topics": [
-    {
-      "id": "t1",
-      "title": "Chapter title exactly as in the document",
-      "summary": "One sentence.",
-      "subtopics": [
-        { "id": "t1s1", "title": "Subsection title exactly as in document", "summary": "One sentence." }
-      ]
-    }
-  ]
-}`;
+Classification rules:
+- TOPIC = a standalone major chapter or section (e.g., PUNCTUATION, NOUNS, FIGURES OF SPEECH, DEGREES OF COMPARISON, IRREGULAR VERBS)
+  Every distinctly titled chapter gets its own TOPIC line — do NOT merge chapters together.
+- SUBTOPIC = the FIRST level of named sub-categories within the current topic, such as:
+    Lettered sections:  A. Capital Letters, B. Full Stops
+    Numbered sections:  1. Common Nouns, 2. Proper Nouns, 1. Comparisons, 2. Sound Devices
+    Named categories:   Co-ordinating Conjunctions, Definite Article, Positive Degree
+- Everything else = body text, rules, examples, individual items inside a subtopic → emit NOTHING
+
+The critical rule — depth limit:
+Once you emit a SUBTOPIC, any further sub-items nested inside it are body text. Emit NOTHING for them.
+✓ Emit  SUBTOPIC: 1. Comparisons
+✗ Do NOT emit  a. Simile, b. Metaphor (they are inside a subtopic — emit nothing)
+✓ Emit  SUBTOPIC: A. Capital Letters
+✗ Do NOT emit  the numbered rules below it (they are inside a subtopic — emit nothing)
+
+Reference lists, vocabulary tables, and example lists with no named sub-categories:
+emit the TOPIC line only — no SUBTOPIC lines.
+
+Output one line per item, no blank lines, no other text:
+SYNTHESIS: Two sentences about the whole document here.
+TOPIC: PUNCTUATION | Explains the correct usage of punctuation marks in writing.
+SUBTOPIC: A. Capital Letters | Rules for when to use capital letters.
+SUBTOPIC: B. Full Stops | How full stops end sentences and mark abbreviations.
+TOPIC: NOUNS | Defines nouns as naming words and categorises their types.
+SUBTOPIC: 1. Common Nouns | Ordinary everyday naming words identified by a, an, or the.
+SUBTOPIC: 2. Proper Nouns | Names of specific people, places, or things requiring capitals.
+
+Begin scanning from the very first page now:`;
 
   let accumulated  = '';
   let inputTokens  = 0;
@@ -844,8 +931,8 @@ Return ONLY valid JSON — no markdown fences, no explanation:
         model:    SMART_MODEL,
         contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
         config:   {
-          systemInstruction: 'You are a precise JSON generator. Output ONLY valid JSON — no markdown fences, no explanation, no extra text.',
-          maxOutputTokens:   16000,
+          systemInstruction: 'Output ONLY SYNTHESIS:, TOPIC:, and SUBTOPIC: lines exactly as instructed. No other text.',
+          maxOutputTokens:   8000,
           temperature:       0.0,
           thinkingConfig:    { thinkingBudget: 0 },
         },
@@ -866,26 +953,13 @@ Return ONLY valid JSON — no markdown fences, no explanation:
     }
   }
 
-  void dbLogUsage(_currentUserId, 'extractDocumentStructure', SMART_MODEL, inputTokens, outputTokens);
+  void dbLogUsage(_currentUserId, 'buildStreamingTOC', SMART_MODEL, inputTokens, outputTokens);
 
-  try {
-    const parsed = parseJson<ContentMap>(accumulated);
-    if (Array.isArray(parsed.topics) && parsed.topics.length > 0) {
-      // Re-stamp IDs so they are always consistent
-      const topics = parsed.topics.map((t, ti) => ({
-        ...t,
-        id:        `t${ti + 1}`,
-        subtopics: (t.subtopics ?? []).map((s, si) => ({
-          ...s,
-          id: `t${ti + 1}s${si + 1}`,
-        })),
-      }));
-      return { synthesis: parsed.synthesis ?? '', topics };
-    }
-  } catch (e) {
-    console.error('[extractDocumentStructure] parse error:', e);
-  }
-  return null;
+  const entries = parseTOCLines(accumulated);
+  const topicCount = entries.filter(e => e.type === 'topic').length;
+  if (topicCount === 0) return null;
+
+  return assembleTOC(entries);
 }
 
 // ── Text-only heading extractor (no PDF) ─────────────────────────
@@ -962,11 +1036,12 @@ export async function generateContentMap(
     }
   }
 
-  // ── Path 2: unified PDF structure extraction ──────────────────
-  // Single streaming call — model reads the PDF and outputs the full
-  // ContentMap JSON directly, handling any heading style universally.
+  // ── Path 2: streaming TOC scanner ────────────────────────────
+  // Model scans the PDF sequentially, emitting TOPIC:/SUBTOPIC: labelled
+  // lines; code assembles the ContentMap. Universal — works for any
+  // heading style (numbered, lettered, visual, markdown, or none).
   if (pdfBase64) {
-    const map = await extractDocumentStructure(topic, pdfBase64);
+    const map = await buildStreamingTOC(topic, pdfBase64);
     if (map) return map;
   }
 
