@@ -851,7 +851,36 @@ function assembleTOC(entries: TOCEntry[]): ContentMap {
       synthesis = entry.title + (entry.summary ? ' ' + entry.summary : '');
       continue;
     }
+
     if (entry.type === 'topic') {
+      // ── Elaborating-subtitle guard ─────────────────────────────
+      // If the model emitted a TOPIC whose title is clearly an elaborating
+      // sub-label of the immediately preceding topic (it starts with the
+      // full preceding title word-for-word AND has 6+ words total),
+      // demote it to a subtopic instead of creating a new top-level topic.
+      //
+      // Example: prev = "PREPOSITIONS"
+      //          cur  = "PREPOSITIONS USUALLY REFER TO PLACE, POSITION, TIME, MANNER OR REASON"
+      //          → 10 words, starts with "prepositions " → demoted ✓
+      //
+      // Counter-example: prev = "SYNONYMS"
+      //                  cur  = "SYNONYMS FOR OVERUSED WORDS"
+      //                  → 4 words < 6 → kept as its own topic ✓
+      if (topics.length > 0) {
+        const prev     = topics[topics.length - 1];
+        const prevLow  = prev.title.toLowerCase();
+        const curLow   = entry.title.toLowerCase();
+        const wordCount = entry.title.trim().split(/\s+/).length;
+        if (wordCount >= 6 && curLow.startsWith(prevLow + ' ')) {
+          prev.subtopics.push({
+            id:      `t${topicIdx}s${prev.subtopics.length + 1}`,
+            title:   entry.title,
+            summary: entry.summary || `Covers ${entry.title}.`,
+          });
+          continue;
+        }
+      }
+
       topicIdx++;
       topics.push({
         id:        `t${topicIdx}`,
@@ -902,9 +931,12 @@ Special rules:
 1. Elaborating subtitle — if a heading is clearly a continuation or elaboration of the immediately
    preceding TOPIC (e.g. "PREPOSITIONS USUALLY REFER TO PLACE, POSITION, TIME, MANNER OR REASON"
    appears right after the TOPIC "PREPOSITIONS"), emit it as SUBTOPIC of that TOPIC, NOT as a new TOPIC.
-2. Grammar-comparison tables — if a section contains a table whose columns represent named grammatical
-   forms or degrees (e.g. Positive / Comparative / Superlative inside DEGREES OF COMPARISON), emit
-   those column names as individual SUBTOPIC lines.
+2. Grammar-comparison tables — if a section's table has columns for named grammatical forms or degrees,
+   emit EVERY column header as its own SUBTOPIC line. All three must appear:
+     SUBTOPIC: Positive Degree | …
+     SUBTOPIC: Comparative Degree | …
+     SUBTOPIC: Superlative Degree | …
+   Do NOT collapse them into one line.
 
 The critical rule — depth limit:
 Once you emit a SUBTOPIC, any further sub-items nested inside it are body text. Emit NOTHING for them.
@@ -924,12 +956,10 @@ SUBTOPIC: B. Full Stops | How full stops end sentences and mark abbreviations.
 TOPIC: NOUNS | Defines nouns as naming words and categorises their types.
 SUBTOPIC: 1. Common Nouns | Ordinary everyday naming words identified by a, an, or the.
 SUBTOPIC: 2. Proper Nouns | Names of specific people, places, or things requiring capitals.
-TOPIC: PREPOSITIONS | Defines prepositions as small words that relate two words or phrases.
-SUBTOPIC: Place, Position, Time, Manner or Reason | The main categories of meaning prepositions express.
 TOPIC: DEGREES OF COMPARISON | Explains how adjectives compare nouns using three forms.
-SUBTOPIC: Positive Degree | The base form of the adjective with no comparison implied.
-SUBTOPIC: Comparative Degree | Compares two nouns, typically formed by adding -er or 'more'.
-SUBTOPIC: Superlative Degree | Compares three or more nouns, typically formed by adding -est or 'most'.
+SUBTOPIC: Positive Degree | The base form of the adjective describing without comparison.
+SUBTOPIC: Comparative Degree | Form used when comparing two nouns, e.g. adding -er or 'more'.
+SUBTOPIC: Superlative Degree | Form used for three or more nouns, e.g. adding -est or 'most'.
 
 Begin scanning from the very first page now:`;
 
