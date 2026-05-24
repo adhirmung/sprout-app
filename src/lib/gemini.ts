@@ -783,10 +783,70 @@ Return ONLY valid JSON — no markdown fences:
   return parsed;
 }
 
+// ── Heading-list extractor ────────────────────────────────────
+// When markdown parsing yields too few headings (e.g. the PDF used
+// coloured banners instead of text headings), we ask the model one
+// focused question: "List every section heading in order."
+// The output is tiny (just titles) so it's fast and never truncates.
+
+async function extractSectionHeadings(
+  topic:       string,
+  contentText: string | null,
+  pdfBase64:   string | null,
+): Promise<ParsedSection[]> {
+  const hasPdf = !!pdfBase64;
+
+  const source = hasPdf
+    ? 'The PDF document is attached.'
+    : contentText
+      ? `Document text:\n"""\n${contentText.slice(0, 80_000)}\n"""`
+      : '(No content provided.)';
+
+  const prompt = `Document: "${topic}"
+${source}
+
+List EVERY named section heading and sub-section heading from this document, in the exact order they appear.
+
+Rules:
+- Include ALL sections — do not skip, merge, group, or rename any heading.
+- Use level 1 for main section titles, level 2 for sub-sections under them.
+- Copy the title text exactly as it appears in the document.
+- If the document has 25 named sections, your list must have 25 entries.
+
+Return ONLY valid JSON — no markdown fences, no explanation:
+{
+  "headings": [
+    { "level": 1, "title": "Exact Main Section Title" },
+    { "level": 2, "title": "Exact Sub-section Title" }
+  ]
+}`;
+
+  const parts: Part[] = pdfBase64
+    ? [pdfPart(pdfBase64), textPart(prompt)]
+    : [textPart(prompt)];
+
+  const raw = await generateText(
+    SMART_MODEL,
+    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    parts,
+    4000,
+    'extractSectionHeadings',
+  );
+
+  const parsed = parseJson<{ headings: { level: number; title: string }[] }>(raw);
+  return (parsed.headings ?? []).map(h => ({
+    level: Math.min(Math.max(h.level ?? 1, 1), 3) as 1 | 2 | 3,
+    title: String(h.title ?? '').trim(),
+    snippet: '',
+  })).filter(h => h.title.length > 0);
+}
+
 // ── generateContentMap (public entry point) ───────────────────
-// If the extracted text has ≥ 5 markdown headings, we parse the
-// document's own structure and only ask the model to write summaries.
-// Otherwise we fall back to the model-driven approach for unstructured docs.
+// Three-path strategy:
+//  1. Parse markdown headings from extracted text (instant, no API call).
+//  2. Ask the model for headings only (small, fast, reliable) — used when
+//     the PDF has non-standard heading formatting (coloured banners etc.).
+//  3. Full model-driven map — last resort for unstructured docs (essays, articles).
 
 export async function generateContentMap(
   topic:       string,
@@ -794,19 +854,30 @@ export async function generateContentMap(
   pdfBase64:   string | null,
   gapFill?:    string[],
 ): Promise<ContentMap> {
-  const sections  = contentText ? parseSectionsFromMarkdown(contentText) : [];
+
+  // ── Path 1: markdown heading parse (no API call) ──────────
+  const sections    = contentText ? parseSectionsFromMarkdown(contentText) : [];
   const hasStructure = sections.length >= 5;
 
   if (hasStructure) {
-    // Promote all ##/### to topics if there are no # headings
-    const h1Count = sections.filter(s => s.level === 1).length;
+    const h1Count   = sections.filter(s => s.level === 1).length;
     const normalised = h1Count === 0
       ? sections.map(s => ({ ...s, level: 1 as const }))
       : sections;
     return generateMapFromHeadings(topic, normalised);
   }
 
-  // Fallback: unstructured document — let the model figure out the topics
+  // ── Path 2: focused heading extraction (one small API call) ──
+  const headings = await extractSectionHeadings(topic, contentText, pdfBase64);
+  if (headings.length >= 3) {
+    const h1Count   = headings.filter(h => h.level === 1).length;
+    const normalised = h1Count === 0
+      ? headings.map(h => ({ ...h, level: 1 as const }))
+      : headings;
+    return generateMapFromHeadings(topic, normalised);
+  }
+
+  // ── Path 3: full model-driven map (unstructured docs) ────────
   return generateMapFromModel(topic, contentText, pdfBase64, gapFill);
 }
 
