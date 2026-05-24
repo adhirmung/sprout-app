@@ -14,7 +14,7 @@ export async function dbLoadProfile(userId: string) {
     .from('profiles')
     .select('display_name, cognitive_profile, api_key')
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
   return {
     displayName:      (data?.display_name      as string)              ?? '',
     cognitiveProfile: (data?.cognitive_profile as LearnerProfile|null) ?? null,
@@ -44,7 +44,7 @@ export async function dbLoadGeneratedCards(
     .select('cards_json, content_len')
     .eq('user_id', userId)
     .eq('file_key', fileKey)
-    .single();
+    .maybeSingle();
   if (!data) return null;
   // Handle both old format (plain array) and new format ({ cards, audit })
   const raw = data.cards_json as FeedResult | unknown[];
@@ -92,7 +92,7 @@ export async function dbLoadChatHistory(
     .eq('user_id', userId)
     .eq('file_key', fileKey)
     .eq('card_index', cardIndex)
-    .single();
+    .maybeSingle();
   return (data?.messages as ChatMessage[]) ?? [];
 }
 
@@ -162,7 +162,7 @@ export async function dbLoadContent<T>(
     .eq('user_id', userId)
     .eq('file_key', fileKey)
     .eq('content_type', contentType)
-    .single();
+    .maybeSingle();
   return data ? (data.data_json as T) : null;
 }
 
@@ -196,7 +196,7 @@ export async function dbLoadLibrary(userId: string): Promise<LibraryTree> {
     .from('library')
     .select('tree')
     .eq('user_id', userId)
-    .single();
+    .maybeSingle();
   return (data?.tree as LibraryTree) ?? {};
 }
 
