@@ -114,7 +114,7 @@ function extractJson(raw: string): string {
 // ── Exam generation ─────────────────────────────────────────────
 
 /**
- * Analyses 2+ past exam papers (base64 PDFs) and generates a new
+ * Analyses 1+ past exam papers (base64 PDFs) and generates a new
  * practice exam that mirrors their style, topics, and difficulty.
  */
 export async function analyzeAndGenerateExam(

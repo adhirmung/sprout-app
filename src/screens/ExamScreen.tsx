@@ -410,7 +410,7 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
   // ── Generate exam ─────────────────────────────────────────────
 
   const handleGenerate = async () => {
-    if (examSource === 'papers' && papers.length < 2) return;
+    if (examSource === 'papers' && papers.length < 1) return;
     if (examSource === 'notes' && !topicTitles?.length) return;
     setPhase('generating');
     setError(null);
@@ -952,7 +952,7 @@ const HOW_IT_WORKS_STEPS = [
   {
     icon: '📤',
     title: 'Upload Past Papers',
-    desc: 'Upload 2–5 past NSC exam papers (PDF). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
+    desc: 'Upload 1–5 past NSC exam papers (PDF). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
   },
   {
     icon: '🤖',
@@ -1105,7 +1105,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
                 ? notesToTopic
                   ? `AI will design an exam based solely on your uploaded notes for "${notesToTopic}".`
                   : 'Open a document first, then come back here to generate an exam from its content.'
-                : 'Upload 2–5 past NSC papers and AI will analyse them, then create a timed practice exam that mirrors their style and difficulty.'
+                : 'Upload 1–5 past NSC papers and AI will analyse them, then create a timed practice exam that mirrors their style and difficulty.'
               }
             </div>
           </div>
@@ -1161,7 +1161,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
             <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 5 }}>
               Drop PDF files here or click to browse
             </div>
-            <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 2–5 past exam papers (PDF only)</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 1–5 past exam papers (PDF only)</div>
             <input
               ref={fileInputRef}
               type="file"
@@ -1207,20 +1207,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
             </div>
           )}
 
-          {papers.length < 2 && papers.length > 0 && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '12px 16px', background: '#FFFBEB',
-              border: '1.5px solid #FDE68A', borderRadius: 12, marginBottom: 16,
-            }}>
-              <span style={{ fontSize: 18, flexShrink: 0 }}>⚠️</span>
-              <span style={{ fontSize: 13, color: '#92400E' }}>
-                Upload 1 more paper to enable exam generation.
-              </span>
-            </div>
-          )}
-
-          {papers.length >= 2 && (
+          {papers.length >= 1 && (
             <div style={{
               display: 'flex', alignItems: 'center', gap: 10,
               padding: '12px 16px', background: '#ECFDF5',
@@ -1228,7 +1215,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
             }}>
               <Icon name="check" size={18} stroke="#059669" />
               <span style={{ fontSize: 13, color: '#065F46', fontWeight: 600 }}>
-                {papers.length} papers ready. AI will analyse all of them.
+                {papers.length} {papers.length === 1 ? 'paper' : 'papers'} ready. AI will analyse {papers.length === 1 ? 'it' : 'all of them'}.
               </span>
             </div>
           )}
@@ -1285,7 +1272,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
         )}
 
         {/* Generate button */}
-        {(examSource === 'notes' ? notesReady : papers.length >= 2) && (
+        {(examSource === 'notes' ? notesReady : papers.length >= 1) && (
           <button
             type="button"
             className="btn btn-primary"
