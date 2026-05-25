@@ -1813,12 +1813,39 @@ Return ONLY valid JSON — no markdown fences:
       void dbLogUsage(_currentUserId, 'streamCourseMaterial', SMART_MODEL, inputTokens, outputTokens);
 
       const parsed = parseJson<TopicReading>(raw);
-      if (!Array.isArray(parsed.subtopics) || parsed.subtopics.length === 0) {
-        console.error(`[streamCourseMaterial] topic "${t.title}" — no subtopics in response`);
+
+      // ── Sanitise before touching the UI ──────────────────────
+      // If the model response was truncated (hit token limit) and
+      // repairJson closed the brackets, nested objects like "quiz"
+      // can be empty ({}) or have null arrays. Passing those to
+      // ReadView causes quiz.options.map() → TypeError → blank screen.
+      //
+      // Filter to subtopics that have ALL required fields fully formed:
+      //   • title    — string
+      //   • content  — string
+      //   • quiz     — object with question, options array (≥2), numeric answer
+      const validSubtopics = (parsed.subtopics ?? []).filter(s =>
+        s?.title &&
+        typeof s.content === 'string' &&
+        s.quiz &&
+        typeof s.quiz.question === 'string' && s.quiz.question.length > 0 &&
+        Array.isArray(s.quiz.options) && s.quiz.options.length >= 2 &&
+        typeof s.quiz.answer === 'number',
+      );
+
+      if (validSubtopics.length === 0) {
+        console.error(`[streamCourseMaterial] topic "${t.title}" — no valid subtopics after sanitisation`);
         continue;
       }
 
-      const tr: TopicReading = { ...parsed, topicId: t.id, title: t.title };
+      const tr: TopicReading = {
+        ...parsed,
+        topicId:      t.id,
+        title:        t.title,
+        subtopics:    validSubtopics,
+        keyTerms:     Array.isArray(parsed.keyTerms) ? parsed.keyTerms : [],
+        whyItMatters: parsed.whyItMatters ?? '',
+      };
       allTopics.push(tr);
       onTopicComplete(tr);
     } catch (e) {

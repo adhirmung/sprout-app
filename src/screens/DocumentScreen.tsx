@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useEffect, useMemo, useRef, useState } from 'react';
+import type { ErrorInfo, ReactNode } from 'react';
 import { Icon } from '../components/Icon';
 import { ExamScreen } from './ExamScreen';
 import { SproutMark } from '../components/Brand';
@@ -671,31 +672,38 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   );
 
   if (phase === 'course' && courseMaterial && contentMap) return (
-    <ReadView
-      documentReading={courseMaterial}
-      topic={topic}
-      hasCache={!!Store.get<DocumentReading | null>(`course:${sourceKey}`, null)}
-      profile={profile}
-      readEnhancing={false}
-      enhancementSummary={null}
-      contentAudit={null}
-      isCourse={true}
-      hasCourseMaterial={true}
-      courseStreaming={courseStreaming}
-      diagnostic={diagnostic}
-      diagnosticLoading={diagnosticLoading}
-      onRunDiagnostic={runDiagnostic}
-      onContinueToRead={() => startReading(contentMap)}
-      onBack={() => { if (!courseStreaming) setPhase('map'); }}
-      onPractice={() => setPhase('practice')}
-      onRegenerate={async () => {
-        if (courseStreaming) return; // don't allow while streaming
-        Store.del(`course:${sourceKey}`);
-        setCourseMaterial(null);
-        setDiagnostic(null);
-        await startCourseMaterial(contentMap);
-      }}
-    />
+    <NotesErrorBoundary onReset={async () => {
+      Store.del(`course:${sourceKey}`);
+      setCourseMaterial(null);
+      setDiagnostic(null);
+      await startCourseMaterial(contentMap);
+    }}>
+      <ReadView
+        documentReading={courseMaterial}
+        topic={topic}
+        hasCache={!!Store.get<DocumentReading | null>(`course:${sourceKey}`, null)}
+        profile={profile}
+        readEnhancing={false}
+        enhancementSummary={null}
+        contentAudit={null}
+        isCourse={true}
+        hasCourseMaterial={true}
+        courseStreaming={courseStreaming}
+        diagnostic={diagnostic}
+        diagnosticLoading={diagnosticLoading}
+        onRunDiagnostic={runDiagnostic}
+        onContinueToRead={() => startReading(contentMap)}
+        onBack={() => { if (!courseStreaming) setPhase('map'); }}
+        onPractice={() => setPhase('practice')}
+        onRegenerate={async () => {
+          if (courseStreaming) return; // don't allow while streaming
+          Store.del(`course:${sourceKey}`);
+          setCourseMaterial(null);
+          setDiagnostic(null);
+          await startCourseMaterial(contentMap);
+        }}
+      />
+    </NotesErrorBoundary>
   );
 
   if (phase === 'map' && contentMap) return (
@@ -772,25 +780,31 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   );
 
   if (phase === 'read' && documentReading && contentMap) return (
-    <ReadView
-      documentReading={documentReading}
-      topic={topic}
-      hasCache={!!Store.get<DocumentReading | null>(`reading:${sourceKey}`, null)}
-      profile={profile}
-      readEnhancing={readEnhancing}
-      enhancementSummary={enhancementSummary}
-      contentAudit={contentAudit}
-      isCourse={false}
-      hasCourseMaterial={!!courseMaterial}
-      onContinueToRead={undefined}
-      onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
-      onPractice={() => setPhase('practice')}
-      onRegenerate={async () => {
-        Store.del(`reading:${sourceKey}`);
-        setDocumentReading(null);
-        await startReading(contentMap);
-      }}
-    />
+    <NotesErrorBoundary onReset={async () => {
+      Store.del(`reading:${sourceKey}`);
+      setDocumentReading(null);
+      await startReading(contentMap);
+    }}>
+      <ReadView
+        documentReading={documentReading}
+        topic={topic}
+        hasCache={!!Store.get<DocumentReading | null>(`reading:${sourceKey}`, null)}
+        profile={profile}
+        readEnhancing={readEnhancing}
+        enhancementSummary={enhancementSummary}
+        contentAudit={contentAudit}
+        isCourse={false}
+        hasCourseMaterial={!!courseMaterial}
+        onContinueToRead={undefined}
+        onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
+        onPractice={() => setPhase('practice')}
+        onRegenerate={async () => {
+          Store.del(`reading:${sourceKey}`);
+          setDocumentReading(null);
+          await startReading(contentMap);
+        }}
+      />
+    </NotesErrorBoundary>
   );
 
   return (
@@ -912,6 +926,44 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       )}
     </div>
   );
+}
+
+// ── Notes error boundary ──────────────────────────────────────
+// Catches render crashes inside ReadView (e.g. malformed quiz data from
+// a truncated API response) so the whole screen doesn't go blank.
+
+interface EBState { crashed: boolean; message: string }
+
+class NotesErrorBoundary extends Component<{ children: ReactNode; onReset: () => void }, EBState> {
+  state: EBState = { crashed: false, message: '' };
+
+  static getDerivedStateFromError(err: unknown): EBState {
+    return { crashed: true, message: err instanceof Error ? err.message : String(err) };
+  }
+
+  componentDidCatch(err: unknown, info: ErrorInfo) {
+    console.error('[NotesErrorBoundary]', err, info);
+  }
+
+  render() {
+    if (!this.state.crashed) return this.props.children;
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100dvh', gap: 16, padding: 32, textAlign: 'center' }}>
+        <span style={{ fontSize: 40 }}>⚠️</span>
+        <div style={{ fontSize: 17, fontWeight: 800, color: 'var(--ink)' }}>Notes couldn't render</div>
+        <div style={{ fontSize: 13, color: 'var(--ink-3)', maxWidth: 320 }}>
+          Some content data was incomplete. Regenerating will fix this.
+        </div>
+        <button
+          className="btn btn-primary"
+          onClick={() => { this.setState({ crashed: false, message: '' }); this.props.onReset(); }}
+          style={{ marginTop: 8 }}
+        >
+          Regenerate Notes
+        </button>
+      </div>
+    );
+  }
 }
 
 // ── Header ────────────────────────────────────────────────────
