@@ -868,7 +868,7 @@ function assembleTOC(entries: TOCEntry[]): ContentMap {
         const prevLow   = prev.title.toLowerCase();
         const curLow    = entry.title.toLowerCase();
         const wordCount = entry.title.trim().split(/\s+/).length;
-        if (wordCount >= 4 && curLow.startsWith(prevLow + ' ')) {
+        if (wordCount >= 6 && curLow.startsWith(prevLow + ' ')) {
           prev.subtopics.push({
             id:      `t${topicIdx}s${prev.subtopics.length + 1}`,
             title:   entry.title,
