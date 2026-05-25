@@ -157,11 +157,36 @@ async function generateTextStreaming(
   return accumulated;
 }
 
+/** Close any unclosed brackets left by a truncated streaming response. */
+function repairJson(s: string): string {
+  const stack: string[] = [];
+  let inString = false;
+  let escaped  = false;
+  for (const ch of s) {
+    if (escaped)                       { escaped = false; continue; }
+    if (ch === '\\' && inString)       { escaped = true;  continue; }
+    if (ch === '"')                    { inString = !inString; continue; }
+    if (inString)                      { continue; }
+    if (ch === '{')                    { stack.push('}'); }
+    else if (ch === '[')               { stack.push(']'); }
+    else if (ch === '}' || ch === ']') { stack.pop(); }
+  }
+  return s.replace(/,\s*$/, '') + stack.reverse().join('');
+}
+
 function extractJson(raw: string): string {
-  const start = raw.indexOf('{');
-  const end   = raw.lastIndexOf('}');
+  // Strip markdown code fences the model occasionally emits despite instructions
+  const stripped = raw.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '');
+  const start = stripped.indexOf('{');
+  const end   = stripped.lastIndexOf('}');
   if (start === -1 || end === -1) throw new Error('No JSON object found in AI response.');
-  return raw.slice(start, end + 1);
+  return stripped.slice(start, end + 1);
+}
+
+function parseExamJson(raw: string): GeneratedExam {
+  const slice = extractJson(raw);
+  try   { return JSON.parse(slice) as GeneratedExam; }
+  catch { return JSON.parse(repairJson(slice)) as GeneratedExam; }
 }
 
 // ── Exam generation ─────────────────────────────────────────────
@@ -262,7 +287,7 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
   const raw = await generateTextStreaming(
     [...pdfParts, ...textParts, { text: prompt }],
     'You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer. Output only valid JSON — no markdown, no extra text.',
-    12000,
+    16000,
     'analyzeAndGenerateExam',
     userId ?? null,
   );
@@ -271,8 +296,9 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
 
   let exam: GeneratedExam;
   try {
-    exam = JSON.parse(extractJson(raw)) as GeneratedExam;
+    exam = parseExamJson(raw);
   } catch {
+    console.error('[analyzeAndGenerateExam] raw response (first 500 chars):', raw.slice(0, 500));
     throw new Error('Failed to parse exam from AI response. Please retry.');
   }
 
