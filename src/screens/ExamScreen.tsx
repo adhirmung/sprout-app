@@ -1,3 +1,4 @@
+import mammoth from 'mammoth';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Icon } from '../components/Icon';
 import { analyzeAndGenerateExam, generateExamFromNotes, generateExamVariant, markExamSubmission } from '../lib/examClaude';
@@ -104,10 +105,12 @@ const SYMBOL_GROUPS: { label: string; items: { display: string; insert: string }
 type ExamPhase = 'upload' | 'generating' | 'preview' | 'taking' | 'marking' | 'results';
 
 interface UploadedPaper {
-  file:   File;
-  base64: string;
-  name:   string;
-  sizeMB: number;
+  file:     File;
+  base64:   string;      // set for PDFs; empty string for Word docs
+  text:     string | null; // set for Word docs; null for PDFs
+  fileType: 'PDF' | 'DOCX' | 'DOC';
+  name:     string;
+  sizeMB:   number;
 }
 
 // Sidebar category
@@ -216,6 +219,12 @@ function readFileAsBase64(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+async function readDocxAsText(file: File): Promise<string> {
+  const buf    = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer: buf });
+  return result.value.trim();
 }
 
 function formatTime(seconds: number): string {
@@ -383,15 +392,46 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
   // ── File handling ─────────────────────────────────────────────
 
   const handleFiles = useCallback(async (files: File[]) => {
-    const pdfs = files.filter(f => f.type === 'application/pdf' || f.name.toLowerCase().endsWith('.pdf'));
-    if (!pdfs.length) return;
+    const accepted = files.filter(f => {
+      const name = f.name.toLowerCase();
+      return (
+        f.type === 'application/pdf'  || name.endsWith('.pdf')  ||
+        f.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+        name.endsWith('.docx') || name.endsWith('.doc')
+      );
+    });
+    if (!accepted.length) return;
+
     const loaded: UploadedPaper[] = await Promise.all(
-      pdfs.map(async file => ({
-        file,
-        base64: await readFileAsBase64(file),
-        name:   file.name.replace(/\.pdf$/i, ''),
-        sizeMB: file.size / (1024 * 1024),
-      }))
+      accepted.map(async file => {
+        const name = file.name.toLowerCase();
+        const isPdf  = file.type === 'application/pdf' || name.endsWith('.pdf');
+        const isDocx = name.endsWith('.docx') || file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        const fileType: 'PDF' | 'DOCX' | 'DOC' = isPdf ? 'PDF' : isDocx ? 'DOCX' : 'DOC';
+
+        if (isPdf) {
+          return {
+            file,
+            base64:   await readFileAsBase64(file),
+            text:     null,
+            fileType,
+            name:     file.name.replace(/\.pdf$/i, ''),
+            sizeMB:   file.size / (1024 * 1024),
+          };
+        } else {
+          // DOCX / DOC — extract text via mammoth
+          let text: string | null = null;
+          try { text = await readDocxAsText(file); } catch { /* extraction failed */ }
+          return {
+            file,
+            base64:   '',
+            text,
+            fileType,
+            name:     file.name.replace(/\.(docx?|doc)$/i, ''),
+            sizeMB:   file.size / (1024 * 1024),
+          };
+        }
+      })
     );
     setPapers(prev => [...prev, ...loaded].slice(0, 5));
   }, []);
@@ -420,7 +460,16 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
       if (examSource === 'notes') {
         generated = await generateExamFromNotes(topicTitles!, topic ?? 'Document', setProgressMsg, userId);
       } else {
-        generated = await analyzeAndGenerateExam(papers.map(p => p.base64), setProgressMsg, userId);
+        const pdfPapers  = papers.filter(p => p.fileType === 'PDF');
+        const wordPapers = papers.filter(p => p.fileType === 'DOCX' || p.fileType === 'DOC');
+        generated = await analyzeAndGenerateExam(
+          pdfPapers.map(p => p.base64),
+          setProgressMsg,
+          userId,
+          wordPapers
+            .filter(p => p.text)
+            .map(p => ({ name: p.name, content: p.text! })),
+        );
       }
       setExam(generated);
       setAnswers({});
@@ -952,7 +1001,7 @@ const HOW_IT_WORKS_STEPS = [
   {
     icon: '📤',
     title: 'Upload Past Papers',
-    desc: 'Upload 1–5 past NSC exam papers (PDF). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
+    desc: 'Upload 1–5 past NSC exam papers (PDF or Word). The more papers you include, the broader the topic and difficulty coverage AI can draw from — and the more unique variants you can generate later.',
   },
   {
     icon: '🤖',
@@ -1105,7 +1154,7 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
                 ? notesToTopic
                   ? `AI will design an exam based solely on your uploaded notes for "${notesToTopic}".`
                   : 'Open a document first, then come back here to generate an exam from its content.'
-                : 'Upload 1–5 past NSC papers and AI will analyse them, then create a timed practice exam that mirrors their style and difficulty.'
+                : 'Upload 1–5 past NSC papers (PDF or Word) and AI will analyse them, then create a timed practice exam that mirrors their style and difficulty.'
               }
             </div>
           </div>
@@ -1159,13 +1208,13 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
               <Icon name="upload" size={32} stroke="currentColor" />
             </div>
             <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 5 }}>
-              Drop PDF files here or click to browse
+              Drop files here or click to browse
             </div>
-            <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 1–5 past exam papers (PDF only)</div>
+            <div style={{ fontSize: 13, color: 'var(--ink-3)' }}>Upload 1–5 past exam papers (PDF or Word)</div>
             <input
               ref={fileInputRef}
               type="file"
-              accept=".pdf,application/pdf"
+              accept=".pdf,application/pdf,.docx,.doc,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
               multiple
               style={{ display: 'none' }}
               onChange={onFileInput}
@@ -1184,13 +1233,18 @@ function UploadPanel({ papers, dragging, error, savingError, guestMode, fileInpu
                     padding: '12px 16px',
                     background: 'var(--card)', border: '1.5px solid var(--line)', borderRadius: 12,
                   }}>
-                    <span style={{ fontSize: 22, flexShrink: 0 }}>📋</span>
+                    <span style={{ fontSize: 22, flexShrink: 0 }}>
+                      {p.fileType === 'PDF' ? '📋' : '📝'}
+                    </span>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {p.name}
                       </div>
                       <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>
-                        {p.sizeMB.toFixed(1)} MB · PDF
+                        {p.sizeMB.toFixed(1)} MB · {p.fileType}
+                        {(p.fileType === 'DOCX' || p.fileType === 'DOC') && !p.text && (
+                          <span style={{ color: '#DC2626', marginLeft: 6 }}>⚠ text extraction failed</span>
+                        )}
                       </div>
                     </div>
                     <button

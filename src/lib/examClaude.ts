@@ -114,13 +114,14 @@ function extractJson(raw: string): string {
 // ── Exam generation ─────────────────────────────────────────────
 
 /**
- * Analyses 1+ past exam papers (base64 PDFs) and generates a new
- * practice exam that mirrors their style, topics, and difficulty.
+ * Analyses 1+ past exam papers (base64 PDFs and/or Word documents) and
+ * generates a new practice exam that mirrors their style, topics, and difficulty.
  */
 export async function analyzeAndGenerateExam(
   pdfBase64Array: string[],
   onProgress?: (msg: string) => void,
   userId?: string | null,
+  textDocs: { name: string; content: string }[] = [],
 ): Promise<GeneratedExam> {
   onProgress?.('Analysing your past exam papers…');
 
@@ -128,7 +129,14 @@ export async function analyzeAndGenerateExam(
     inlineData: { data: b64, mimeType: 'application/pdf' },
   }));
 
-  const prompt = `I am providing ${pdfBase64Array.length} past exam papers. Analyse them carefully, then generate a completely NEW practice exam that:
+  // Embed Word/text documents as labelled text blocks
+  const textParts: Part[] = textDocs.map(doc => ({
+    text: `\n\n--- BEGIN EXAM PAPER: ${doc.name} ---\n${doc.content}\n--- END EXAM PAPER: ${doc.name} ---\n`,
+  }));
+
+  const totalPapers = pdfBase64Array.length + textDocs.length;
+
+  const prompt = `I am providing ${totalPapers} past exam paper${totalPapers !== 1 ? 's' : ''}${textDocs.length > 0 ? ` (${pdfBase64Array.length > 0 ? `${pdfBase64Array.length} PDF${pdfBase64Array.length !== 1 ? 's' : ''} and ` : ''}${textDocs.length} Word document${textDocs.length !== 1 ? 's' : ''})` : ''}. Analyse them carefully, then generate a completely NEW practice exam that:
 - Matches the exact style, structure, and format of these papers
 - Tests the same curriculum topics at the same difficulty and cognitive level
 - Has proportionally similar mark allocation, question types, and difficulty spread
@@ -197,7 +205,7 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
   onProgress?.('Generating your personalised practice exam…');
 
   const raw = await generateText(
-    [...pdfParts, { text: prompt }],
+    [...pdfParts, ...textParts, { text: prompt }],
     'You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer. Output only valid JSON — no markdown, no extra text.',
     12000,
     'analyzeAndGenerateExam',
