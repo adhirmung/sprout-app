@@ -68,10 +68,15 @@ function getClient(): GoogleGenAI {
   return new GoogleGenAI({ apiKey });
 }
 
-// ── Core helper ─────────────────────────────────────────────────
+// ── Core helpers ─────────────────────────────────────────────────
 
 type Part = { text: string } | { inlineData: { data: string; mimeType: string } };
 
+/**
+ * Non-streaming generate — kept for short calls (marking, variants).
+ * Do NOT use for large PDF analysis: the proxy blocks waiting for the full
+ * Gemini response and Netlify's 26 s edge-function wall-clock kills it.
+ */
 async function generateText(
   parts:          Part[],
   systemPrompt:   string,
@@ -102,6 +107,54 @@ async function generateText(
   );
 
   return text;
+}
+
+/**
+ * Streaming generate — accumulates all SSE chunks and returns the full text.
+ * Use for large PDF analysis: the proxy's fetch() resolves on the first chunk
+ * (SSE response headers arrive immediately), so Netlify's 26 s timeout is never
+ * triggered regardless of how long Gemini takes to finish the full response.
+ */
+async function generateTextStreaming(
+  parts:          Part[],
+  systemPrompt:   string,
+  maxTokens:      number,
+  fnName:         string,
+  userId:         string | null = null,
+  onChunk?:       (text: string) => void,
+): Promise<string> {
+  const client = getClient();
+
+  const stream = await client.models.generateContentStream({
+    model:    EXAM_MODEL,
+    contents: [{ role: 'user', parts }],
+    config:   {
+      systemInstruction: systemPrompt,
+      maxOutputTokens:   maxTokens,
+      temperature:       0.1,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  let accumulated = '';
+  let inputTokens  = 0;
+  let outputTokens = 0;
+
+  for await (const chunk of stream) {
+    const t = chunk.text ?? '';
+    if (t) {
+      accumulated += t;
+      onChunk?.(accumulated);
+    }
+    if (chunk.usageMetadata) {
+      inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+    }
+  }
+
+  void dbLogUsage(userId, fnName, EXAM_MODEL, inputTokens, outputTokens);
+
+  return accumulated;
 }
 
 function extractJson(raw: string): string {
@@ -204,7 +257,9 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
 
   onProgress?.('Generating your personalised practice exam…');
 
-  const raw = await generateText(
+  // Use streaming so the proxy's fetch() resolves on the first SSE chunk —
+  // avoids Netlify's 26 s edge-function timeout on large multi-PDF requests.
+  const raw = await generateTextStreaming(
     [...pdfParts, ...textParts, { text: prompt }],
     'You are an expert NSC (South African National Senior Certificate) / CAPS curriculum exam paper designer. Output only valid JSON — no markdown, no extra text.',
     12000,
