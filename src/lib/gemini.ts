@@ -2124,20 +2124,24 @@ export async function generateDocumentDiagnostic(
   pdfBase64:      string | null,
   courseMaterial: DocumentReading,
 ): Promise<DocumentDiagnostic> {
-  // Flatten notes into readable text so Gemini can compare
-  const notesSummary = courseMaterial.topics.map(t =>
-    `## ${t.title}\n` +
-    t.subtopics.map(s => `- ${s.title}: ${s.content.slice(0, 300)}`).join('\n')
-  ).join('\n\n');
+  // Build a compact title-only index — all topics + subtopics fit in ~2 k chars
+  // regardless of document size, so the model always sees the full coverage list.
+  // (Sending 300-char content snippets per subtopic bloated the summary past the
+  //  old 6 000-char slice, meaning only the first 4–5 topics were visible and
+  //  the model correctly — but wrongly — reported ~20% coverage.)
+  const notesSummary = courseMaterial.topics.map((t, i) =>
+    `${i + 1}. ${t.title}\n` +
+    t.subtopics.map(s => `   • ${s.title}`).join('\n')
+  ).join('\n');
 
   const prompt = `You are a document quality auditor. Perform a two-part diagnostic:
 
 TOPIC: "${topic}"
 ${sourceBlock(contentText, !!pdfBase64)}
 
---- GENERATED NOTES (what the AI produced) ---
-${notesSummary.slice(0, 6000)}
---- END NOTES ---
+--- NOTES COVERAGE INDEX (every topic and subtopic already in the notes) ---
+${notesSummary}
+--- END COVERAGE INDEX (${courseMaterial.topics.length} topics, ${courseMaterial.topics.reduce((n, t) => n + t.subtopics.length, 0)} subtopics total) ---
 
 PART 1 — DID THE AI READ THE FULL DOCUMENT?
 • Estimate the total number of pages in the original document.
@@ -2145,8 +2149,9 @@ PART 1 — DID THE AI READ THE FULL DOCUMENT?
 • Did the content appear to cut off, or was the full document accessible?
 
 PART 2 — HOW COMPLETELY ARE THE NOTES?
-• What percentage (0–100) of the document's important, testable content appears in the notes?
-• List any specific topics, sections, facts, formulas, or named concepts that are in the document but ABSENT from the notes.
+Important: the coverage index above represents ALL the topics already covered in the notes — not just the first few. Use the FULL list when judging coverage.
+• What percentage (0–100) of the document's important, testable content is represented by the topics and subtopics listed above?
+• List only specific topics, sections, or named concepts that appear in the DOCUMENT but are genuinely ABSENT from the coverage index above.
 
 Return ONLY valid JSON — no markdown:
 {
@@ -2158,17 +2163,34 @@ Return ONLY valid JSON — no markdown:
   "notesVerdict": "One sentence: how complete are the notes?"
 }`;
 
+  // Stream to avoid Netlify's 26 s edge-function timeout on large PDFs
+  const client = getClient();
   const parts: Part[] = pdfBase64
     ? [pdfPart(pdfBase64), textPart(prompt)]
     : [textPart(prompt)];
 
-  const raw = await generateText(
-    SMART_MODEL,
-    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    parts,
-    3000,
-    'generateDocumentDiagnostic',
-  );
+  const stream = await client.models.generateContentStream({
+    model:    SMART_MODEL,
+    contents: [{ role: 'user', parts }],
+    config:   {
+      systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      maxOutputTokens:   3000,
+      temperature:       0.0,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  let raw        = '';
+  let diagIn     = 0;
+  let diagOut    = 0;
+  for await (const chunk of stream) {
+    if (chunk.text) raw += chunk.text;
+    if (chunk.usageMetadata) {
+      diagIn  = chunk.usageMetadata.promptTokenCount     ?? diagIn;
+      diagOut = chunk.usageMetadata.candidatesTokenCount ?? diagOut;
+    }
+  }
+  void dbLogUsage(_currentUserId, 'generateDocumentDiagnostic', SMART_MODEL, diagIn, diagOut);
 
   const parsed = parseJson<DocumentDiagnostic>(raw);
   if (typeof parsed.notesCoverageScore !== 'number' || !Array.isArray(parsed.sectionsFound)) {
