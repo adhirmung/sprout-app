@@ -1699,12 +1699,16 @@ export async function streamCourseMaterial(
     const t = contentMap.topics[i];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
 
-    const topicOutline = `Topic (topicId: "${t.id}", title: "${t.title}"):
-Overview: ${t.summary}
-Subtopics:
-${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}`;
+    const hasSubtopics = t.subtopics.length > 0;
 
-    const prompt = `You are an expert educational content organiser. EXTRACT content from the original document — do NOT rewrite or paraphrase.
+    // ── Prompt A: topic with known subtopics ──────────────────────
+    // Extract ALL content for each subtopic — no sentence cap.
+    // ── Prompt B: reference section (no subtopics) ────────────────
+    // Vocabulary lists, conjugation tables, synonym/antonym lists, etc.
+    // Auto-group into 1–3 natural subtopics and copy the full content.
+
+    const prompt = hasSubtopics
+      ? `You are an expert educational content organiser. FORMAT and EXTRACT content from the original document — do NOT rewrite or paraphrase.
 
 SUBJECT: "${topic}"
 SOURCE CONTENT (verbatim from the uploaded document):
@@ -1713,20 +1717,23 @@ ${textSlice}
 """
 
 TOPIC OUTLINE:
-${topicOutline}
+Topic (topicId: "${t.id}", title: "${t.title}"):
+Overview: ${t.summary}
+Subtopics:
+${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}
 
 INSTRUCTIONS:
-For each subtopic "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain this subtopic. Use the EXACT words — do NOT paraphrase or reword.
+For each subtopic "content": find and copy ALL relevant content from the SOURCE CONTENT that covers this subtopic — every definition, rule, example, table row, and list item. Do NOT limit to a fixed number of sentences. Get everything the document says about this subtopic. Preserve bullet lists and numbered lists where the source uses them.
 
 Produce for this topic:
-1. "content": VERBATIM sentences from the document for each subtopic.
+1. "content": Complete document content for each subtopic (every rule, example, and item — do not truncate).
 2. "quiz": one comprehension question — exactly 3 plausible options, 0-based answer index, 1-sentence explanation.
 
 Also:
 - "keyTerms": 3–5 key terms with clear, document-grounded definitions.
 - "whyItMatters": one sentence on why this topic matters to a student.
 
-Rules: subtopic titles must match the outline EXACTLY; content must come from the document.
+Rules: subtopic titles must match the outline EXACTLY; all content must come from the document.
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -1741,6 +1748,40 @@ Return ONLY valid JSON — no markdown fences:
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
   "whyItMatters": "..."
+}`
+      : `You are an expert educational content organiser. EXTRACT the complete content for this reference section from the original document.
+
+SUBJECT: "${topic}"
+SOURCE CONTENT (verbatim from the uploaded document):
+"""
+${textSlice}
+"""
+
+REFERENCE SECTION: "${t.title}"
+Overview: ${t.summary}
+
+INSTRUCTIONS:
+This is a reference section (vocabulary list, conjugation table, synonym/antonym list, word list, or similar). It has no distinct sub-categories — your job is to find ALL content for this section in the source and copy it completely.
+
+Create 1–3 natural groupings as subtopics (e.g. alphabetical ranges, grammatical groupings, or thematic clusters) and copy the COMPLETE content from the source into them — every entry, every table row, every word, every item. Do NOT omit or summarise anything.
+
+Also:
+- "keyTerms": 2–3 key terms.
+- "whyItMatters": one sentence on why this section helps students.
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "topicId": "${t.id}",
+  "title": "${t.title}",
+  "subtopics": [
+    {
+      "title": "Natural grouping name",
+      "content": "Complete content from the source for this group — every entry, every item.",
+      "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
+    }
+  ],
+  "keyTerms": [{ "term": "...", "definition": "..." }],
+  "whyItMatters": "..."
 }`;
 
     try {
@@ -1750,7 +1791,7 @@ Return ONLY valid JSON — no markdown fences:
         contents: [{ role: 'user', parts: [textPart(prompt)] }],
         config:   {
           systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-          maxOutputTokens:   2000,
+          maxOutputTokens:   8000,   // raised from 2000 — full content per topic
           temperature:       0.1,
           thinkingConfig:    { thinkingBudget: 0 },
         },
@@ -1773,7 +1814,7 @@ Return ONLY valid JSON — no markdown fences:
 
       const parsed = parseJson<TopicReading>(raw);
       if (!Array.isArray(parsed.subtopics) || parsed.subtopics.length === 0) {
-        console.error(`[streamCourseMaterial] topic "${t.title}" — no subtopics`);
+        console.error(`[streamCourseMaterial] topic "${t.title}" — no subtopics in response`);
         continue;
       }
 
