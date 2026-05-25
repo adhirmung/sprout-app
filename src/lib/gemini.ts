@@ -1682,6 +1682,90 @@ Return ONLY valid JSON — no markdown fences:
 // Each call is text-only + small output ≈ 3–5 s — well within the 26s limit.
 // Topics stream in progressively; the UI can switch to 'course' after topic 1.
 
+// ── Notes gap detector (Pass 2) ───────────────────────────────
+//
+// After Pass 1 has generated notes for every content-map topic, this
+// streams a coverage-audit call: it shows the model the full document
+// plus every covered topic/subtopic title and asks for any significant
+// sections that were missed.  Each gap is returned with its verbatim
+// source text already extracted so the fill step stays small and fast.
+
+interface NoteGap {
+  title:      string;
+  summary:    string;
+  rawContent: string; // verbatim text the model pulled from the doc for this gap
+}
+
+async function detectNotesGaps(
+  topic:         string,
+  textSlice:     string,
+  coveredTopics: TopicReading[],
+): Promise<NoteGap[]> {
+  const coveredList = coveredTopics.flatMap(t =>
+    [`• ${t.title}`, ...t.subtopics.map(s => `  – ${s.title}`)]
+  ).join('\n');
+
+  const prompt = `You are a curriculum coverage auditor. Notes have already been generated for the topics listed below. Your job is to find important content sections in the original document that were NOT covered.
+
+SUBJECT: "${topic}"
+
+ALREADY COVERED (do NOT re-generate these):
+${coveredList}
+
+SOURCE DOCUMENT:
+"""
+${textSlice}
+"""
+
+TASK:
+1. Read the document carefully.
+2. Identify any significant content section, chapter, or named topic that appears in the document but is NOT represented in the already-covered list above.
+3. For each uncovered section return:
+   - "title": a concise title for the missing section
+   - "summary": one sentence describing what it covers
+   - "rawContent": copy the COMPLETE relevant text from the source for this section — every definition, rule, example, list item, and table row. Do NOT paraphrase or summarise.
+
+Only include genuinely significant educational content. Skip introductions without content, decorative headings, page numbers, and instructions to students.
+If nothing is missed return an empty "gaps" array.
+Cap output at 5 gaps maximum.
+
+Return ONLY valid JSON — no markdown:
+{
+  "gaps": [
+    {
+      "title": "Missing section title",
+      "summary": "One sentence description.",
+      "rawContent": "Complete verbatim text from the document for this section…"
+    }
+  ]
+}`;
+
+  const client = getClient();
+  const stream = await client.models.generateContentStream({
+    model:    SMART_MODEL,
+    contents: [{ role: 'user', parts: [textPart(prompt)] }],
+    config:   {
+      systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      maxOutputTokens:   8000,
+      temperature:       0.0,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  let raw = '';
+  for await (const chunk of stream) {
+    if (chunk.text) raw += chunk.text;
+  }
+
+  try {
+    const parsed = parseJson<{ gaps: NoteGap[] }>(raw);
+    return Array.isArray(parsed.gaps) ? parsed.gaps.slice(0, 5) : [];
+  } catch {
+    console.error('[detectNotesGaps] parse error — skipping Pass 2:', raw.slice(0, 300));
+    return [];
+  }
+}
+
 export async function streamCourseMaterial(
   topic:           string,
   extractedText:   string,
@@ -1855,6 +1939,117 @@ Return ONLY valid JSON — no markdown fences:
   }
 
   if (allTopics.length === 0) throw new Error('Failed to generate course material. Please retry.');
+
+  // ── Pass 2: gap detection + fill ──────────────────────────────
+  // Ask the model what significant content from the document wasn't
+  // covered in Pass 1, then generate proper TopicReadings for each gap.
+  // Uses streaming throughout — no Netlify timeout risk.
+  try {
+    onProgress?.('Pass 2 — Checking for missed content…');
+    const gaps = await detectNotesGaps(topic, textSlice, allTopics);
+
+    if (gaps.length > 0) {
+      onProgress?.(`Pass 2 — Found ${gaps.length} uncovered section${gaps.length > 1 ? 's' : ''} — filling…`);
+
+      for (let gi = 0; gi < gaps.length; gi++) {
+        const gap    = gaps[gi];
+        const gapId  = `gap${gi + 1}`;
+        onProgress?.(`Pass 2 — ${gi + 1} of ${gaps.length}: ${gap.title}…`);
+
+        // Reuse Prompt B structure, but source is the gap's already-extracted text —
+        // smaller, faster, and the audit already did the locating work.
+        const gapPrompt = `You are an expert educational content organiser. EXTRACT the complete content for this section from the source text.
+
+SUBJECT: "${topic}"
+SECTION TITLE: "${gap.title}"
+SECTION OVERVIEW: ${gap.summary}
+
+SOURCE TEXT (verbatim extract from the document):
+"""
+${gap.rawContent}
+"""
+
+INSTRUCTIONS:
+Create 1–3 natural subtopic groupings and copy ALL content from the source into them — every definition, rule, example, table row, and list item. Do NOT paraphrase or omit anything.
+
+Also:
+- "keyTerms": 2–4 key terms with document-grounded definitions.
+- "whyItMatters": one sentence on why this section matters to a student.
+
+Return ONLY valid JSON — no markdown:
+{
+  "topicId": "${gapId}",
+  "title": "${gap.title}",
+  "subtopics": [
+    {
+      "title": "Grouping name",
+      "content": "Complete content for this group — every item.",
+      "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
+    }
+  ],
+  "keyTerms": [{ "term": "...", "definition": "..." }],
+  "whyItMatters": "..."
+}`;
+
+        try {
+          const client = getClient();
+          const gapStream = await client.models.generateContentStream({
+            model:    SMART_MODEL,
+            contents: [{ role: 'user', parts: [textPart(gapPrompt)] }],
+            config:   {
+              systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+              maxOutputTokens:   8000,
+              temperature:       0.1,
+              thinkingConfig:    { thinkingBudget: 0 },
+            },
+          });
+
+          let gapRaw = '';
+          let gapIn  = 0;
+          let gapOut = 0;
+          for await (const chunk of gapStream) {
+            if (chunk.text) gapRaw += chunk.text;
+            if (chunk.usageMetadata) {
+              gapIn  = chunk.usageMetadata.promptTokenCount     ?? gapIn;
+              gapOut = chunk.usageMetadata.candidatesTokenCount ?? gapOut;
+            }
+          }
+          void dbLogUsage(_currentUserId, 'streamCourseMaterial_gap', SMART_MODEL, gapIn, gapOut);
+
+          const parsedGap = parseJson<TopicReading>(gapRaw);
+
+          const validSubs = (parsedGap.subtopics ?? []).filter(s =>
+            s?.title &&
+            typeof s.content === 'string' &&
+            s.quiz &&
+            typeof s.quiz.question === 'string' && s.quiz.question.length > 0 &&
+            Array.isArray(s.quiz.options) && s.quiz.options.length >= 2 &&
+            typeof s.quiz.answer === 'number',
+          );
+
+          if (validSubs.length > 0) {
+            const gapTR: TopicReading = {
+              ...parsedGap,
+              topicId:      gapId,
+              title:        gap.title,
+              subtopics:    validSubs,
+              keyTerms:     Array.isArray(parsedGap.keyTerms) ? parsedGap.keyTerms : [],
+              whyItMatters: parsedGap.whyItMatters ?? '',
+            };
+            allTopics.push(gapTR);
+            onTopicComplete(gapTR);
+          }
+        } catch (gapErr) {
+          console.error(`[streamCourseMaterial] gap fill "${gap.title}" error:`, gapErr);
+          // continue — skip this gap, keep the rest
+        }
+      }
+    }
+  } catch (pass2Err) {
+    console.error('[streamCourseMaterial] Pass 2 error (non-fatal):', pass2Err);
+    // Pass 2 is best-effort — never block Pass 1 results
+  }
+
   return { topics: allTopics };
 }
 
