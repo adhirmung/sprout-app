@@ -783,40 +783,41 @@ Return ONLY valid JSON — no markdown fences:
   return parsed;
 }
 
-// ── Streaming TOC scanner ─────────────────────────────────────
+// ── Two-pass streaming TOC scanner ───────────────────────────
 //
-// Architecture: AI classifies, code assembles.
+// Pass 1 (global, non-streaming, ~5–10s):
+//   Model reads the whole PDF and returns the major themes, which named
+//   items belong to each theme, and worksheet/activity headings to exclude.
+//   This gives Pass 2 the global context it needs to correctly group items.
 //
-// The model scans the PDF sequentially from start to finish. At each
-// piece of text it makes a single local decision:
-//   TOPIC    → a major standalone chapter heading
-//   SUBTOPIC → a named sub-section within the current topic (first level only)
-//   (silence) → body text, examples, rules, or items nested inside a subtopic
+// Pass 2 (streaming, anchored, ~10–15s):
+//   Model scans sequentially, but now knows the theme hierarchy.
+//   MERCURY → SUBTOPIC of INNER PLANETS (not a new TOPIC).
+//   RECORD YOUR FINDINGS → excluded (worksheet, not content).
+//   Output: one labelled line per structural element, streamed live.
 //
-// Critical rule the model enforces: once it emits a SUBTOPIC, any further
-// sub-items within that subtopic are silence. This prevents Figures of Speech
-// from producing 39 subtopics (individual figures) instead of 5 (categories).
-//
-// Output format is maximally compact — one labelled line per structural element
-// with an inline summary — so streaming never truncates and no second API call
-// is needed to add summaries.
-//
-// Example output the model produces:
-//   SYNTHESIS: A grammar handbook covering punctuation, parts of speech...
-//   TOPIC: PUNCTUATION | Covers the correct usage of punctuation marks.
-//   SUBTOPIC: A. Capital Letters | Rules for capitalising words in sentences.
-//   SUBTOPIC: B. Full Stops | How full stops end sentences and abbreviations.
-//   TOPIC: FIGURES OF SPEECH | Introduces rhetorical devices for expressive writing.
-//   SUBTOPIC: 1. Comparisons | Simile, metaphor, and personification as comparison tools.
-//   SUBTOPIC: 2. Sound Devices | Alliteration, assonance, onomatopoeia, and rhyme.
+// Both passes are separate API calls, each well within Netlify's 26s limit.
 
-// ── TOC line parser (code half of the AI/code split) ──────────
+// ── Types ──────────────────────────────────────────────────────
 
 interface TOCEntry {
   type:    'synthesis' | 'topic' | 'subtopic';
   title:   string;
   summary: string;
 }
+
+interface TOCTheme {
+  title:   string;
+  members: string[]; // named items that belong to this theme as subtopics
+}
+
+interface TOCThemeMap {
+  subject: string;
+  themes:  TOCTheme[];
+  exclude: string[]; // worksheet/activity headings to suppress
+}
+
+// ── TOC line parser ────────────────────────────────────────────
 
 function parseTOCLines(raw: string): TOCEntry[] {
   const entries: TOCEntry[] = [];
@@ -839,12 +840,13 @@ function parseTOCLines(raw: string): TOCEntry[] {
   return entries;
 }
 
-// ── ContentMap assembler (code half of the AI/code split) ──────
+// ── ContentMap assembler ───────────────────────────────────────
 
 function assembleTOC(entries: TOCEntry[]): ContentMap {
   let synthesis = '';
   const topics: Topic[] = [];
   let topicIdx = 0;
+  const seen   = new Set<string>(); // deduplicate repeated topic headings
 
   for (const entry of entries) {
     if (entry.type === 'synthesis') {
@@ -853,23 +855,18 @@ function assembleTOC(entries: TOCEntry[]): ContentMap {
     }
 
     if (entry.type === 'topic') {
-      // ── Elaborating-subtitle guard ─────────────────────────────
-      // If the model emitted a TOPIC whose title is clearly an elaborating
-      // sub-label of the immediately preceding topic (it starts with the
-      // full preceding title word-for-word AND has 6+ words total),
-      // demote it to a subtopic instead of creating a new top-level topic.
-      //
-      // Example: prev = "PREPOSITIONS"
-      //          cur  = "PREPOSITIONS USUALLY REFER TO PLACE, POSITION, TIME, MANNER OR REASON"
-      //          → 10 words, starts with "prepositions " → demoted ✓
-      //
-      // Counter-example: prev = "SYNONYMS"
-      //                  cur  = "SYNONYMS FOR OVERUSED WORDS"
-      //                  → 4 words < 6 → kept as its own topic ✓
+      const key = entry.title.toLowerCase().trim();
+      if (seen.has(key)) continue; // duplicate heading — skip
+      seen.add(key);
+
+      // Elaborating-subtitle guard:
+      // If this topic title starts with the full preceding topic title
+      // word-for-word AND has 6+ words, it's a descriptive sub-label
+      // (e.g. "PREPOSITIONS USUALLY REFER TO PLACE...") — demote to subtopic.
       if (topics.length > 0) {
-        const prev     = topics[topics.length - 1];
-        const prevLow  = prev.title.toLowerCase();
-        const curLow   = entry.title.toLowerCase();
+        const prev      = topics[topics.length - 1];
+        const prevLow   = prev.title.toLowerCase();
+        const curLow    = entry.title.toLowerCase();
         const wordCount = entry.title.trim().split(/\s+/).length;
         if (wordCount >= 6 && curLow.startsWith(prevLow + ' ')) {
           prev.subtopics.push({
@@ -901,67 +898,136 @@ function assembleTOC(entries: TOCEntry[]): ContentMap {
   return { synthesis, topics };
 }
 
-// ── buildStreamingTOC (AI half — streams labelled lines) ───────
+// ── Pass 1 — Global theme extractor ───────────────────────────
+// Non-streaming, fast (~5–10s). Reads the whole PDF and returns the
+// logical theme hierarchy so Pass 2 can make correct local decisions.
+
+async function extractTOCThemes(
+  topic:     string,
+  pdfBase64: string,
+): Promise<TOCThemeMap> {
+  const client = getClient();
+
+  const prompt = `Read this document ("${topic}") carefully and identify its logical content structure.
+
+Return a JSON object with:
+1. "subject"  — the subject/title of this document (e.g. "Earth and Beyond", "English Grammar Handbook")
+2. "themes"   — the major content themes/chapters in reading order (5–15 items).
+                 For each theme list any named items that belong to it as sub-sections ("members").
+                 Examples of members: planet names under "Inner Planets", pronoun types under "Pronouns",
+                 punctuation marks under "Punctuation", figures of speech under "Figures of Speech".
+                 For grammar comparison sections (e.g. "Degrees of Comparison"), list the degree forms
+                 as members: ["Positive Degree", "Comparative Degree", "Superlative Degree"].
+                 Leave "members" as [] only if the theme genuinely has no named sub-sections.
+3. "exclude"  — headings that are worksheet activities or instructions, NOT content
+                 (e.g. "Record Your Findings", "Discuss the Image Below", "Revision", "Activity", "Extension").
+
+Return ONLY valid JSON — no markdown:
+{
+  "subject": "Document subject",
+  "themes": [
+    { "title": "Theme Title", "members": ["Named sub-item 1", "Named sub-item 2"] },
+    { "title": "Theme with no sub-items", "members": [] }
+  ],
+  "exclude": ["Worksheet heading 1", "Activity heading 2"]
+}`;
+
+  const response = await client.models.generateContent({
+    model:    SMART_MODEL,
+    contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
+    config:   {
+      systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      maxOutputTokens:   4000,
+      temperature:       0.0,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  const usage = response.usageMetadata;
+  void dbLogUsage(_currentUserId, 'extractTOCThemes', SMART_MODEL,
+    usage?.promptTokenCount ?? 0, usage?.candidatesTokenCount ?? 0);
+
+  const raw   = response.text ?? '';
+  const start = raw.indexOf('{');
+  const end   = raw.lastIndexOf('}');
+  if (start === -1 || end === -1) {
+    // Fallback — return a minimal theme map so Pass 2 still runs
+    return { subject: topic, themes: [], exclude: [] };
+  }
+  try {
+    const parsed = JSON.parse(raw.slice(start, end + 1)) as TOCThemeMap;
+    return {
+      subject: parsed.subject ?? topic,
+      themes:  Array.isArray(parsed.themes)  ? parsed.themes  : [],
+      exclude: Array.isArray(parsed.exclude) ? parsed.exclude : [],
+    };
+  } catch {
+    return { subject: topic, themes: [], exclude: [] };
+  }
+}
+
+// ── Pass 2 — Anchored streaming scan ──────────────────────────
+// Streams the PDF with the theme hierarchy from Pass 1 as context.
+// The model now knows which items are subtopics of which theme,
+// and which headings are worksheet activities to skip.
 
 async function buildStreamingTOC(
   topic:     string,
   pdfBase64: string,
+  themeMap?: TOCThemeMap,
 ): Promise<ContentMap | null> {
   const client = getClient();
 
-  const prompt = `Scan the document "${topic}" from start to finish and build a Table of Contents.
+  // Build theme block for the prompt
+  const subject = themeMap?.subject ?? topic;
+  const themes  = themeMap?.themes  ?? [];
+  const exclude = themeMap?.exclude ?? [];
 
-As you read each piece of text, classify it and emit exactly one of these line types — or emit nothing:
+  const themeBlock = themes.length
+    ? `The document has these major themes (in order):\n` +
+      themes.map((t, i) => {
+        const members = t.members?.length
+          ? `  members → ${t.members.join(', ')}`
+          : '  (no named sub-items — emit TOPIC only)';
+        return `  ${i + 1}. ${t.title}\n${members}`;
+      }).join('\n')
+    : '';
 
-  SYNTHESIS: [two sentences about the whole document]        ← emit once, at the very start
-  TOPIC: [exact title] | [one sentence summary]             ← a major chapter or section
-  SUBTOPIC: [exact title] | [one sentence summary]          ← a named sub-section within the current topic
+  const excludeBlock = exclude.length
+    ? `\nWorksheet/activity sections — emit NOTHING for these:\n` +
+      exclude.map(e => `  ✗ ${e}`).join('\n')
+    : '';
 
+  const anchoredRules = themes.length ? `
+Classification rules (anchored to the theme list above):
+- TOPIC  → emit when you first encounter each major theme. Use the exact theme title.
+- SUBTOPIC → emit for every named member listed under the current theme.
+  Example: theme "Inner Planets" lists Mercury, Venus, Earth, Mars as members →
+    when you see the Mercury heading emit:  SUBTOPIC: Mercury | …
+    when you see Venus emit:               SUBTOPIC: Venus | …   (etc.)
+- Worksheet/activity headings in the exclude list → emit NOTHING
+- Body text, bullet points, tables, examples → emit NOTHING
+- Same heading appearing more than once → emit only the first occurrence
+- Once inside a SUBTOPIC, all nested content is silence` : `
 Classification rules:
-- TOPIC = a standalone major chapter or section (e.g., PUNCTUATION, NOUNS, FIGURES OF SPEECH, DEGREES OF COMPARISON, IRREGULAR VERBS)
-  Every distinctly titled chapter gets its own TOPIC line — do NOT merge chapters together.
-- SUBTOPIC = the FIRST level of named sub-categories within the current topic, such as:
-    Lettered sections:  A. Capital Letters, B. Full Stops
-    Numbered sections:  1. Common Nouns, 2. Proper Nouns, 1. Comparisons, 2. Sound Devices
-    Named categories:   Co-ordinating Conjunctions, Definite Article
-    Grammar table columns: Positive Degree, Comparative Degree, Superlative Degree
-- Everything else = body text, rules, examples, individual items inside a subtopic → emit NOTHING
+- TOPIC = a standalone major chapter or section
+- SUBTOPIC = the FIRST level of named sub-sections within the current topic
+  (lettered: A. B. C., numbered: 1. 2. 3., named categories, grammar table column headers)
+- Body text, rules, examples, nested items → emit NOTHING
+- Same heading appearing more than once → emit only the first occurrence
+- Once inside a SUBTOPIC, all nested content is silence`;
 
-Special rules:
-1. Elaborating subtitle — if a heading is clearly a continuation or elaboration of the immediately
-   preceding TOPIC (e.g. "PREPOSITIONS USUALLY REFER TO PLACE, POSITION, TIME, MANNER OR REASON"
-   appears right after the TOPIC "PREPOSITIONS"), emit it as SUBTOPIC of that TOPIC, NOT as a new TOPIC.
-2. Grammar-comparison tables — if a section's table has columns for named grammatical forms or degrees,
-   emit EVERY column header as its own SUBTOPIC line. All three must appear:
-     SUBTOPIC: Positive Degree | …
-     SUBTOPIC: Comparative Degree | …
-     SUBTOPIC: Superlative Degree | …
-   Do NOT collapse them into one line.
+  const prompt = `Scan the document "${subject}" from start to finish and build a Table of Contents.
 
-The critical rule — depth limit:
-Once you emit a SUBTOPIC, any further sub-items nested inside it are body text. Emit NOTHING for them.
-✓ Emit  SUBTOPIC: 1. Comparisons
-✗ Do NOT emit  a. Simile, b. Metaphor (they are inside a subtopic — emit nothing)
-✓ Emit  SUBTOPIC: A. Capital Letters
-✗ Do NOT emit  the numbered rules below it (they are inside a subtopic — emit nothing)
+${themeBlock}${excludeBlock}
 
-Reference/vocabulary lists and irregular-verb tables with no named sub-categories:
-emit the TOPIC line only — no SUBTOPIC lines.
+For each piece of text, emit exactly one line — or emit nothing:
+  SYNTHESIS: [two sentences about the whole document]   ← once only, at the very start
+  TOPIC: [exact title] | [one sentence summary]
+  SUBTOPIC: [exact title] | [one sentence summary]
+${anchoredRules}
 
-Output one line per item, no blank lines, no other text:
-SYNTHESIS: Two sentences about the whole document here.
-TOPIC: PUNCTUATION | Explains the correct usage of punctuation marks in writing.
-SUBTOPIC: A. Capital Letters | Rules for when to use capital letters.
-SUBTOPIC: B. Full Stops | How full stops end sentences and mark abbreviations.
-TOPIC: NOUNS | Defines nouns as naming words and categorises their types.
-SUBTOPIC: 1. Common Nouns | Ordinary everyday naming words identified by a, an, or the.
-SUBTOPIC: 2. Proper Nouns | Names of specific people, places, or things requiring capitals.
-TOPIC: DEGREES OF COMPARISON | Explains how adjectives compare nouns using three forms.
-SUBTOPIC: Positive Degree | The base form of the adjective describing without comparison.
-SUBTOPIC: Comparative Degree | Form used when comparing two nouns, e.g. adding -er or 'more'.
-SUBTOPIC: Superlative Degree | Form used for three or more nouns, e.g. adding -est or 'most'.
-
-Begin scanning from the very first page now:`;
+Output one line per item, no blank lines, no other text. Begin scanning now:`;
 
   let accumulated  = '';
   let inputTokens  = 0;
@@ -976,7 +1042,7 @@ Begin scanning from the very first page now:`;
         model:    SMART_MODEL,
         contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
         config:   {
-          systemInstruction: 'Output ONLY SYNTHESIS:, TOPIC:, and SUBTOPIC: lines exactly as instructed. No other text.',
+          systemInstruction: 'Output ONLY SYNTHESIS:, TOPIC:, and SUBTOPIC: lines. No other text.',
           maxOutputTokens:   8000,
           temperature:       0.0,
           thinkingConfig:    { thinkingBudget: 0 },
@@ -1000,7 +1066,7 @@ Begin scanning from the very first page now:`;
 
   void dbLogUsage(_currentUserId, 'buildStreamingTOC', SMART_MODEL, inputTokens, outputTokens);
 
-  const entries = parseTOCLines(accumulated);
+  const entries    = parseTOCLines(accumulated);
   const topicCount = entries.filter(e => e.type === 'topic').length;
   if (topicCount === 0) return null;
 
@@ -1081,12 +1147,15 @@ export async function generateContentMap(
     }
   }
 
-  // ── Path 2: streaming TOC scanner ────────────────────────────
-  // Model scans the PDF sequentially, emitting TOPIC:/SUBTOPIC: labelled
-  // lines; code assembles the ContentMap. Universal — works for any
-  // heading style (numbered, lettered, visual, markdown, or none).
+  // ── Path 2: two-pass streaming TOC scanner ───────────────────
+  // Pass 1 (global, ~5–10s): model reads the whole PDF and returns the
+  //   major theme hierarchy + named members + worksheet sections to exclude.
+  // Pass 2 (streaming, ~10–15s): model scans sequentially but now knows
+  //   the full hierarchy — MERCURY → SUBTOPIC of INNER PLANETS, not a TOPIC.
+  // Both passes are separate API calls, each well under Netlify's 26s limit.
   if (pdfBase64) {
-    const map = await buildStreamingTOC(topic, pdfBase64);
+    const themeMap = await extractTOCThemes(topic, pdfBase64);
+    const map      = await buildStreamingTOC(topic, pdfBase64, themeMap);
     if (map) return map;
   }
 
