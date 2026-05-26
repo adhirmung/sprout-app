@@ -14,6 +14,8 @@ export interface StoredExamSet {
   totalMarks:      number;
   durationMinutes: number;
   createdAt:       string;
+  /** Mirrors examData._sourceKey — the document path this exam belongs to. */
+  sourceKey?:      string;
 }
 
 export interface StoredAttempt {
@@ -37,18 +39,22 @@ export async function dbLoadExamSets(userId: string): Promise<StoredExamSet[]> {
     .eq('user_id', userId)
     .order('created_at', { ascending: false });
   if (!data) return [];
-  return data.map(row => ({
-    id:              row.id              as string,
-    userId:          row.user_id         as string,
-    title:           row.title           as string,
-    subject:         row.subject         as string,
-    grade:           row.grade           as string,
-    paperNames:      row.paper_names     as string[],
-    examData:        row.exam_data       as GeneratedExam,
-    totalMarks:      row.total_marks     as number,
-    durationMinutes: row.duration_minutes as number,
-    createdAt:       row.created_at      as string,
-  }));
+  return data.map(row => {
+    const examData = row.exam_data as GeneratedExam;
+    return {
+      id:              row.id               as string,
+      userId:          row.user_id          as string,
+      title:           row.title            as string,
+      subject:         row.subject          as string,
+      grade:           row.grade            as string,
+      paperNames:      row.paper_names      as string[],
+      examData,
+      totalMarks:      row.total_marks      as number,
+      durationMinutes: row.duration_minutes as number,
+      createdAt:       row.created_at       as string,
+      sourceKey:       examData._sourceKey,
+    };
+  });
 }
 
 export async function dbSaveExamSet(

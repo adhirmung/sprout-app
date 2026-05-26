@@ -29,6 +29,8 @@ export interface GeneratedExam {
   durationMinutes: number;
   instructions: string[];
   questions: ExamQuestion[];
+  /** Document path key — set by ExamScreen before saving; used to filter per-document history. */
+  _sourceKey?: string;
 }
 
 export interface QuestionResult {

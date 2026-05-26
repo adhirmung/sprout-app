@@ -287,9 +287,11 @@ interface ExamScreenProps {
   /** Topic titles from the content map — used as the source for "from my notes" exam generation. */
   topicTitles?: string[] | null;
   topic?:       string;
+  /** Document path key — when set, the sidebar only shows exams for this document. */
+  sourceKey?:   string;
 }
 
-export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenProps) {
+export function ExamScreen({ userId, onBack, topicTitles, topic, sourceKey }: ExamScreenProps) {
   // ── DB state ─────────────────────────────────────────────────
   const [examSets,         setExamSets]         = useState<StoredExamSet[]>([]);
   const [attemptSummaries, setAttemptSummaries] = useState<Record<string, AttemptSummary>>({});
@@ -318,6 +320,9 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
   const submitRef   = useRef<() => Promise<void>>(async () => {});
 
   // ── Load exam sets + summaries on mount ───────────────────────
+  // When a sourceKey is provided (opened from a document), only show exams
+  // that belong to that document. Older exams with no _sourceKey stamp are
+  // excluded so the sidebar stays focused on the current subject.
   useEffect(() => {
     if (!userId) return;
     setLoadingSets(true);
@@ -325,11 +330,14 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
       dbLoadExamSets(userId),
       dbLoadAttemptSummaries(userId),
     ]).then(([sets, summaries]) => {
-      setExamSets(sets);
+      const filtered = sourceKey
+        ? sets.filter(s => s.sourceKey === sourceKey)
+        : sets;
+      setExamSets(filtered);
       setAttemptSummaries(summaries);
       setLoadingSets(false);
     });
-  }, [userId]);
+  }, [userId, sourceKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Open file picker after UploadPanel mounts ─────────────────
   useEffect(() => {
@@ -471,6 +479,8 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
             .map(p => ({ name: p.name, content: p.text! })),
         );
       }
+      // Stamp the document key so this exam only appears in this document's sidebar
+      if (sourceKey) generated._sourceKey = sourceKey;
       setExam(generated);
       setAnswers({});
 
@@ -538,6 +548,8 @@ export function ExamScreen({ userId, onBack, topicTitles, topic }: ExamScreenPro
         userId,
       );
 
+      // Carry the source key forward to the variant so it stays in the same document
+      if (sourceKey) variant._sourceKey = sourceKey;
       setExam(variant);
       setAnswers({});
 

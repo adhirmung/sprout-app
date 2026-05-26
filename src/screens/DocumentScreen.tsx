@@ -778,6 +778,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       userId={userId}
       onBack={() => setPhase('idle')}
       topic={topic}
+      sourceKey={sourceKey}
       topicTitles={contentMap?.topics.flatMap(t => [
         t.title,
         ...t.subtopics.map(s => s.title),
