@@ -154,7 +154,7 @@ export async function fetchPdfBase64FromStorage(storagePath: string): Promise<st
 export async function dbLoadContent<T>(
   userId: string,
   fileKey: string,
-  contentType: 'map' | 'reading' | 'course' | 'visuals' | 'audit' | 'extract',
+  contentType: 'map' | 'reading' | 'course' | 'visuals' | 'audit' | 'extract' | 'summary' | 'chat',
 ): Promise<T | null> {
   const { data } = await supabase
     .from('generated_content')
@@ -173,7 +173,7 @@ export async function dbLoadContent<T>(
 export async function dbSaveContent<T>(
   userId: string,
   fileKey: string,
-  contentType: 'map' | 'reading' | 'course' | 'visuals' | 'audit' | 'extract',
+  contentType: 'map' | 'reading' | 'course' | 'visuals' | 'audit' | 'extract' | 'summary' | 'chat',
   data: T,
 ): Promise<void> {
   const { error } = await supabase.from('generated_content').upsert(

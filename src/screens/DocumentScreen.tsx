@@ -156,7 +156,18 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
     // Preload AI summary so the Read phase is instant on return navigation
     const cachedSummary = Store.get<string | null>(`summary:${sourceKey}`, null);
-    if (cachedSummary) setAiSummary(cachedSummary);
+    if (cachedSummary) {
+      setAiSummary(cachedSummary);
+    } else if (userId) {
+      dbLoadContent<{ text: string }>(userId, sourceKey, 'summary')
+        .then(data => {
+          if (data?.text) {
+            Store.set(`summary:${sourceKey}`, data.text);
+            setAiSummary(data.text);
+          }
+        })
+        .catch(() => {});
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
 
@@ -576,6 +587,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         (accumulated) => setAiSummary(accumulated),
       );
       Store.set(`summary:${sourceKey}`, summary);
+      if (userId) dbSaveContent(userId, sourceKey, 'summary', { text: summary }).catch(console.error);
     } catch (e) {
       const msg = e instanceof Error ? e.message : 'Failed to generate summary. Please retry.';
       console.error('[startReading] error:', e);
@@ -902,6 +914,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           topic={topic} content={content} cards={cards} profile={profile}
           currentCard={phase === 'idle' ? undefined : cards[idx]}
           chatKey={sourceKey}
+          userId={userId}
           onClose={() => setShowTutor(false)}
         />
       )}
@@ -4553,9 +4566,9 @@ function topicLabel(c: FeedCard): string {
   }
 }
 
-function TutorOverlay({ topic, content, cards, profile, currentCard, chatKey, onClose }: {
+function TutorOverlay({ topic, content, cards, profile, currentCard, chatKey, userId, onClose }: {
   topic: string; content: string | null; cards: FeedCard[]; profile: LearnerProfile | null;
-  currentCard: FeedCard | undefined; chatKey: string; onClose: () => void;
+  currentCard: FeedCard | undefined; chatKey: string; userId?: string; onClose: () => void;
 }) {
   const STORE_KEY = `tutor:${chatKey}`;
   const [messages,         setMessages]         = useState<ChatMessage[]>(
@@ -4568,9 +4581,28 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, chatKey, on
   const bottomRef  = useRef<HTMLDivElement>(null);
   const isMobile   = useIsMobile();
 
-  // Persist messages to localStorage whenever they change (keep last 40)
+  // On first open: hydrate from DB if localStorage is empty (cross-device sync)
   useEffect(() => {
-    Store.set(STORE_KEY, messages.slice(-40));
+    if (!userId) return;
+    const local = Store.get<ChatMessage[]>(STORE_KEY, []);
+    if (local.length > 0) return; // already loaded from localStorage
+    dbLoadContent<{ messages: ChatMessage[] }>(userId, chatKey, 'chat')
+      .then(data => {
+        if (data?.messages?.length) {
+          Store.set(STORE_KEY, data.messages);
+          setMessages(data.messages);
+        }
+      })
+      .catch(() => {});
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Persist to localStorage + DB whenever messages change (keep last 40)
+  useEffect(() => {
+    const kept = messages.slice(-40);
+    Store.set(STORE_KEY, kept);
+    if (userId && kept.length > 0) {
+      dbSaveContent(userId, chatKey, 'chat', { messages: kept }).catch(() => {});
+    }
   }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
@@ -4633,7 +4665,11 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, chatKey, on
           {messages.length > 0 && (
             <button
               className="btn btn-ghost"
-              onClick={() => { setMessages([]); Store.del(STORE_KEY); }}
+              onClick={() => {
+                setMessages([]);
+                Store.del(STORE_KEY);
+                if (userId) dbSaveContent(userId, chatKey, 'chat', { messages: [] }).catch(() => {});
+              }}
               title="Clear chat history"
               style={{ padding: '5px 8px', fontSize: 11, color: 'var(--ink-4)', borderRadius: 8, gap: 4 }}
             >
