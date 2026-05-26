@@ -158,22 +158,89 @@ async function generateTextStreaming(
 }
 
 /**
- * Detects and fixes common incomplete question stems produced by the model.
- * The most frequent failure: copying a header line like "Find antonyms for:"
- * without the word list, leaving a stem that ends with a bare colon.
+ * Comprehensive validator that drops questions with incomplete or unanswerable stems.
+ *
+ * Categories of failure (apply across ALL subjects):
+ *
+ * 1. Structural incompleteness — stem ends with a colon, ellipsis, or
+ *    dangling sub-question prefix (the model copied a header without the body).
+ *
+ * 2. Unresolved external references — stem mentions a figure, table, diagram,
+ *    graph, source, extract, or passage that is NOT provided in `context`.
+ *    A student cannot answer "Refer to Figure 3" if Figure 3 is absent.
+ *
+ * 3. Vocabulary tasks without target words — "Find antonyms for:" / "Give
+ *    synonyms for:" without listing the actual words.
+ *
+ * 4. Sub-question header only — the model numbered a heading as if it were
+ *    a question (e.g. "1.1", "a)") with no actual question body.
+ *
+ * 5. Trivially short — fewer than 10 characters; cannot be a real question.
  */
 function sanitizeQuestions(questions: ExamQuestion[]): ExamQuestion[] {
-  return questions.filter(q => {
+  // Patterns that signal an unresolved external reference
+  const EXTERNAL_REF = /\b(figure\s*\d|table\s*\d|diagram\s*\d|graph\s*\d|source\s*[a-z\d]|the extract|the passage|the text|the article|the poem|the story|refer to|as shown|see above|see below|in the (?:diagram|figure|table|graph|image) (?:above|below|provided))\b/i;
+
+  // Patterns that signal a vocabulary task whose word list is missing
+  const VOCAB_NO_WORDS = /\b(antonym|synonym|homophone|homonym|idiom|figure of speech|part of speech|word class|language feature)s?\s+for\s*:?\s*$/i;
+
+  // Patterns that look like a section/sub-question header rather than a question
+  const HEADER_ONLY = /^(section|part|question|q)\s*[a-z\d]+\s*[:\-–—]?\s*$/i;
+  const SUB_Q_ONLY  = /^\d+\.\d+\s*$/;             // e.g. "1.1" alone
+
+  const reasons: string[] = [];
+
+  const kept = questions.filter(q => {
     const stem = (q.stem ?? '').trim();
-    // Drop questions with no usable stem
-    if (stem.length < 8) return false;
-    // Drop questions whose stem ends with a colon — they are structurally incomplete
-    if (stem.endsWith(':')) {
-      console.warn(`[examClaude] Dropped incomplete question ${q.number}: stem ends with ":"`);
+    const hasContext = !!q.context?.trim();
+
+    // 5. Too short
+    if (stem.length < 10) {
+      reasons.push(`Q${q.number}: too short ("${stem}")`);
       return false;
     }
+
+    // 1a. Ends with bare colon → structurally incomplete header
+    if (stem.endsWith(':')) {
+      reasons.push(`Q${q.number}: stem ends with ":" — header without body ("${stem.slice(0, 60)}")`);
+      return false;
+    }
+
+    // 1b. Ends with ellipsis → truncated
+    if (stem.endsWith('…') || stem.endsWith('...')) {
+      reasons.push(`Q${q.number}: stem ends with ellipsis — truncated`);
+      return false;
+    }
+
+    // 3. Vocabulary task without target words
+    if (VOCAB_NO_WORDS.test(stem)) {
+      reasons.push(`Q${q.number}: vocabulary task with no target words ("${stem.slice(0, 60)}")`);
+      return false;
+    }
+
+    // 4. Section header or bare sub-question number
+    if (HEADER_ONLY.test(stem) || SUB_Q_ONLY.test(stem)) {
+      reasons.push(`Q${q.number}: looks like a section header, not a question ("${stem}")`);
+      return false;
+    }
+
+    // 2. Unresolved external reference (only a problem when context is absent)
+    if (!hasContext && EXTERNAL_REF.test(stem)) {
+      reasons.push(`Q${q.number}: references external content with no context field ("${stem.slice(0, 80)}")`);
+      return false;
+    }
+
     return true;
   });
+
+  if (reasons.length > 0) {
+    console.warn(
+      `[examClaude] sanitizeQuestions: dropped ${reasons.length} incomplete question(s):\n` +
+      reasons.map(r => `  • ${r}`).join('\n'),
+    );
+  }
+
+  return kept;
 }
 
 /** Close any unclosed brackets left by a truncated streaming response. */
@@ -297,12 +364,23 @@ Question type rules:
 - "calculation": Numerical/mathematical/scientific calculation (3–10 marks). modelAnswer is full worked solution.
 - "essay": Extended writing (8–20 marks). modelAnswer is a paragraph plan or rubric.
 
-COMPLETENESS RULES — strictly enforced:
-- Every "stem" must be COMPLETE and SELF-CONTAINED as a single string. A student must be able to answer it without any missing information.
-- NEVER end a stem with a colon (:) or an incomplete phrase. If the original paper had a header like "Find antonyms for:" followed by a word list, you MUST merge them into one stem: "Find words from the extract that are antonyms for: dark, noisy, warm (3)".
-- Vocabulary/language tasks (antonyms, synonyms, homophones, idioms) must list ALL the target words inside the stem itself.
-- Comprehension passages or data tables go in "context", never in the stem alone.
-- If a source paper used sub-questions (1.1, 1.2 …) that share a header, combine them into one complete question stem or create separate complete questions.
+SELF-CONTAINMENT RULES — apply to every question in every subject:
+A student must be able to read a question and answer it with ONLY the information in "stem" and "context". They cannot see the original exam paper.
+
+FORBIDDEN in "stem" (will be automatically dropped):
+✗ Stems that end with ":" — always incomplete (a header, not a question)
+✗ Stems that end with "..." — truncated
+✗ Any reference to "Figure N", "Table N", "Diagram N", "Graph N", "Source A/B/C", "the extract", "the passage", "the poem", "the text", "the article", "refer to...", "as shown", "see above/below" — UNLESS that content is fully reproduced in the "context" field
+✗ Vocabulary tasks without target words: NEVER write "Find antonyms for:" — write "Find words from the extract that are antonyms for: dark, noisy, warm (3)"
+✗ Sub-question header lines without a question body (e.g. "1.1" alone, or "Section B:")
+
+REQUIRED for each question type:
+✓ Comprehension/language: put the passage/poem/extract in "context"; ask a specific question in "stem"
+✓ Data/graph questions: reproduce the table, data set, or describe the graph fully in "context"
+✓ Vocabulary (antonyms, synonyms, homophones, word class, idioms): list every target word inside "stem"
+✓ Calculation: include ALL given values, units, and formulae needed in "stem" or "context"
+✓ Diagram-based (Biology, Geography, Physics): describe or reproduce the diagram in "context"
+✓ Multi-part source questions (History, English): put each source in "context"; write a separate complete question per source
 
 IMPORTANT: The sum of all question marks must equal totalMarks.`;
 
@@ -412,7 +490,7 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   ]
 }
 
-COMPLETENESS RULE: Every "stem" must be a complete, self-contained question. NEVER end a stem with a colon. If asking for antonyms/synonyms, include the actual target words inside the stem (e.g. "Find antonyms for: dark, noisy, warm (3)").
+SELF-CONTAINMENT RULE: Every question must be answerable using only "stem" + "context" — the student cannot see the original paper. Never end a stem with ":". Never reference figures, tables, diagrams, passages, or sources unless reproduced in "context". Vocabulary tasks (antonyms, synonyms, etc.) must list ALL target words in the stem.
 
 IMPORTANT: Sum of all question marks must equal ${sourceExam.totalMarks}.`;
 
