@@ -157,6 +157,25 @@ async function generateTextStreaming(
   return accumulated;
 }
 
+/**
+ * Detects and fixes common incomplete question stems produced by the model.
+ * The most frequent failure: copying a header line like "Find antonyms for:"
+ * without the word list, leaving a stem that ends with a bare colon.
+ */
+function sanitizeQuestions(questions: ExamQuestion[]): ExamQuestion[] {
+  return questions.filter(q => {
+    const stem = (q.stem ?? '').trim();
+    // Drop questions with no usable stem
+    if (stem.length < 8) return false;
+    // Drop questions whose stem ends with a colon — they are structurally incomplete
+    if (stem.endsWith(':')) {
+      console.warn(`[examClaude] Dropped incomplete question ${q.number}: stem ends with ":"`);
+      return false;
+    }
+    return true;
+  });
+}
+
 /** Close any unclosed brackets left by a truncated streaming response. */
 function repairJson(s: string): string {
   const stack: string[] = [];
@@ -278,6 +297,13 @@ Question type rules:
 - "calculation": Numerical/mathematical/scientific calculation (3–10 marks). modelAnswer is full worked solution.
 - "essay": Extended writing (8–20 marks). modelAnswer is a paragraph plan or rubric.
 
+COMPLETENESS RULES — strictly enforced:
+- Every "stem" must be COMPLETE and SELF-CONTAINED as a single string. A student must be able to answer it without any missing information.
+- NEVER end a stem with a colon (:) or an incomplete phrase. If the original paper had a header like "Find antonyms for:" followed by a word list, you MUST merge them into one stem: "Find words from the extract that are antonyms for: dark, noisy, warm (3)".
+- Vocabulary/language tasks (antonyms, synonyms, homophones, idioms) must list ALL the target words inside the stem itself.
+- Comprehension passages or data tables go in "context", never in the stem alone.
+- If a source paper used sub-questions (1.1, 1.2 …) that share a header, combine them into one complete question stem or create separate complete questions.
+
 IMPORTANT: The sum of all question marks must equal totalMarks.`;
 
   onProgress?.('Generating your personalised practice exam…');
@@ -306,18 +332,24 @@ IMPORTANT: The sum of all question marks must equal totalMarks.`;
     throw new Error('Failed to generate exam questions. Please retry.');
   }
 
-  exam.questions = exam.questions.map((q, i) => ({
-    id:              q.id     ?? `q${i + 1}`,
-    number:          q.number ?? String(i + 1),
-    type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
-    topic:           q.topic  ?? 'General',
-    marks:           typeof q.marks === 'number' ? q.marks : 2,
-    stem:            q.stem   ?? '',
-    context:         q.context,
-    options:         q.options,
-    modelAnswer:     q.modelAnswer    ?? '',
-    markingGuidance: q.markingGuidance,
-  }));
+  exam.questions = sanitizeQuestions(
+    exam.questions.map((q, i) => ({
+      id:              q.id     ?? `q${i + 1}`,
+      number:          q.number ?? String(i + 1),
+      type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
+      topic:           q.topic  ?? 'General',
+      marks:           typeof q.marks === 'number' ? q.marks : 2,
+      stem:            q.stem   ?? '',
+      context:         q.context,
+      options:         q.options,
+      modelAnswer:     q.modelAnswer    ?? '',
+      markingGuidance: q.markingGuidance,
+    })),
+  );
+
+  if (exam.questions.length === 0) {
+    throw new Error('All generated questions were incomplete. Please retry.');
+  }
 
   return exam;
 }
@@ -380,6 +412,8 @@ Return ONLY valid JSON — no markdown fences, no explanation:
   ]
 }
 
+COMPLETENESS RULE: Every "stem" must be a complete, self-contained question. NEVER end a stem with a colon. If asking for antonyms/synonyms, include the actual target words inside the stem (e.g. "Find antonyms for: dark, noisy, warm (3)").
+
 IMPORTANT: Sum of all question marks must equal ${sourceExam.totalMarks}.`;
 
   onProgress?.('Building variant questions…');
@@ -405,18 +439,24 @@ IMPORTANT: Sum of all question marks must equal ${sourceExam.totalMarks}.`;
     throw new Error('Failed to generate variant questions. Please retry.');
   }
 
-  exam.questions = exam.questions.map((q, i) => ({
-    id:              q.id     ?? `q${i + 1}`,
-    number:          q.number ?? String(i + 1),
-    type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
-    topic:           q.topic  ?? 'General',
-    marks:           typeof q.marks === 'number' ? q.marks : 2,
-    stem:            q.stem   ?? '',
-    context:         q.context,
-    options:         q.options,
-    modelAnswer:     q.modelAnswer    ?? '',
-    markingGuidance: q.markingGuidance,
-  }));
+  exam.questions = sanitizeQuestions(
+    exam.questions.map((q, i) => ({
+      id:              q.id     ?? `q${i + 1}`,
+      number:          q.number ?? String(i + 1),
+      type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
+      topic:           q.topic  ?? 'General',
+      marks:           typeof q.marks === 'number' ? q.marks : 2,
+      stem:            q.stem   ?? '',
+      context:         q.context,
+      options:         q.options,
+      modelAnswer:     q.modelAnswer    ?? '',
+      markingGuidance: q.markingGuidance,
+    })),
+  );
+
+  if (exam.questions.length === 0) {
+    throw new Error('All generated questions were incomplete. Please retry.');
+  }
 
   return exam;
 }
@@ -613,18 +653,24 @@ Return ONLY valid JSON — no markdown fences:
     throw new Error('Failed to generate exam questions. Please retry.');
   }
 
-  exam.questions = exam.questions.map((q, i) => ({
-    id:              q.id     ?? `q${i + 1}`,
-    number:          q.number ?? String(i + 1),
-    type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
-    topic:           q.topic  ?? 'General',
-    marks:           typeof q.marks === 'number' ? q.marks : 2,
-    stem:            q.stem   ?? '',
-    context:         q.context,
-    options:         q.options,
-    modelAnswer:     q.modelAnswer    ?? '',
-    markingGuidance: q.markingGuidance,
-  }));
+  exam.questions = sanitizeQuestions(
+    exam.questions.map((q, i) => ({
+      id:              q.id     ?? `q${i + 1}`,
+      number:          q.number ?? String(i + 1),
+      type:            (['mcq', 'short', 'calculation', 'essay'].includes(q.type) ? q.type : 'short') as ExamQuestion['type'],
+      topic:           q.topic  ?? 'General',
+      marks:           typeof q.marks === 'number' ? q.marks : 2,
+      stem:            q.stem   ?? '',
+      context:         q.context,
+      options:         q.options,
+      modelAnswer:     q.modelAnswer    ?? '',
+      markingGuidance: q.markingGuidance,
+    })),
+  );
+
+  if (exam.questions.length === 0) {
+    throw new Error('All generated questions were incomplete. Please retry.');
+  }
 
   return exam;
 }
