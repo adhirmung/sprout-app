@@ -932,7 +932,10 @@ Return ONLY valid JSON — no markdown:
   "exclude": ["Worksheet heading 1", "Activity heading 2"]
 }`;
 
-  const response = await client.models.generateContent({
+  // Stream instead of blocking generateContent — the proxy's fetch() resolves
+  // on the first SSE chunk so Netlify's 26 s edge-function limit is never hit,
+  // even for large PDFs that take Gemini 30–40 s to process.
+  const stream = await client.models.generateContentStream({
     model:    SMART_MODEL,
     contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
     config:   {
@@ -943,11 +946,18 @@ Return ONLY valid JSON — no markdown:
     },
   });
 
-  const usage = response.usageMetadata;
-  void dbLogUsage(_currentUserId, 'extractTOCThemes', SMART_MODEL,
-    usage?.promptTokenCount ?? 0, usage?.candidatesTokenCount ?? 0);
+  let raw      = '';
+  let inTokens = 0;
+  let outTokens = 0;
+  for await (const chunk of stream) {
+    if (chunk.text) raw += chunk.text;
+    if (chunk.usageMetadata) {
+      inTokens  = chunk.usageMetadata.promptTokenCount     ?? inTokens;
+      outTokens = chunk.usageMetadata.candidatesTokenCount ?? outTokens;
+    }
+  }
+  void dbLogUsage(_currentUserId, 'extractTOCThemes', SMART_MODEL, inTokens, outTokens);
 
-  const raw   = response.text ?? '';
   const start = raw.indexOf('{');
   const end   = raw.lastIndexOf('}');
   if (start === -1 || end === -1) {
@@ -1175,6 +1185,92 @@ export async function generateContentMap(
   // For truly unstructured content (essays, articles) with no discernible
   // heading structure at all.
   return generateMapFromModel(topic, contentText, pdfBase64, gapFill);
+}
+
+// ── AI Summary (replaces old Read view) ───────────────────────
+//
+// Generates a creative, freely-structured summary of the document.
+// If course material (notes) already exists it's used as the primary
+// source — much richer than the raw text. Falls back to extracted text
+// + content map when notes haven't been generated yet.
+// Uses streaming so the summary appears word-by-word in the UI.
+
+export async function generateAISummary(
+  topic:          string,
+  courseMaterial: DocumentReading | null,
+  contentMap:     ContentMap | null,
+  contentText:    string | null,
+  onChunk:        (accumulated: string) => void,
+): Promise<string> {
+  // Build source block — prefer full notes, fall back to extracted text
+  let sourceBlock: string;
+  if (courseMaterial && courseMaterial.topics.length > 0) {
+    sourceBlock = courseMaterial.topics.map(t =>
+      `## ${t.title}${t.whyItMatters ? `\n_${t.whyItMatters}_` : ''}\n` +
+      t.subtopics.map(s => `### ${s.title}\n${s.content}`).join('\n\n')
+    ).join('\n\n---\n\n');
+  } else if (contentMap && contentText) {
+    // No notes yet — use map structure + raw text slice
+    const mapOutline = contentMap.topics.map(t =>
+      `• ${t.title}: ${t.summary}\n${t.subtopics.map(s => `  – ${s.title}: ${s.summary}`).join('\n')}`
+    ).join('\n');
+    sourceBlock = `CONTENT OUTLINE:\n${mapOutline}\n\nSOURCE TEXT (first extract):\n${contentText.slice(0, 20_000)}`;
+  } else if (contentText) {
+    sourceBlock = contentText.slice(0, 25_000);
+  } else {
+    sourceBlock = contentMap
+      ? contentMap.topics.map(t => `• ${t.title}: ${t.summary}`).join('\n')
+      : '(No source available)';
+  }
+
+  const prompt = `You are a brilliant, creative educator. You've just studied comprehensive material on "${topic}" and your job is to write a summary that a student would actually WANT to read — not a rewrite, a re-imagining.
+
+SOURCE MATERIAL:
+${sourceBlock}
+
+YOUR TASK:
+Transform this content into something memorable, engaging, and genuinely fun. You have COMPLETE creative freedom on structure and format. Mix and match ideas like:
+- A punchy TLDR that captures the whole subject in 2–3 sentences
+- Unexpected analogies ("The nucleus is like the CEO of a company — it doesn't do the work, it just controls everything")
+- "Did you know?" or "Here's the wild part…" callouts for fascinating facts
+- Connecting ideas across topics in surprising ways
+- A "Common Mistakes" or "Don't confuse these" section if relevant
+- Write some sections like you're explaining to a friend over coffee
+- Use emojis to give sections personality
+- A "Golden Rules" or "Never Forget These" section at the end — the 5 things that will always come up
+
+RULES:
+- Cover ALL major concepts — don't skip any topic
+- Use markdown: ## for sections, **bold** for key terms, *italic* for emphasis, > for callouts, - for bullets
+- Make it feel alive — this is a highlight reel, not a textbook
+- High school level but NOT dumbed down
+- 600–1000 words`;
+
+  const client = getClient();
+  const stream = await client.models.generateContentStream({
+    model:    SMART_MODEL,
+    contents: [{ role: 'user', parts: [textPart(prompt)] }],
+    config:   {
+      systemInstruction: 'You are a creative, engaging educational writer. Use markdown freely. Make it fun.',
+      maxOutputTokens:   4000,
+      temperature:       0.8,
+      thinkingConfig:    { thinkingBudget: 0 },
+    },
+  });
+
+  let full     = '';
+  let inTok    = 0;
+  let outTok   = 0;
+  for await (const chunk of stream) {
+    const t = chunk.text ?? '';
+    if (t) { full += t; onChunk(full); }
+    if (chunk.usageMetadata) {
+      inTok  = chunk.usageMetadata.promptTokenCount     ?? inTok;
+      outTok = chunk.usageMetadata.candidatesTokenCount ?? outTok;
+    }
+  }
+  void dbLogUsage(_currentUserId, 'generateAISummary', SMART_MODEL, inTok, outTok);
+  return full;
 }
 
 // ── Document reading generator ────────────────────────────────

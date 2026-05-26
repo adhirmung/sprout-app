@@ -29,6 +29,7 @@ import {
   saveApiKey,
   streamCardChat,
   streamCourseMaterial,
+  generateAISummary,
 } from '../lib/gemini';
 import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
@@ -64,6 +65,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [courseMaterial,  setCourseMaterial]  = useState<DocumentReading | null>(null);
+  const [aiSummary,       setAiSummary]       = useState<string | null>(null);
   const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
@@ -549,41 +551,29 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   };
 
   const startReading = async (map: ContentMap) => {
-    // Only use cache if it has the new subtopic format (not old paragraphs format)
-    const cached = Store.get<DocumentReading | null>(`reading:${sourceKey}`, null);
-    if (cached?.topics?.length && cached.topics[0]?.subtopics?.length) {
-      setDocumentReading(cached);
+    // Check cache — stored as a plain string now
+    const cached = Store.get<string | null>(`summary:${sourceKey}`, null);
+    if (cached) {
+      setAiSummary(cached);
       setPhase('read');
       return;
-    }
-    // Check Supabase cache for authenticated users
-    if (userId) {
-      const dbCached = await dbLoadContent<DocumentReading>(userId, sourceKey, 'reading').catch(() => null);
-      if (dbCached?.topics?.length && dbCached.topics[0]?.subtopics?.length) {
-        Store.set(`reading:${sourceKey}`, dbCached);
-        setDocumentReading(dbCached);
-        setPhase('read');
-        return;
-      }
     }
     setPhase('read-loading');
     setError('');
     try {
-      // generateReading uses map context — PDF fetch is best-effort only.
-      let resolvedPdf = pdfBase64;
-      if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
-      const wmScore = profile?.workingMemory.score ?? 60;
-      const sentenceTarget = wmScore < 40 ? 2 : wmScore < 55 ? 3 : wmScore < 72 ? 4 : 5;
-      const reading = await generateReading(topic, content, resolvedPdf, map, sentenceTarget);
-      Store.set(`reading:${sourceKey}`, reading);
-      if (userId) dbSaveContent(userId, sourceKey, 'reading', reading).catch(console.error);
-      setDocumentReading(reading);
+      // Stream the summary live — chunks update the UI as they arrive
+      setAiSummary('');
       setPhase('read');
-
-      // Pass 2: weave in missed concepts from the audit (background)
-      void runReadingEnhancement(map, resolvedPdf, sentenceTarget);
+      const summary = await generateAISummary(
+        topic,
+        courseMaterial,   // use notes if available — much richer source
+        map,
+        content,
+        (accumulated) => setAiSummary(accumulated),
+      );
+      Store.set(`summary:${sourceKey}`, summary);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to generate reading material. Please retry.';
+      const msg = e instanceof Error ? e.message : 'Failed to generate summary. Please retry.';
       console.error('[startReading] error:', e);
       setError(msg);
       setPhase('map');
@@ -779,32 +769,18 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
-  if (phase === 'read' && documentReading && contentMap) return (
-    <NotesErrorBoundary onReset={async () => {
-      Store.del(`reading:${sourceKey}`);
-      setDocumentReading(null);
-      await startReading(contentMap);
-    }}>
-      <ReadView
-        documentReading={documentReading}
-        topic={topic}
-        hasCache={!!Store.get<DocumentReading | null>(`reading:${sourceKey}`, null)}
-        profile={profile}
-        readEnhancing={readEnhancing}
-        enhancementSummary={enhancementSummary}
-        contentAudit={contentAudit}
-        isCourse={false}
-        hasCourseMaterial={!!courseMaterial}
-        onContinueToRead={undefined}
-        onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
-        onPractice={() => setPhase('practice')}
-        onRegenerate={async () => {
-          Store.del(`reading:${sourceKey}`);
-          setDocumentReading(null);
-          await startReading(contentMap);
-        }}
-      />
-    </NotesErrorBoundary>
+  if (phase === 'read' && contentMap) return (
+    <AISummaryView
+      topic={topic}
+      summary={aiSummary ?? ''}
+      streaming={!aiSummary || aiSummary.length < 50}
+      onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
+      onRegenerate={async () => {
+        Store.del(`summary:${sourceKey}`);
+        setAiSummary(null);
+        await startReading(contentMap);
+      }}
+    />
   );
 
   return (
@@ -4241,6 +4217,231 @@ function QuizCard({ card, onCorrect, onWrong }: {
         </div>
       )}
     </>
+  );
+}
+
+// ── Markdown renderer ─────────────────────────────────────────
+// Lightweight inline markdown → React nodes.
+// Handles: ##/###/####, **bold**, *italic*, - lists, 1. lists, > quotes, ---, paragraphs.
+
+function renderInline(text: string): React.ReactNode[] {
+  const parts: React.ReactNode[] = [];
+  let i = 0, key = 0;
+  while (i < text.length) {
+    // Bold **…**
+    if (text.startsWith('**', i)) {
+      const end = text.indexOf('**', i + 2);
+      if (end !== -1) {
+        parts.push(<strong key={key++} style={{ fontWeight: 700, color: 'var(--ink)' }}>{text.slice(i + 2, end)}</strong>);
+        i = end + 2; continue;
+      }
+    }
+    // Italic *…* (not **)
+    if (text[i] === '*' && text[i + 1] !== '*') {
+      const end = text.indexOf('*', i + 1);
+      if (end !== -1) {
+        parts.push(<em key={key++} style={{ fontStyle: 'italic' }}>{text.slice(i + 1, end)}</em>);
+        i = end + 1; continue;
+      }
+    }
+    // Plain text run
+    let j = i + 1;
+    while (j < text.length) {
+      if (text.startsWith('**', j) || (text[j] === '*' && text[j + 1] !== '*')) break;
+      j++;
+    }
+    parts.push(<span key={key++}>{text.slice(i, j)}</span>);
+    i = j;
+  }
+  return parts;
+}
+
+function MarkdownRenderer({ text }: { text: string }) {
+  const lines = text.split('\n');
+  const elements: React.ReactNode[] = [];
+  let listItems: React.ReactNode[] = [];
+  let isOrdered = false;
+  let ki = 0;
+
+  const flushList = () => {
+    if (listItems.length === 0) return;
+    elements.push(
+      <ul key={ki++} style={{ margin: '6px 0 12px', padding: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
+        {listItems}
+      </ul>,
+    );
+    listItems = []; isOrdered = false;
+  };
+
+  for (let li = 0; li < lines.length; li++) {
+    const raw     = lines[li];
+    const trimmed = raw.trim();
+
+    // h2
+    if (trimmed.startsWith('## ')) {
+      flushList();
+      elements.push(
+        <h2 key={ki++} style={{ fontSize: 20, fontWeight: 800, color: 'var(--ink)', marginTop: li === 0 ? 0 : 30, marginBottom: 8, lineHeight: 1.3, borderBottom: '2px solid var(--brand-soft)', paddingBottom: 6 }}>
+          {renderInline(trimmed.slice(3))}
+        </h2>,
+      ); continue;
+    }
+    // h3
+    if (trimmed.startsWith('### ')) {
+      flushList();
+      elements.push(
+        <h3 key={ki++} style={{ fontSize: 16, fontWeight: 700, color: 'var(--brand-2)', marginTop: 20, marginBottom: 6, lineHeight: 1.35 }}>
+          {renderInline(trimmed.slice(4))}
+        </h3>,
+      ); continue;
+    }
+    // h4
+    if (trimmed.startsWith('#### ')) {
+      flushList();
+      elements.push(
+        <h4 key={ki++} style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginTop: 14, marginBottom: 4, lineHeight: 1.4 }}>
+          {renderInline(trimmed.slice(5))}
+        </h4>,
+      ); continue;
+    }
+    // hr
+    if (trimmed === '---' || trimmed === '***' || trimmed === '___') {
+      flushList();
+      elements.push(<hr key={ki++} style={{ border: 'none', borderTop: '1px solid var(--line)', margin: '20px 0' }} />);
+      continue;
+    }
+    // blockquote
+    if (trimmed.startsWith('> ')) {
+      flushList();
+      elements.push(
+        <blockquote key={ki++} style={{ margin: '10px 0', padding: '10px 16px', borderLeft: '3px solid var(--brand)', background: 'var(--brand-tint)', borderRadius: '0 10px 10px 0', fontSize: 14, color: 'var(--ink-2)', fontStyle: 'italic', lineHeight: 1.65 }}>
+          {renderInline(trimmed.slice(2))}
+        </blockquote>,
+      ); continue;
+    }
+    // bullet list
+    if (trimmed.startsWith('- ') || trimmed.startsWith('• ')) {
+      if (isOrdered) flushList();
+      const content = trimmed.slice(2);
+      listItems.push(
+        <li key={ki++} style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.65, listStyle: 'none', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ color: 'var(--brand)', fontWeight: 800, flexShrink: 0, marginTop: 2 }}>·</span>
+          <span>{renderInline(content)}</span>
+        </li>,
+      ); continue;
+    }
+    // numbered list
+    const numMatch = trimmed.match(/^(\d+)\.\s(.+)/);
+    if (numMatch) {
+      if (!isOrdered && listItems.length > 0) flushList();
+      isOrdered = true;
+      listItems.push(
+        <li key={ki++} style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.65, listStyle: 'none', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ color: 'var(--brand)', fontWeight: 800, flexShrink: 0, fontFamily: 'var(--font-mono)', fontSize: 12, minWidth: 20 }}>{numMatch[1]}.</span>
+          <span>{renderInline(numMatch[2])}</span>
+        </li>,
+      ); continue;
+    }
+    // empty line
+    if (trimmed === '') {
+      flushList();
+      if (li > 0 && lines[li - 1].trim() !== '') elements.push(<div key={ki++} style={{ height: 6 }} />);
+      continue;
+    }
+    // paragraph
+    flushList();
+    elements.push(
+      <p key={ki++} style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7, margin: '0 0 6px' }}>
+        {renderInline(trimmed)}
+      </p>,
+    );
+  }
+  flushList();
+  return <>{elements}</>;
+}
+
+// ── AI Summary view ───────────────────────────────────────────
+
+function AISummaryView({ topic, summary, streaming, onBack, onRegenerate }: {
+  topic:        string;
+  summary:      string;
+  streaming:    boolean;
+  onBack:       () => void;
+  onRegenerate: () => Promise<void>;
+}) {
+  const isMobile      = useIsMobile();
+  const scrollRef     = useRef<HTMLDivElement>(null);
+  const [regen, setRegen] = useState(false);
+  const isEmpty = summary.length < 5;
+
+  // Chase the bottom while text streams in
+  useEffect(() => {
+    if (streaming && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [summary, streaming]);
+
+  const handleRegenerate = async () => {
+    setRegen(true);
+    try { await onRegenerate(); }
+    finally { setRegen(false); }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+
+      {/* Header */}
+      <div style={{ padding: '0 16px', height: 58, flexShrink: 0, background: 'var(--card)', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button className="btn btn-ghost" onClick={onBack} style={{ padding: 8, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Back">
+          <Icon name="arrow-left" size={20} />
+        </button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>AI Summary</div>
+          <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+          {streaming && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', borderRadius: 20, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)' }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--brand)', display: 'inline-block', animation: 'dot-pulse 1.2s ease infinite' }} />
+              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)' }}>Writing…</span>
+            </div>
+          )}
+          <button
+            onClick={handleRegenerate}
+            disabled={regen || streaming}
+            className="btn btn-ghost"
+            style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', display: 'flex', alignItems: 'center', gap: 5 }}
+          >
+            <Icon name="refresh" size={13} stroke="var(--ink-3)" />
+            {!isMobile && 'Refresh'}
+          </button>
+        </div>
+      </div>
+
+      {/* Body */}
+      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px 40px' : '28px 36px 52px' }}>
+        <div style={{ maxWidth: 700, margin: '0 auto' }}>
+          {isEmpty ? (
+            /* Skeleton while first SSE chunks arrive */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
+              {[70, 100, 88, 94, 62, 55, 100, 78].map((w, i) => (
+                <div key={i} style={{ height: i === 0 ? 26 : 13, borderRadius: 7, background: 'var(--line)', width: `${w}%`, animation: `shimmer 1.6s ease ${i * 0.08}s infinite` }} />
+              ))}
+              <div style={{ fontSize: 13, color: 'var(--ink-3)', textAlign: 'center', marginTop: 24, fontWeight: 600 }}>
+                ✨ Crafting your summary…
+              </div>
+            </div>
+          ) : (
+            <>
+              <MarkdownRenderer text={summary} />
+              {streaming && (
+                <span style={{ display: 'inline-block', width: 2, height: 16, background: 'var(--brand)', borderRadius: 1, marginLeft: 3, verticalAlign: 'middle', animation: 'blink-cursor 0.9s step-end infinite' }} />
+              )}
+            </>
+          )}
+        </div>
+      </div>
+    </div>
   );
 }
 
