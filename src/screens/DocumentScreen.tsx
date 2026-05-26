@@ -153,6 +153,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .then(data => { if (data?.text) { Store.set(`extract:${sourceKey}`, data.text); setExtractedText(data.text); } })
         .catch(() => {});
     }
+
+    // Preload AI summary so the Read phase is instant on return navigation
+    const cachedSummary = Store.get<string | null>(`summary:${sourceKey}`, null);
+    if (cachedSummary) setAiSummary(cachedSummary);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
 
@@ -897,6 +901,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         <TutorOverlay
           topic={topic} content={content} cards={cards} profile={profile}
           currentCard={phase === 'idle' ? undefined : cards[idx]}
+          chatKey={sourceKey}
           onClose={() => setShowTutor(false)}
         />
       )}
@@ -4548,17 +4553,25 @@ function topicLabel(c: FeedCard): string {
   }
 }
 
-function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: {
+function TutorOverlay({ topic, content, cards, profile, currentCard, chatKey, onClose }: {
   topic: string; content: string | null; cards: FeedCard[]; profile: LearnerProfile | null;
-  currentCard: FeedCard | undefined; onClose: () => void;
+  currentCard: FeedCard | undefined; chatKey: string; onClose: () => void;
 }) {
-  const [messages,         setMessages]         = useState<ChatMessage[]>([]);
+  const STORE_KEY = `tutor:${chatKey}`;
+  const [messages,         setMessages]         = useState<ChatMessage[]>(
+    () => Store.get<ChatMessage[]>(STORE_KEY, []),
+  );
   const [streaming,        setStreaming]         = useState(false);
   const [error,            setError]             = useState('');
   const [showTopicPicker,  setShowTopicPicker]   = useState(false);
   const [pendingTopic,     setPendingTopic]      = useState('');
   const bottomRef  = useRef<HTMLDivElement>(null);
   const isMobile   = useIsMobile();
+
+  // Persist messages to localStorage whenever they change (keep last 40)
+  useEffect(() => {
+    Store.set(STORE_KEY, messages.slice(-40));
+  }, [messages]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
 
@@ -4617,6 +4630,16 @@ function TutorOverlay({ topic, content, cards, profile, currentCard, onClose }: 
             <div style={{ fontWeight: 700, fontSize: 14 }}>Tutor</div>
             <div style={{ fontSize: 11, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
           </div>
+          {messages.length > 0 && (
+            <button
+              className="btn btn-ghost"
+              onClick={() => { setMessages([]); Store.del(STORE_KEY); }}
+              title="Clear chat history"
+              style={{ padding: '5px 8px', fontSize: 11, color: 'var(--ink-4)', borderRadius: 8, gap: 4 }}
+            >
+              🗑 Clear
+            </button>
+          )}
           <button className="btn btn-ghost" onClick={onClose} style={{ padding: 8, borderRadius: '50%', minWidth: 40, minHeight: 40 }} aria-label="Close">
             <Icon name="close" size={16} />
           </button>
