@@ -95,6 +95,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // ── Lifted from ReadView so they survive within-session navigation ──
   const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
+  // Deferred practice — set when user clicks Practice before Notes are loaded
+  const [pendingPractice,   setPendingPractice]   = useState(false);
   const retryRef = useRef<HTMLButtonElement>(null);
 
   const topic       = source?.path?.[source.path.length - 1] ?? 'Document';
@@ -182,6 +184,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
+
+  // When user clicked Practice before Notes were ready, transition once they arrive
+  useEffect(() => {
+    if (pendingPractice && (courseMaterial ?? documentReading)) {
+      setPendingPractice(false);
+      setPhase('practice');
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingPractice, courseMaterial, documentReading]);
 
   // Persist subStatuses to localStorage + DB whenever they change
   useEffect(() => {
@@ -659,7 +670,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       enhancementSummary={enhancementSummary}
       onBack={() => setPhase('idle')}
       onCourseMaterial={() => startCourseMaterial(contentMap)}
-      onPractice={() => setPhase('practice')}
+      onPractice={() => {
+        if (courseMaterial ?? documentReading) {
+          setPhase('practice');
+        } else {
+          // Notes not loaded yet — generate them first, then auto-jump to practice
+          setPendingPractice(true);
+          void startCourseMaterial(contentMap);
+        }
+      }}
       onRegenerate={async () => {
         Store.del(`map:${sourceKey}`);
         Store.del(`audit:${sourceKey}`);
@@ -690,7 +709,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       documentReading={(courseMaterial ?? documentReading)!}
       topic={topic}
       profile={profile}
-      onBack={() => setPhase('course')}
+      onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
     />
   );
 
