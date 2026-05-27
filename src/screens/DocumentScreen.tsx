@@ -48,6 +48,10 @@ function useIsMobile() {
   return mobile;
 }
 
+// ── Shared types ─────────────────────────────────────────────
+
+type SubStatus = 'unread' | 'read' | 'learnt';
+
 // ── DocumentScreen ────────────────────────────────────────────
 
 interface DocumentScreenProps {
@@ -88,6 +92,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [courseStreaming,   setCourseStreaming]   = useState(false);
   const [diagnostic,        setDiagnostic]        = useState<DocumentDiagnostic | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
+  // ── Lifted from ReadView so they survive within-session navigation ──
+  const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
+  const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
   const retryRef = useRef<HTMLButtonElement>(null);
 
   const topic       = source?.path?.[source.path.length - 1] ?? 'Document';
@@ -150,6 +157,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
+    // Preload subtopic read/learnt statuses
+    const cachedProgress = Store.get<Record<string, SubStatus> | null>(`progress:${sourceKey}`, null);
+    if (cachedProgress && typeof cachedProgress === 'object') {
+      setSubStatuses(cachedProgress);
+    } else if (userId) {
+      dbLoadContent<Record<string, SubStatus>>(userId, sourceKey, 'progress')
+        .then(data => { if (data && typeof data === 'object') { Store.set(`progress:${sourceKey}`, data); setSubStatuses(data); } })
+        .catch(() => {});
+    }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
 
@@ -165,6 +182,14 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
+
+  // Persist subStatuses to localStorage + DB whenever they change
+  useEffect(() => {
+    if (Object.keys(subStatuses).length === 0) return;
+    Store.set(`progress:${sourceKey}`, subStatuses);
+    if (userId) dbSaveContent(userId, sourceKey, 'progress', subStatuses).catch(console.error);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [subStatuses]);
 
   // Auto-dismiss the gap-cards toast after 5 s
   useEffect(() => {
@@ -603,6 +628,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         diagnostic={diagnostic}
         diagnosticLoading={diagnosticLoading}
         onRunDiagnostic={runDiagnostic}
+        subStatuses={subStatuses}
+        onSubStatusChange={setSubStatuses}
+        focusChatMessages={focusChatMessages}
+        onFocusChatMessagesChange={setFocusChatMessages}
         onBack={() => { if (!courseStreaming) setPhase('map'); }}
         onPractice={() => setPhase('practice')}
         onRegenerate={async () => {
@@ -2434,29 +2463,30 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, onBack, onPractice, onRegenerate }: {
-  documentReading:    DocumentReading;
-  topic:              string;
-  hasCache:           boolean;
-  profile:            LearnerProfile | null;
-  enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
-  contentAudit:       ContentAudit | null;
-  isCourse?:          boolean;    // true = Course Material (step 2); false/undefined = standalone
-  hasCourseMaterial?: boolean;    // whether course material exists (for step indicator)
-  courseStreaming?:    boolean;    // true while topics are still being streamed in
-  diagnostic?:        DocumentDiagnostic | null;
-  diagnosticLoading?: boolean;
-  onRunDiagnostic?:   () => void;
-  onBack:             () => void;
-  onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate:       () => void;
+function ReadView({ documentReading, topic, hasCache, profile, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate }: {
+  documentReading:           DocumentReading;
+  topic:                     string;
+  hasCache:                  boolean;
+  profile:                   LearnerProfile | null;
+  enhancementSummary:        { addedConcepts: string[]; originalScore: number } | null;
+  contentAudit:              ContentAudit | null;
+  isCourse?:                 boolean;
+  hasCourseMaterial?:        boolean;
+  courseStreaming?:           boolean;
+  diagnostic?:               DocumentDiagnostic | null;
+  diagnosticLoading?:        boolean;
+  onRunDiagnostic?:          () => void;
+  subStatuses:               Record<string, SubStatus>;
+  onSubStatusChange:         React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
+  focusChatMessages:         ChatMessage[];
+  onFocusChatMessagesChange: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  onBack:                    () => void;
+  onPractice:                (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:              () => void;
 }) {
-  type SubStatus = 'unread' | 'read' | 'learnt';
-
   const [statsOpen,         setStatsOpen]         = useState(false);
   const [diagnosticOpen,    setDiagnosticOpen]    = useState(false);
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
-  const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
   const [elapsedSec,        setElapsedSec]        = useState(0);
   const [breakDismissed,    setBreakDismissed]    = useState(false);
@@ -2536,7 +2566,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
   const showBreak      = elapsedMinutes >= breakMinutes && !breakDismissed;
 
   const markStatus = (key: string, status: SubStatus) =>
-    setSubStatuses(prev => ({ ...prev, [key]: prev[key] === status ? 'unread' : status }));
+    onSubStatusChange(prev => ({ ...prev, [key]: prev[key] === status ? 'unread' : status }));
 
   const answerQuiz = (selected: number) => {
     if (!activeQuiz || activeQuiz.revealed) return;
@@ -2555,7 +2585,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
     if (done) {
       setActiveQuiz(prev => prev ? { ...prev, done: true } : null);
       if (finalScore === activeQuiz.questions.length) {
-        setSubStatuses(prev => ({ ...prev, [activeQuiz.key]: 'learnt' }));
+        onSubStatusChange(prev => ({ ...prev, [activeQuiz.key]: 'learnt' }));
       }
     } else {
       setActiveQuiz(prev => prev ? { ...prev, qIdx: nextIdx, selected: null, revealed: false } : null);
@@ -2718,9 +2748,11 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
   // ── Focus card chat state ─────────────────────────────────────
   const [focusChatOpen,     setFocusChatOpen]     = useState(false);
-  const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
   const [focusChatStreaming, setFocusChatStreaming] = useState(false);
   const focusChatBottomRef = useRef<HTMLDivElement>(null);
+  // focusChatMessages lives in DocumentScreen (lifted for persistence across navigation)
+  // alias the setter for local use
+  const setFocusChatMessages = onFocusChatMessagesChange;
 
   // Reset chat when card changes; in Ask AI mode keep it open
   useEffect(() => {
@@ -2729,8 +2761,8 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
     } else {
       setFocusChatOpen(false);
     }
-    setFocusChatMessages([]);
-  }, [safeCardIdx, viewMode]);
+    onFocusChatMessagesChange([]);
+  }, [safeCardIdx, viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (focusChatOpen) focusChatBottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -2820,7 +2852,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
               {/* Status buttons */}
               <div style={{ padding: '10px 16px', display: 'flex', gap: 8, justifyContent: 'center' }}>
-                <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'read' ? 'unread' : 'read' }))}
+                <button onClick={() => onSubStatusChange(prev => ({ ...prev, [key]: prev[key] === 'read' ? 'unread' : 'read' }))}
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isRead ? color : 'var(--line)'}`, background: isRead && !isLearnt ? color : isRead ? color + '15' : 'var(--bg-tint)', color: isRead && !isLearnt ? 'white' : isRead ? color : 'var(--ink-3)', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
                   ✓ Read
                 </button>
@@ -2830,7 +2862,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: quizLoading === key ? 'default' : 'pointer', border: `1.5px solid ${color}66`, background: color + '0f', color, transition: 'all 0.2s', whiteSpace: 'nowrap', opacity: quizLoading === key ? 0.6 : 1 }}>
                   {quizLoading === key ? '⏳ Loading…' : '🧪 Test Me'}
                 </button>
-                <button onClick={() => setSubStatuses(prev => ({ ...prev, [key]: prev[key] === 'learnt' ? 'unread' : 'learnt' }))}
+                <button onClick={() => onSubStatusChange(prev => ({ ...prev, [key]: prev[key] === 'learnt' ? 'unread' : 'learnt' }))}
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${isLearnt ? '#8C5BD9' : 'var(--line)'}`, background: isLearnt ? '#8C5BD9' : 'var(--bg-tint)', color: isLearnt ? 'white' : 'var(--ink-3)', transition: 'all 0.2s', whiteSpace: 'nowrap' }}>
                   🧠 Learnt
                 </button>
