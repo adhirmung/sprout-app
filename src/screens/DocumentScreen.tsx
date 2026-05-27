@@ -75,10 +75,14 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     addedConcepts: string[];
     originalScore: number;
   } | null>(null);
-  const [cards,      setCards]      = useState<FeedCard[]>([]);
-  const [audit,     setAudit]     = useState<FeedAudit | null>(null);
-  const [idx,       setIdx]       = useState(0);
-  const [score,       setScore]       = useState(0);
+  const [cards,        setCards]        = useState<FeedCard[]>([]);
+  const [audit,        setAudit]        = useState<FeedAudit | null>(null);
+  // Queue-based navigation (enables spaced repetition)
+  const [queue,        setQueue]        = useState<number[]>([]);
+  const [queuePos,     setQueuePos]     = useState(0);
+  const [hardIndices,  setHardIndices]  = useState<Set<number>>(new Set());
+  const [topicFilter,  setTopicFilter]  = useState<string | null>(null);
+  const [score,        setScore]        = useState(0);
   const [streak,      setStreak]      = useState(0);
   const [quizCorrect, setQuizCorrect] = useState(0);
   const [quizTotal,   setQuizTotal]   = useState(0);
@@ -279,6 +283,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     // ── Flashcards / Quiz → existing card feed ─────────────────
     const modeKey = `${sourceKey}:feed:${mode}`;
     setScore(0); setStreak(0); setQuizCorrect(0); setQuizTotal(0);
+    setHardIndices(new Set()); setTopicFilter(null);
     try {
       if (!force) {
         if (userId) {
@@ -286,7 +291,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (cached && cached.result.cards.length > 0) {
             setCards(cached.result.cards);
             setAudit(cached.result.audit);
-            setIdx(0); setFromCache(true);
+            setQueue(cached.result.cards.map((_, i) => i)); setQueuePos(0); setFromCache(true);
             setStartTime(Date.now()); setPhase('running'); return;
           }
         } else {
@@ -294,7 +299,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (cached && Array.isArray(cached.cards) && cached.cards.length > 0) {
             setCards(cached.cards);
             setAudit(cached.audit ?? null);
-            setIdx(0); setFromCache(true);
+            setQueue(cached.cards.map((_, i) => i)); setQueuePos(0); setFromCache(true);
             setStartTime(Date.now()); setPhase('running'); return;
           }
         }
@@ -319,7 +324,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       } else {
         Store.set(`feed:${modeKey}`, finalResult);
       }
-      setCards(result.cards); setAudit(result.audit); setIdx(0); setStartTime(Date.now()); setPhase('running');
+      setCards(result.cards); setAudit(result.audit);
+      setQueue(result.cards.map((_, i) => i)); setQueuePos(0);
+      setStartTime(Date.now()); setPhase('running');
       // Pass 2: background audit → auto-append gap cards
       void runTwoPassBoost(resolvedPdf, modeKey, result.cards);
     } catch (e) {
@@ -526,6 +533,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (gapCards.length === 0) return;
 
       setCards(prev => [...prev, ...gapCards]);
+      setQueue(prev => [...prev, ...gapCards.map((_, i) => firstPassCards.length + i)]);
       setGapCardsAdded(gapCards.length);
 
       // Persist combined set so the next load already has gap cards baked in
@@ -604,8 +612,50 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   };
 
-  const next = () => { if (idx + 1 >= cards.length) { setPhase('done'); } else { setIdx(i => i + 1); } };
-  const prev = () => { if (idx > 0) setIdx(i => i - 1); };
+  // Derived index into the cards array from the current queue position
+  const idx = queue[queuePos] ?? 0;
+
+  const next = () => {
+    if (queuePos + 1 >= queue.length) {
+      setPhase('done');
+    } else {
+      setQueuePos(p => p + 1);
+    }
+  };
+
+  const prev = () => {
+    if (queuePos > 0) setQueuePos(p => p - 1);
+  };
+
+  /** Called when the learner rates a flashcard. Hard cards are reinserted ~3 slots later. */
+  const handleRated = (diff: 'easy' | 'medium' | 'hard') => {
+    addScore({ easy: 15, medium: 10, hard: 5 }[diff], true);
+    if (diff === 'hard') {
+      const cardIdx = queue[queuePos];
+      setHardIndices(prev => new Set([...prev, cardIdx]));
+      // Reinsert the card 3 positions ahead so it reappears soon
+      setQueue(q => {
+        const insertAt = Math.min(queuePos + 4, q.length);
+        const newQ = [...q];
+        newQ.splice(insertAt, 0, cardIdx);
+        return newQ;
+      });
+    }
+  };
+
+  /** Topic filter: rebuild the queue to only include matching flashcard indices. */
+  const applyTopicFilter = (filter: string | null) => {
+    setTopicFilter(filter);
+    setHardIndices(new Set());
+    const indices = cards.map((_, i) => i).filter(i => {
+      if (!filter) return true;
+      const c = cards[i];
+      if (c.type !== 'flashcard') return true;
+      return (c as Extract<typeof c, { type: 'flashcard' }>).topic === filter;
+    });
+    setQueue(indices);
+    setQueuePos(0);
+  };
 
   const addScore = (pts: number, keepStreak: boolean) => {
     setScore(s => s + pts);
@@ -751,15 +801,59 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         />
       )}
 
-      {phase === 'running' && (
-        <div style={{ padding: '10px 24px', borderBottom: '1px solid var(--line)', background: 'var(--card-soft)', flexShrink: 0 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--ink-2)', fontWeight: 600, marginBottom: 6 }}>
-            <span>Card {idx + 1} of {cards.length}</span>
-            <span>{Math.round(((idx + 1) / cards.length) * 100)}%</span>
+      {phase === 'running' && (() => {
+        // Collect unique topics from flashcard deck for the topic filter chips
+        const topicOptions = [...new Set(
+          cards
+            .filter((c): c is Extract<typeof c, { type: 'flashcard'; topic?: string }> =>
+              c.type === 'flashcard' && !!(c as Extract<typeof c, { type: 'flashcard' }>).topic,
+            )
+            .map(c => (c as Extract<typeof c, { type: 'flashcard' }>).topic!),
+        )];
+        const hasTopics = topicOptions.length >= 2;
+
+        return (
+          <div style={{ borderBottom: '1px solid var(--line)', background: 'var(--card-soft)', flexShrink: 0 }}>
+            {/* Topic filter chips */}
+            {hasTopics && (
+              <div style={{ display: 'flex', gap: 6, padding: '8px 24px 0', overflowX: 'auto', scrollbarWidth: 'none' }}>
+                <button
+                  onClick={() => applyTopicFilter(null)}
+                  style={{
+                    flexShrink: 0, padding: '4px 12px', borderRadius: 20,
+                    border: '1.5px solid', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                    borderColor: !topicFilter ? 'var(--brand)' : 'var(--line)',
+                    background: !topicFilter ? 'var(--brand-tint)' : 'transparent',
+                    color: !topicFilter ? 'var(--brand)' : 'var(--ink-3)',
+                  }}
+                >All</button>
+                {topicOptions.map(t => (
+                  <button
+                    key={t}
+                    onClick={() => applyTopicFilter(topicFilter === t ? null : t)}
+                    style={{
+                      flexShrink: 0, padding: '4px 12px', borderRadius: 20,
+                      border: '1.5px solid', fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                      borderColor: topicFilter === t ? 'var(--brand)' : 'var(--line)',
+                      background: topicFilter === t ? 'var(--brand-tint)' : 'transparent',
+                      color: topicFilter === t ? 'var(--brand)' : 'var(--ink-3)',
+                      maxWidth: 140, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    }}
+                  >{t}</button>
+                ))}
+              </div>
+            )}
+            {/* Progress bar */}
+            <div style={{ padding: hasTopics ? '6px 24px 10px' : '10px 24px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: 'var(--ink-2)', fontWeight: 600, marginBottom: 6 }}>
+                <span>Card {queuePos + 1} of {queue.length}{hardIndices.size > 0 && <span style={{ color: 'var(--coral)', marginLeft: 8 }}>🔴 {hardIndices.size} hard</span>}</span>
+                <span>{Math.round(((queuePos + 1) / queue.length) * 100)}%</span>
+              </div>
+              <ProgressBar value={queuePos + 1} max={queue.length} gradient label={`Card ${queuePos + 1} of ${queue.length}`} />
+            </div>
           </div>
-          <ProgressBar value={idx + 1} max={cards.length} gradient label={`Card ${idx + 1} of ${cards.length}`} />
-        </div>
-      )}
+        );
+      })()}
 
       <div style={{ flex: 1, overflow: 'auto', padding: (phase === 'running' || phase === 'done') ? 24 : 0 }}>
         {phase === 'idle' && (
@@ -785,11 +879,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         {phase === 'running' && cards.length > 0 && cards[idx] && (
           <div style={{ maxWidth: 720, margin: '0 auto' }}>
             <CardView
-              key={idx} card={cards[idx]} idx={idx} total={cards.length}
+              key={`${idx}-${queuePos}`} card={cards[idx]} idx={queuePos} total={queue.length}
               topic={topic} content={content} profile={profile}
               onCorrect={() => { addScore(20, true);  setQuizCorrect(c => c + 1); setQuizTotal(t => t + 1); }}
               onWrong={()  => { addScore(0,  false); setQuizTotal(t => t + 1); }}
-              onRated={diff => addScore({ easy: 15, medium: 10, hard: 5 }[diff], true)}
+              onRated={handleRated}
               onPrev={prev} onNext={next}
             />
           </div>
@@ -800,8 +894,21 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
               cards={cards} score={score} audit={audit}
               quizCorrect={quizCorrect} quizTotal={quizTotal}
               elapsed={startTime ? Date.now() - startTime : 0}
+              hardCount={hardIndices.size}
               onBack={onBack}
-              onRestart={() => { setIdx(0); setScore(0); setStreak(0); setQuizCorrect(0); setQuizTotal(0); setStartTime(Date.now()); setPhase('running'); }}
+              onRestart={() => {
+                setQueue(cards.map((_, i) => i)); setQueuePos(0);
+                setHardIndices(new Set()); setTopicFilter(null);
+                setScore(0); setStreak(0); setQuizCorrect(0); setQuizTotal(0);
+                setStartTime(Date.now()); setPhase('running');
+              }}
+              onRetryHard={() => {
+                const hardQ = [...hardIndices];
+                setQueue(hardQ); setQueuePos(0);
+                setHardIndices(new Set());
+                setScore(0); setStreak(0); setQuizCorrect(0); setQuizTotal(0);
+                setStartTime(Date.now()); setPhase('running');
+              }}
             />
           </div>
         )}
@@ -4124,10 +4231,11 @@ function QuizCard({ card, onCorrect, onWrong }: {
 
 // ── Completion view ───────────────────────────────────────────
 
-function CompletionView({ cards, score, audit, quizCorrect, quizTotal, elapsed, onBack, onRestart }: {
+function CompletionView({ cards, score, audit, quizCorrect, quizTotal, elapsed, hardCount, onBack, onRestart, onRetryHard }: {
   cards: FeedCard[]; score: number; audit: FeedAudit | null;
   quizCorrect: number; quizTotal: number; elapsed: number;
-  onBack: () => void; onRestart: () => void;
+  hardCount: number;
+  onBack: () => void; onRestart: () => void; onRetryHard: () => void;
 }) {
   const mins    = Math.floor(elapsed / 60000);
   const secs    = Math.floor((elapsed % 60000) / 1000);
@@ -4160,6 +4268,21 @@ function CompletionView({ cards, score, audit, quizCorrect, quizTotal, elapsed, 
           <div style={{ fontSize: 32, fontWeight: 800, fontFamily: 'var(--font-mono)', color: quizPct >= 80 ? 'var(--brand)' : quizPct >= 60 ? 'var(--gold)' : 'var(--coral)' }}>
             {quizPct}%
           </div>
+        </div>
+      )}
+      {/* Hard-cards banner */}
+      {hardCount > 0 && (
+        <div style={{ marginBottom: 20, padding: '14px 20px', borderRadius: 14, background: 'var(--coral-soft)', border: '1px solid var(--coral-soft)', display: 'flex', alignItems: 'center', gap: 12 }}>
+          <span style={{ fontSize: 22 }}>😰</span>
+          <div style={{ flex: 1, textAlign: 'left' }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--coral)', marginBottom: 2 }}>
+              {hardCount} card{hardCount !== 1 ? 's' : ''} marked Hard
+            </div>
+            <div style={{ fontSize: 13, color: 'var(--ink-2)' }}>Keep drilling them until they feel easy.</div>
+          </div>
+          <button className="btn btn-secondary" style={{ flexShrink: 0, borderColor: 'var(--coral-soft)', color: 'var(--coral)' }} onClick={onRetryHard}>
+            Retry Hard
+          </button>
         </div>
       )}
       {audit && (

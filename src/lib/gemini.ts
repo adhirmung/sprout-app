@@ -309,7 +309,7 @@ export interface FeedResult {
 
 export type FeedCard =
   | { type: 'summary';        title: string; points: string[] }
-  | { type: 'flashcard';      question: string; answer: string }
+  | { type: 'flashcard';      question: string; answer: string; topic?: string }
   | { type: 'concept';        title: string; explanation: string; example: string; analogy: string; keyTerms: { term: string; definition: string }[] }
   | { type: 'worked_example'; title: string; problem: string; steps: { label: string; content: string }[]; insight: string }
   | { type: 'fill_blank';     sentence: string; blanks: string[]; hint: string }
@@ -449,17 +449,18 @@ Return ONLY valid JSON — no markdown fences, no extra text:
 }`;
 }
 
-function buildFlashcardsOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
-  return `You are an expert educator. Generate 20 flashcards covering "${topic}" comprehensively.
+function buildFlashcardsOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean, count = 20): string {
+  return `You are an expert educator. Generate exactly ${count} flashcards covering "${topic}" comprehensively.
 ${sourceBlock(contentText, hasPdf)}
 
 Rules:
 - Cover every major concept, person, date, and process in the source
 - Questions should be specific and unambiguous
 - Answers: 1–3 precise sentences with exact facts
+- For each card, set "topic" to the chapter or section it belongs to (short label, e.g. "Cell Division" or "World War II Causes")
 
 Return ONLY valid JSON — no markdown:
-{ "cards": [{ "type": "flashcard", "question": "...", "answer": "..." }], "audit": null }`;
+{ "cards": [{ "type": "flashcard", "question": "...", "answer": "...", "topic": "..." }], "audit": null }`;
 }
 
 function buildQuizOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
@@ -483,7 +484,18 @@ export async function generateFeed(
   pdfBase64:   string | null,
   mode:        'activities' | 'flashcards' | 'quiz' = 'activities',
 ): Promise<FeedResult> {
-  const promptFn  = mode === 'flashcards' ? buildFlashcardsOnlyPrompt
+  // Scale flashcard count by document length so larger docs get fuller coverage
+  const flashcardCount = (() => {
+    if (mode !== 'flashcards') return 20;
+    const len = contentText?.length ?? 0;
+    if (len >= 25_000) return 40;
+    if (len >= 8_000)  return 30;
+    if (len > 0)       return 20;
+    return pdfBase64 ? 30 : 20; // PDF-only with no extracted text
+  })();
+
+  const promptFn  = mode === 'flashcards'
+    ? (t: string, c: string | null, pdf: boolean) => buildFlashcardsOnlyPrompt(t, c, pdf, flashcardCount)
     : mode === 'quiz' ? buildQuizOnlyPrompt
     : buildActivitiesPrompt;
 
