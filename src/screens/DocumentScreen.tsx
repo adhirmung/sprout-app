@@ -23,13 +23,11 @@ import {
   generateFeed,
   generateParagraphQuiz,
   generatePracticeQuiz,
-  generateReading,
   generateVisualComponents,
   hasApiKey,
   saveApiKey,
   streamCardChat,
   streamCourseMaterial,
-  generateAISummary,
 } from '../lib/gemini';
 import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
@@ -60,17 +58,15 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'read-loading' | 'read' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [courseMaterial,  setCourseMaterial]  = useState<DocumentReading | null>(null);
-  const [aiSummary,       setAiSummary]       = useState<string | null>(null);
   const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
   const [mapEnhancing,      setMapEnhancing]      = useState(false);
-  const [readEnhancing,     setReadEnhancing]     = useState(false);
   const [enhancementSummary, setEnhancementSummary] = useState<{
     addedConcepts: string[];
     originalScore: number;
@@ -154,20 +150,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
-    // Preload AI summary so the Read phase is instant on return navigation
-    const cachedSummary = Store.get<string | null>(`summary:${sourceKey}`, null);
-    if (cachedSummary) {
-      setAiSummary(cachedSummary);
-    } else if (userId) {
-      dbLoadContent<{ text: string }>(userId, sourceKey, 'summary')
-        .then(data => {
-          if (data?.text) {
-            Store.set(`summary:${sourceKey}`, data.text);
-            setAiSummary(data.text);
-          }
-        })
-        .catch(() => {});
-    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
 
@@ -455,51 +437,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   };
 
   /**
-   * Pass 2 for Reading: use the cached audit's missed concepts to regenerate
-   * the reading with every gap explicitly woven into the content.
-   */
-  const runReadingEnhancement = async (
-    map: ContentMap,
-    resolvedPdf: string | null,
-    sentenceTarget: number,
-  ) => {
-    // Grab the audit — should already be cached from map enhancement
-    let audit: ContentAudit | null = Store.get<ContentAudit | null>(`audit:${sourceKey}`, null);
-    if (!audit && userId) {
-      audit = await dbLoadContent<ContentAudit>(userId, sourceKey, 'audit').catch(() => null);
-    }
-    if (!audit || audit.missedConcepts.length === 0) return;
-
-    setReadEnhancing(true);
-    try {
-      const enhanced = await generateReading(
-        topic, content, content ? null : resolvedPdf, map, sentenceTarget, audit.missedConcepts,
-      );
-      Store.set(`reading:${sourceKey}`, enhanced);
-      if (userId) dbSaveContent(userId, sourceKey, 'reading', enhanced).catch(console.error);
-      setDocumentReading(enhanced);
-
-      // Record what was incorporated (may already be set by map enhancement, that's fine)
-      setEnhancementSummary(prev => prev ?? {
-        addedConcepts: audit.missedConcepts,
-        originalScore: audit.coverageScore,
-      });
-
-      // Gaps are now in the reading — clear the stale missed-items list
-      const resolvedAudit: ContentAudit = {
-        coverageScore:  100,
-        missedConcepts: [],
-        suggestions:    audit.suggestions,
-      };
-      const auditKey = `audit:${sourceKey}`;
-      Store.set(auditKey, resolvedAudit);
-      if (userId) dbSaveContent(userId, sourceKey, 'audit', resolvedAudit).catch(console.error);
-      setContentAudit(resolvedAudit);
-    } catch { /* non-fatal — first-pass reading stays visible */ }
-    finally { setReadEnhancing(false); }
-  };
-
-  /**
    * Two-pass boost: runs silently after fresh card generation.
    * 1. Ensures a content map exists (generates one if needed).
    * 2. Runs a coverage audit against that map (with full caching).
@@ -563,37 +500,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         Store.set(`feed:${modeKey}`, { cards: combined, audit: null });
       }
     } catch { /* non-fatal — gap cards are an enhancement */ }
-  };
-
-  const startReading = async (map: ContentMap) => {
-    // Check cache — stored as a plain string now
-    const cached = Store.get<string | null>(`summary:${sourceKey}`, null);
-    if (cached) {
-      setAiSummary(cached);
-      setPhase('read');
-      return;
-    }
-    setPhase('read-loading');
-    setError('');
-    try {
-      // Stream the summary live — chunks update the UI as they arrive
-      setAiSummary('');
-      setPhase('read');
-      const summary = await generateAISummary(
-        topic,
-        courseMaterial,   // use notes if available — much richer source
-        map,
-        content,
-        (accumulated) => setAiSummary(accumulated),
-      );
-      Store.set(`summary:${sourceKey}`, summary);
-      if (userId) dbSaveContent(userId, sourceKey, 'summary', { text: summary }).catch(console.error);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to generate summary. Please retry.';
-      console.error('[startReading] error:', e);
-      setError(msg);
-      setPhase('map');
-    }
   };
 
   const startCourseMaterial = async (map: ContentMap) => {
@@ -689,7 +595,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         topic={topic}
         hasCache={!!Store.get<DocumentReading | null>(`course:${sourceKey}`, null)}
         profile={profile}
-        readEnhancing={false}
         enhancementSummary={null}
         contentAudit={null}
         isCourse={true}
@@ -698,7 +603,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         diagnostic={diagnostic}
         diagnosticLoading={diagnosticLoading}
         onRunDiagnostic={runDiagnostic}
-        onContinueToRead={() => startReading(contentMap)}
         onBack={() => { if (!courseStreaming) setPhase('map'); }}
         onPractice={() => setPhase('practice')}
         onRegenerate={async () => {
@@ -717,7 +621,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       contentMap={contentMap}
       topic={topic}
       hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
-      hasReading={!!documentReading}
       hasCourse={!!courseMaterial}
       hasText={true}
       profile={profile}
@@ -727,7 +630,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       enhancementSummary={enhancementSummary}
       onBack={() => setPhase('idle')}
       onCourseMaterial={() => startCourseMaterial(contentMap)}
-      onRead={() => startReading(contentMap)}
       onPractice={() => setPhase('practice')}
       onRegenerate={async () => {
         Store.del(`map:${sourceKey}`);
@@ -754,12 +656,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
-  if (phase === 'practice' && documentReading) return (
+  if (phase === 'practice' && (courseMaterial ?? documentReading)) return (
     <PracticeView
-      documentReading={documentReading}
+      documentReading={(courseMaterial ?? documentReading)!}
       topic={topic}
       profile={profile}
-      onBack={() => setPhase('read')}
+      onBack={() => setPhase('course')}
     />
   );
 
@@ -786,20 +688,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
-  if (phase === 'read' && contentMap) return (
-    <AISummaryView
-      topic={topic}
-      summary={aiSummary ?? ''}
-      streaming={!aiSummary || aiSummary.length < 50}
-      onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
-      onRegenerate={async () => {
-        Store.del(`summary:${sourceKey}`);
-        setAiSummary(null);
-        await startReading(contentMap);
-      }}
-    />
-  );
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
       {phase !== 'idle' && (
@@ -809,7 +697,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           onBack={
             (phase === 'loading' || phase === 'mapping') ? () => { setPhase('idle'); setError(''); } :
             (phase === 'extracting') ? () => { contentMap ? setPhase('map') : setPhase('idle'); setError(''); } :
-            (phase === 'read-loading' || phase === 'course-loading') ? () => { setPhase('map'); setError(''); } :
+            (phase === 'course-loading') ? () => { setPhase('map'); setError(''); } :
             onBack
           }
         />
@@ -839,7 +727,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onStartExam={() => setPhase('exam')}
           />
         )}
-        {(phase === 'loading' || phase === 'mapping' || phase === 'read-loading' || phase === 'course-loading' || phase === 'extracting') && (
+        {(phase === 'loading' || phase === 'mapping' || phase === 'course-loading' || phase === 'extracting') && (
           <FeedLoading
             topic={topic}
             message={(phase === 'course-loading' || phase === 'extracting') ? courseProgressMsg : undefined}
@@ -1750,11 +1638,10 @@ function DiagnosticSheet({
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onCourseMaterial, onRead, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onCourseMaterial, onPractice, onRegenerate }: {
   contentMap:         ContentMap;
   topic:              string;
   hasCache:           boolean;
-  hasReading:         boolean;
   hasCourse:          boolean;
   hasText:            boolean;
   profile:            LearnerProfile | null;
@@ -1764,7 +1651,6 @@ function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, 
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
   onBack:             () => void;
   onCourseMaterial:   () => void;
-  onRead:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:       () => void;
 }) {
@@ -1793,7 +1679,7 @@ function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, 
         transition: 'all 0.2s',
       }}>{n}</div>
       <div style={{ fontSize: 10, fontWeight: 700, color: active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-        {n === 1 ? 'Map' : n === 2 ? 'Notes' : n === 3 ? 'Read' : 'Practice'}
+        {n === 1 ? 'Map' : n === 2 ? 'Notes' : 'Practice'}
       </div>
     </div>
   );
@@ -1882,12 +1768,10 @@ function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, 
           {/* Step progress */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 0, marginBottom: 24 }}>
             <StepDot n={1} active={true} />
-            <div style={{ width: isMobile ? 28 : 48, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <div style={{ width: isMobile ? 48 : 80, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
             <StepDot n={2} active={false} />
-            <div style={{ width: isMobile ? 28 : 48, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
+            <div style={{ width: isMobile ? 48 : 80, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
             <StepDot n={3} active={false} />
-            <div style={{ width: isMobile ? 28 : 48, height: 2, background: 'var(--line)', margin: '0 4px', marginBottom: 20 }} />
-            <StepDot n={4} active={false} />
           </div>
 
           {/* Step 1 label */}
@@ -2036,22 +1920,11 @@ function MapView({ contentMap, topic, hasCache, hasReading, hasCourse, hasText, 
           </button>
 
           {/* Line 2→3 */}
-          <div style={{ flex: 1, height: 2.5, background: hasReading ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
-
-          {/* Step 3 — Read (clickable) */}
-          <button onClick={onRead} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasReading ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasReading ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: hasReading ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: hasReading ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>
-              {hasReading ? '✓' : '3'}
-            </div>
-            <span style={{ fontSize: 11, fontWeight: 700, color: hasReading ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Read</span>
-          </button>
-
-          {/* Line 3→4 */}
           <div style={{ flex: 1, height: 2.5, background: 'var(--line)', borderRadius: 2, marginBottom: 18 }} />
 
-          {/* Step 4 — Practice (clickable) */}
+          {/* Step 3 — Practice (clickable) */}
           <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>4</div>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
             <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Practice</span>
           </button>
         </div>
@@ -2561,21 +2434,19 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, onContinueToRead, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, onBack, onPractice, onRegenerate }: {
   documentReading:    DocumentReading;
   topic:              string;
   hasCache:           boolean;
   profile:            LearnerProfile | null;
-  readEnhancing:      boolean;
   enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
   contentAudit:       ContentAudit | null;
-  isCourse?:          boolean;    // true = Course Material (step 2); false/undefined = Read (step 3)
-  hasCourseMaterial?: boolean;    // whether course material exists (for Read's step 2 indicator)
+  isCourse?:          boolean;    // true = Course Material (step 2); false/undefined = standalone
+  hasCourseMaterial?: boolean;    // whether course material exists (for step indicator)
   courseStreaming?:    boolean;    // true while topics are still being streamed in
   diagnostic?:        DocumentDiagnostic | null;
   diagnosticLoading?: boolean;
   onRunDiagnostic?:   () => void;
-  onContinueToRead?:  () => void; // from Course Material → Read
   onBack:             () => void;
   onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:       () => void;
@@ -3400,12 +3271,12 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
           <Icon name="arrow-left" size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="label-eyebrow" style={{ marginBottom: 1 }}>{isCourse ? 'Step 2 · Course Material' : 'Step 3 · Read'}</div>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>{isCourse ? 'Step 2 · Course Material' : 'Notes'}</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
           {/* Coverage stats icon */}
-          {(readEnhancing || enhancementSummary) && (
+          {enhancementSummary && (
             <button
               onClick={() => setStatsOpen(true)}
               aria-label="Coverage stats"
@@ -3413,23 +3284,14 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
               style={{
                 display: 'flex', alignItems: 'center', gap: 5,
                 padding: '5px 10px', borderRadius: 20,
-                background: enhancementSummary ? '#DBEAFE' : 'var(--bg-tint)',
-                border: `1.5px solid ${enhancementSummary ? '#93C5FD' : 'var(--line)'}`,
+                background: '#DBEAFE',
+                border: '1.5px solid #93C5FD',
                 cursor: 'pointer', fontSize: 11, fontWeight: 800,
-                color: enhancementSummary ? '#1D4ED8' : 'var(--ink-3)',
+                color: '#1D4ED8',
               }}
             >
-              {readEnhancing && !enhancementSummary
-                ? <div style={{ width: 11, height: 11, border: '1.5px solid currentColor', borderTop: '1.5px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-                : <span>📊</span>
-              }
-              <span>
-                {readEnhancing && !enhancementSummary
-                  ? 'Enhancing…'
-                  : enhancementSummary
-                    ? `${enhancementSummary.originalScore}%→100%`
-                    : ''}
-              </span>
+              <span>📊</span>
+              <span>{`${enhancementSummary.originalScore}%→100%`}</span>
             </button>
           )}
           {/* Diagnostic button — only in Course Material view */}
@@ -3486,25 +3348,11 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
         <CoverageStatsOverlay
           contentAudit={contentAudit}
           auditLoading={false}
-          enhancing={readEnhancing}
+          enhancing={false}
           enhancementSummary={enhancementSummary}
           context="reading"
           onClose={() => setStatsOpen(false)}
         />
-      )}
-
-      {/* Enhancing banner — visible while pass 2 rewrites the reading with gap concepts */}
-      {readEnhancing && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '9px 20px', background: 'var(--brand-tint)',
-          borderBottom: '1px solid var(--brand-soft)', flexShrink: 0,
-        }}>
-          <div style={{ width: 14, height: 14, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)' }}>
-            ✦ Enhancing coverage — weaving in missing concepts…
-          </span>
-        </div>
       )}
 
       {/* Body — always row layout; sidebar visible in both List and Focus modes */}
@@ -3544,28 +3392,12 @@ function ReadView({ documentReading, topic, hasCache, profile, readEnhancing, en
           )}
 
           {/* Line 2→3 */}
-          <div style={{ flex: 1, height: 2.5, background: isCourse ? 'var(--line)' : 'var(--brand)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
+          <div style={{ flex: 1, height: 2.5, background: progressPct >= 100 ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
 
-          {/* Step 3 — Read (active if !isCourse, clickable from course) */}
-          {!isCourse ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
-              <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>3</div>
-              <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Read</span>
-            </div>
-          ) : (
-            <button onClick={onContinueToRead} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-              <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
-              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Read</span>
-            </button>
-          )}
-
-          {/* Line 3→4 (fills green when 100% done, only in read mode) */}
-          <div style={{ flex: 1, height: 2.5, background: !isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
-
-          {/* Step 4 — Practice */}
+          {/* Step 3 — Practice */}
           <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: !isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${!isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: !isCourse && progressPct >= 100 ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: !isCourse && progressPct >= 100 ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>4</div>
-            <span style={{ fontSize: 11, fontWeight: 700, color: !isCourse && progressPct >= 100 ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Practice</span>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: progressPct >= 100 ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${progressPct >= 100 ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: progressPct >= 100 ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: progressPct >= 100 ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>3</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: progressPct >= 100 ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Practice</span>
           </button>
         </div>
       </div>
@@ -4236,231 +4068,6 @@ function QuizCard({ card, onCorrect, onWrong }: {
         </div>
       )}
     </>
-  );
-}
-
-// ── Markdown renderer ─────────────────────────────────────────
-// Lightweight inline markdown → React nodes.
-// Handles: ##/###/####, **bold**, *italic*, - lists, 1. lists, > quotes, ---, paragraphs.
-
-function renderInline(text: string): React.ReactNode[] {
-  const parts: React.ReactNode[] = [];
-  let i = 0, key = 0;
-  while (i < text.length) {
-    // Bold **…**
-    if (text.startsWith('**', i)) {
-      const end = text.indexOf('**', i + 2);
-      if (end !== -1) {
-        parts.push(<strong key={key++} style={{ fontWeight: 700, color: 'var(--ink)' }}>{text.slice(i + 2, end)}</strong>);
-        i = end + 2; continue;
-      }
-    }
-    // Italic *…* (not **)
-    if (text[i] === '*' && text[i + 1] !== '*') {
-      const end = text.indexOf('*', i + 1);
-      if (end !== -1) {
-        parts.push(<em key={key++} style={{ fontStyle: 'italic' }}>{text.slice(i + 1, end)}</em>);
-        i = end + 1; continue;
-      }
-    }
-    // Plain text run
-    let j = i + 1;
-    while (j < text.length) {
-      if (text.startsWith('**', j) || (text[j] === '*' && text[j + 1] !== '*')) break;
-      j++;
-    }
-    parts.push(<span key={key++}>{text.slice(i, j)}</span>);
-    i = j;
-  }
-  return parts;
-}
-
-function MarkdownRenderer({ text }: { text: string }) {
-  const lines = text.split('\n');
-  const elements: React.ReactNode[] = [];
-  let listItems: React.ReactNode[] = [];
-  let isOrdered = false;
-  let ki = 0;
-
-  const flushList = () => {
-    if (listItems.length === 0) return;
-    elements.push(
-      <ul key={ki++} style={{ margin: '6px 0 12px', padding: 0, display: 'flex', flexDirection: 'column', gap: 5 }}>
-        {listItems}
-      </ul>,
-    );
-    listItems = []; isOrdered = false;
-  };
-
-  for (let li = 0; li < lines.length; li++) {
-    const raw     = lines[li];
-    const trimmed = raw.trim();
-
-    // h2
-    if (trimmed.startsWith('## ')) {
-      flushList();
-      elements.push(
-        <h2 key={ki++} style={{ fontSize: 20, fontWeight: 800, color: 'var(--ink)', marginTop: li === 0 ? 0 : 30, marginBottom: 8, lineHeight: 1.3, borderBottom: '2px solid var(--brand-soft)', paddingBottom: 6 }}>
-          {renderInline(trimmed.slice(3))}
-        </h2>,
-      ); continue;
-    }
-    // h3
-    if (trimmed.startsWith('### ')) {
-      flushList();
-      elements.push(
-        <h3 key={ki++} style={{ fontSize: 16, fontWeight: 700, color: 'var(--brand-2)', marginTop: 20, marginBottom: 6, lineHeight: 1.35 }}>
-          {renderInline(trimmed.slice(4))}
-        </h3>,
-      ); continue;
-    }
-    // h4
-    if (trimmed.startsWith('#### ')) {
-      flushList();
-      elements.push(
-        <h4 key={ki++} style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginTop: 14, marginBottom: 4, lineHeight: 1.4 }}>
-          {renderInline(trimmed.slice(5))}
-        </h4>,
-      ); continue;
-    }
-    // hr
-    if (trimmed === '---' || trimmed === '***' || trimmed === '___') {
-      flushList();
-      elements.push(<hr key={ki++} style={{ border: 'none', borderTop: '1px solid var(--line)', margin: '20px 0' }} />);
-      continue;
-    }
-    // blockquote
-    if (trimmed.startsWith('> ')) {
-      flushList();
-      elements.push(
-        <blockquote key={ki++} style={{ margin: '10px 0', padding: '10px 16px', borderLeft: '3px solid var(--brand)', background: 'var(--brand-tint)', borderRadius: '0 10px 10px 0', fontSize: 14, color: 'var(--ink-2)', fontStyle: 'italic', lineHeight: 1.65 }}>
-          {renderInline(trimmed.slice(2))}
-        </blockquote>,
-      ); continue;
-    }
-    // bullet list
-    if (trimmed.startsWith('- ') || trimmed.startsWith('• ')) {
-      if (isOrdered) flushList();
-      const content = trimmed.slice(2);
-      listItems.push(
-        <li key={ki++} style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.65, listStyle: 'none', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-          <span style={{ color: 'var(--brand)', fontWeight: 800, flexShrink: 0, marginTop: 2 }}>·</span>
-          <span>{renderInline(content)}</span>
-        </li>,
-      ); continue;
-    }
-    // numbered list
-    const numMatch = trimmed.match(/^(\d+)\.\s(.+)/);
-    if (numMatch) {
-      if (!isOrdered && listItems.length > 0) flushList();
-      isOrdered = true;
-      listItems.push(
-        <li key={ki++} style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.65, listStyle: 'none', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-          <span style={{ color: 'var(--brand)', fontWeight: 800, flexShrink: 0, fontFamily: 'var(--font-mono)', fontSize: 12, minWidth: 20 }}>{numMatch[1]}.</span>
-          <span>{renderInline(numMatch[2])}</span>
-        </li>,
-      ); continue;
-    }
-    // empty line
-    if (trimmed === '') {
-      flushList();
-      if (li > 0 && lines[li - 1].trim() !== '') elements.push(<div key={ki++} style={{ height: 6 }} />);
-      continue;
-    }
-    // paragraph
-    flushList();
-    elements.push(
-      <p key={ki++} style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7, margin: '0 0 6px' }}>
-        {renderInline(trimmed)}
-      </p>,
-    );
-  }
-  flushList();
-  return <>{elements}</>;
-}
-
-// ── AI Summary view ───────────────────────────────────────────
-
-function AISummaryView({ topic, summary, streaming, onBack, onRegenerate }: {
-  topic:        string;
-  summary:      string;
-  streaming:    boolean;
-  onBack:       () => void;
-  onRegenerate: () => Promise<void>;
-}) {
-  const isMobile      = useIsMobile();
-  const scrollRef     = useRef<HTMLDivElement>(null);
-  const [regen, setRegen] = useState(false);
-  const isEmpty = summary.length < 5;
-
-  // Chase the bottom while text streams in
-  useEffect(() => {
-    if (streaming && scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [summary, streaming]);
-
-  const handleRegenerate = async () => {
-    setRegen(true);
-    try { await onRegenerate(); }
-    finally { setRegen(false); }
-  };
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
-
-      {/* Header */}
-      <div style={{ padding: '0 16px', height: 58, flexShrink: 0, background: 'var(--card)', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button className="btn btn-ghost" onClick={onBack} style={{ padding: 8, borderRadius: '50%', minWidth: 44, minHeight: 44 }} aria-label="Back">
-          <Icon name="arrow-left" size={20} />
-        </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="label-eyebrow" style={{ marginBottom: 1 }}>AI Summary</div>
-          <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          {streaming && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '4px 10px', borderRadius: 20, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)' }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: 'var(--brand)', display: 'inline-block', animation: 'dot-pulse 1.2s ease infinite' }} />
-              <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)' }}>Writing…</span>
-            </div>
-          )}
-          <button
-            onClick={handleRegenerate}
-            disabled={regen || streaming}
-            className="btn btn-ghost"
-            style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', display: 'flex', alignItems: 'center', gap: 5 }}
-          >
-            <Icon name="refresh" size={13} stroke="var(--ink-3)" />
-            {!isMobile && 'Refresh'}
-          </button>
-        </div>
-      </div>
-
-      {/* Body */}
-      <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px 40px' : '28px 36px 52px' }}>
-        <div style={{ maxWidth: 700, margin: '0 auto' }}>
-          {isEmpty ? (
-            /* Skeleton while first SSE chunks arrive */
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 4 }}>
-              {[70, 100, 88, 94, 62, 55, 100, 78].map((w, i) => (
-                <div key={i} style={{ height: i === 0 ? 26 : 13, borderRadius: 7, background: 'var(--line)', width: `${w}%`, animation: `shimmer 1.6s ease ${i * 0.08}s infinite` }} />
-              ))}
-              <div style={{ fontSize: 13, color: 'var(--ink-3)', textAlign: 'center', marginTop: 24, fontWeight: 600 }}>
-                ✨ Crafting your summary…
-              </div>
-            </div>
-          ) : (
-            <>
-              <MarkdownRenderer text={summary} />
-              {streaming && (
-                <span style={{ display: 'inline-block', width: 2, height: 16, background: 'var(--brand)', borderRadius: 1, marginLeft: 3, verticalAlign: 'middle', animation: 'blink-cursor 0.9s step-end infinite' }} />
-              )}
-            </>
-          )}
-        </div>
-      </div>
-    </div>
   );
 }
 
