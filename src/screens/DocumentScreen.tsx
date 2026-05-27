@@ -108,6 +108,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const pdfBase64   = source?.item?.pdfBase64   ?? null;
   const storagePath = source?.item?.storagePath ?? null;
   const fileType    = (source?.item?.fileType   ?? '').toUpperCase();
+  const pages       = source?.item?.pages       ?? undefined;  // PDF page range
+  const images      = source?.item?.images      ?? null;       // multi-image array (transient)
   const sourceKey   = source?.path?.join('/')   ?? 'general';
   const breadcrumb  = source?.path ? source.path.slice(0, -1).join(' › ') : '';
   const isLargeDoc  = (content?.length ?? 0) > LARGE_DOC_CHARS;
@@ -316,7 +318,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         throw new Error('Could not load PDF binary. Try re-uploading the file.');
       }
 
-      const result = await generateFeed(topic, content, resolvedPdf, mode);
+      const result = await generateFeed(topic, content, resolvedPdf, mode, images ?? undefined, pages);
 
       const finalResult = { cards: result.cards, audit: result.audit };
       if (userId) {
@@ -402,9 +404,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       }
 
       // For PDF-only docs: extract text first so the map captures every section.
-      // The extracted text is cached — subsequent calls are instant.
+      // For image docs: images are passed directly — no text extraction needed.
       let textForMap = content;
-      if (!textForMap && resolvedPdf) {
+      if (!textForMap && resolvedPdf && !images) {
         setPhase('extracting');
         setCourseProgressMsg('Reading your document…');
         textForMap = await ensureExtractedText(resolvedPdf);
@@ -412,7 +414,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       }
 
       setPhase('mapping');
-      const map = await generateContentMap(topic, textForMap, resolvedPdf);
+      const map = await generateContentMap(topic, textForMap, resolvedPdf, undefined, images ?? undefined);
       Store.set(mapKey, map);
       if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
       setContentMap(map);
@@ -514,7 +516,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     if (!audit) {
       try {
         setAuditLoading(true);
-        audit = await generateContentAudit(topic, content, content ? null : resolvedPdf, map);
+        audit = await generateContentAudit(topic, content, content ? null : resolvedPdf, map, images ?? undefined);
         Store.set(`audit:${sourceKey}`, audit);
         setContentAudit(audit);
         if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
@@ -565,8 +567,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     try {
       // ── Get the text source ───────────────────────────────────
       // Priority: in-memory extractedText → content text → extract PDF
+      // For image-based docs: skip text extraction — images are passed directly.
       let et: string = extractedText ?? content ?? '';
-      if (!et) {
+      if (!et && !images) {
         let resolvedPdf = pdfBase64;
         if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
         if (!resolvedPdf) throw new Error('No document content available to generate notes from.');
@@ -594,6 +597,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (allTopics.length === 1) setPhase('course');
         },
         (msg) => setCourseProgressMsg(msg),
+        images ?? undefined,
       );
 
       setCourseStreaming(false);

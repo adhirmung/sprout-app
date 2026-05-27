@@ -9,7 +9,7 @@ import { Store } from '../lib/store';
 import { dbSaveLibrary, uploadPdfToStorage } from '../lib/supabase';
 import type { FeedSource, LibraryFile, LibraryItem, LibraryTree } from '../lib/types';
 
-const FILE_COLORS: Record<string, string> = { PDF: 'coral', DOCX: 'sky', MP3: 'plum', JPG: 'gold', PNG: 'gold', TEXT: 'brand' };
+const FILE_COLORS: Record<string, string> = { PDF: 'coral', DOCX: 'sky', MP3: 'plum', JPG: 'gold', PNG: 'gold', TEXT: 'brand', IMAGES: 'gold' };
 
 function seedLibrary(): LibraryTree {
   return {
@@ -42,14 +42,14 @@ function calcSize(items: LibraryTree): number {
   return sum;
 }
 
-// Remove transient pdfBase64 before writing to localStorage / Supabase
-function stripPdfBase64(tree: LibraryTree): LibraryTree {
+// Remove transient blobs before writing to localStorage / Supabase
+function stripTransient(tree: LibraryTree): LibraryTree {
   return Object.fromEntries(
     Object.entries(tree).map(([k, v]) => [
       k,
       v.type === 'file'
-        ? { ...v, pdfBase64: undefined }
-        : { ...v, children: stripPdfBase64(v.children) },
+        ? { ...v, pdfBase64: undefined, images: undefined }
+        : { ...v, children: stripTransient(v.children) },
     ]),
   );
 }
@@ -70,8 +70,8 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
 
   const didMountRef = useRef(false);
   useEffect(() => {
-    // Strip transient pdfBase64 before persisting — too large for localStorage/Supabase
-    const sanitized = stripPdfBase64(items);
+    // Strip transient blobs before persisting — too large for localStorage/Supabase
+    const sanitized = stripTransient(items);
     Store.set('library', sanitized);
     if (userId && didMountRef.current) {
       dbSaveLibrary(userId, sanitized).catch(() => {});
@@ -113,10 +113,25 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
     setFolderName('');
   };
 
-  const uploadItem = ({ title, file, text }: { title: string; file: File | null; text: string }) => {
+  const uploadItem = ({
+    title, file, text, pages, images,
+  }: { title: string; file: File | null; text: string; pages?: string; images?: { base64: string; name: string; size: number }[] }) => {
     if (!title.trim()) { toast('Title required', 'error'); return; }
     const t = title.trim();
     if (current[t]) { toast('Name already exists', 'error'); return; }
+
+    // ── Multi-image upload ──────────────────────────────────────
+    if (images && images.length > 0) {
+      const size = images.reduce((s, img) => s + img.size, 0) / (1024 * 1024);
+      const b64s = images.map(img => img.base64);
+      setCurrent({
+        ...current,
+        [t]: { type: 'file', fileType: 'IMAGES', size, created: Date.now(), content: null, images: b64s, imageCount: images.length },
+      });
+      toast(`${images.length} image${images.length !== 1 ? 's' : ''} added ✓`, 'success');
+      setShowUpload(false);
+      return;
+    }
 
     if (file) {
       const size     = file.size / (1024 * 1024);
@@ -150,12 +165,13 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
               .catch(() => { toast('Cloud save failed — PDF only works this session', 'error'); return undefined; });
           }
 
-          setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null, pdfBase64, storagePath } });
-          toast(`PDF uploaded ✓ (~${estPages} page${estPages !== 1 ? 's' : ''})`, 'success');
+          const pagesMeta = pages?.trim() || undefined;
+          setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null, pdfBase64, storagePath, pages: pagesMeta } });
+          const pageLabel = pagesMeta ? ` (pages ${pagesMeta})` : ` (~${estPages} page${estPages !== 1 ? 's' : ''})`;
+          toast(`PDF uploaded ✓${pageLabel}`, 'success');
           setShowUpload(false);
         });
       } else if (fileType === 'DOCX' || fileType === 'DOC') {
-        // Extract text from Word documents using mammoth
         toast('Reading document…', 'success');
         file.arrayBuffer().then(async buf => {
           try {
@@ -164,7 +180,6 @@ export function LibraryScreen({ onOpenFile, userId }: LibraryScreenProps) {
             setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content } });
             toast('Document uploaded ✓', 'success');
           } catch {
-            // If extraction fails, still save the file without content
             setCurrent({ ...current, [t]: { type: 'file', fileType, size, created: Date.now(), content: null } });
             toast('Uploaded (text extraction failed — map only)', 'error');
           }
@@ -326,73 +341,233 @@ function ItemCard({ name, item, onOpen, onDelete }: { name: string; item: Librar
       <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>
         {isFolder
           ? `${Object.keys((item as { children: LibraryTree }).children || {}).length} items`
+          : (item as LibraryFile).fileType === 'IMAGES'
+          ? `${(item as LibraryFile).imageCount ?? '?'} images · ${(item as LibraryFile).size?.toFixed(1)} MB`
           : `${(item as LibraryFile).fileType} · ${(item as LibraryFile).size?.toFixed(1)} MB`}
       </div>
     </div>
   );
 }
 
+interface ImageEntry { base64: string; name: string; size: number; preview: string; }
+
 interface UploadModalProps {
   open: boolean;
   onClose: () => void;
-  onUpload: (data: { title: string; file: File | null; text: string }) => void;
+  onUpload: (data: { title: string; file: File | null; text: string; pages?: string; images?: ImageEntry[] }) => void;
   location: string[];
 }
 
 function UploadModal({ open, onClose, onUpload, location }: UploadModalProps) {
-  const [title, setTitle] = useState('');
-  const [text, setText] = useState('');
-  const [file, setFile] = useState<File | null>(null);
+  const [mode,   setMode]   = useState<'file' | 'images'>('file');
+  const [title,  setTitle]  = useState('');
+  const [text,   setText]   = useState('');
+  const [file,   setFile]   = useState<File | null>(null);
+  const [pages,  setPages]  = useState('');
+  const [pageMode, setPageMode] = useState<'all' | 'custom'>('all');
+  const [images, setImages] = useState<ImageEntry[]>([]);
 
-  useEffect(() => { if (open) { setTitle(''); setText(''); setFile(null); } }, [open]);
+  useEffect(() => {
+    if (open) { setMode('file'); setTitle(''); setText(''); setFile(null); setPages(''); setPageMode('all'); setImages([]); }
+  }, [open]);
+
+  const addImages = async (files: FileList | null) => {
+    if (!files) return;
+    const entries: ImageEntry[] = [];
+    for (const f of Array.from(files)) {
+      if (!f.type.startsWith('image/')) continue;
+      const base64 = await new Promise<string>(resolve => {
+        const r = new FileReader();
+        r.onload = () => resolve((r.result as string).split(',')[1] ?? '');
+        r.readAsDataURL(f);
+      });
+      const preview = URL.createObjectURL(f);
+      entries.push({ base64, name: f.name, size: f.size, preview });
+    }
+    setImages(prev => [...prev, ...entries]);
+    if (!title && entries[0]) setTitle(entries[0].name.replace(/\.[^.]+$/, ''));
+  };
+
+  const removeImage = (i: number) => setImages(prev => prev.filter((_, j) => j !== i));
+
+  const moveImage = (i: number, dir: -1 | 1) => {
+    setImages(prev => {
+      const arr = [...prev];
+      const j = i + dir;
+      if (j < 0 || j >= arr.length) return prev;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      return arr;
+    });
+  };
+
+  const canSubmit = mode === 'images' ? images.length > 0 && !!title.trim() : !!title.trim();
 
   return (
-    <Modal open={open} onClose={onClose} title="Upload content" width={520}
+    <Modal open={open} onClose={onClose} title="Add content" width={560}
       footer={<>
         <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn btn-primary" onClick={() => onUpload({ title, file, text })}>Upload</button>
+        <button className="btn btn-primary" disabled={!canSubmit}
+          onClick={() => {
+            if (mode === 'images') {
+              onUpload({ title, file: null, text: '', images });
+            } else {
+              onUpload({ title, file, text, pages: pageMode === 'custom' ? pages : undefined });
+            }
+          }}>
+          {mode === 'images' ? `Add ${images.length} image${images.length !== 1 ? 's' : ''}` : 'Upload'}
+        </button>
       </>}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+
+        {/* Mode toggle */}
+        <div style={{ display: 'flex', gap: 6, background: 'var(--bg-tint)', borderRadius: 12, padding: 4 }}>
+          {(['file', 'images'] as const).map(m => (
+            <button key={m} onClick={() => setMode(m)}
+              style={{
+                flex: 1, padding: '8px 0', borderRadius: 9, border: 'none', cursor: 'pointer',
+                fontWeight: 700, fontSize: 13,
+                background: mode === m ? 'var(--card)' : 'transparent',
+                color: mode === m ? 'var(--ink)' : 'var(--ink-3)',
+                boxShadow: mode === m ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+                transition: 'all 0.15s',
+              }}>
+              {m === 'file' ? '📄 File / Text' : '🖼️ Images'}
+            </button>
+          ))}
+        </div>
+
+        {/* Saving to */}
         <Field label="Saving to">
           <div className="chip" style={{ padding: '8px 12px', background: 'var(--bg-tint)' }}>
             📚 {location.length === 0 ? 'Library' : location.join(' / ')}
           </div>
         </Field>
+
+        {/* Title */}
         <Field label="Title">
-          <input className="input" autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g., Chapter 3 — Cell biology" />
+          <input className="input" autoFocus value={title} onChange={e => setTitle(e.target.value)}
+            placeholder="e.g., Chapter 3 — Cell biology" />
         </Field>
-        <Field label="Upload a file">
-          <label style={{
-            display: 'block', border: '2px dashed var(--line-2)', borderRadius: 14,
-            padding: 22, textAlign: 'center', cursor: 'pointer', background: 'var(--bg-tint)',
-            transition: 'border-color 0.15s',
-          }}
-          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--brand)'; }}
-          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--line-2)'; }}>
-            <input type="file" style={{ display: 'none' }} accept=".pdf,.doc,.docx,.mp3,.wav,.jpg,.jpeg,.png,.txt"
-              onChange={e => { const f = e.target.files?.[0]; if (f) { setFile(f); if (!title) setTitle(f.name.replace(/\.[^.]+$/, '')); } }} />
-            {file ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'center', textAlign: 'left' }}>
-                <Icon name="file" size={28} stroke="var(--brand)" />
-                <div>
-                  <div style={{ fontWeight: 700, fontSize: 14 }}>{file.name}</div>
-                  <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>{(file.size / (1024 * 1024)).toFixed(2)} MB</div>
+
+        {/* ── File mode ─────────────────────────────────────── */}
+        {mode === 'file' && (<>
+          <Field label="Upload a file">
+            <label style={{
+              display: 'block', border: '2px dashed var(--line-2)', borderRadius: 14,
+              padding: 22, textAlign: 'center', cursor: 'pointer', background: 'var(--bg-tint)',
+              transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--brand)'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--line-2)'; }}>
+              <input type="file" style={{ display: 'none' }} accept=".pdf,.doc,.docx,.mp3,.wav,.jpg,.jpeg,.png,.txt"
+                onChange={e => { const f = e.target.files?.[0]; if (f) { setFile(f); if (!title) setTitle(f.name.replace(/\.[^.]+$/, '')); } }} />
+              {file ? (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, justifyContent: 'center', textAlign: 'left' }}>
+                  <Icon name="file" size={28} stroke="var(--brand)" />
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14 }}>{file.name}</div>
+                    <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>{(file.size / (1024 * 1024)).toFixed(2)} MB</div>
+                  </div>
                 </div>
+              ) : (
+                <>
+                  <Icon name="upload" size={28} stroke="var(--brand)" />
+                  <div style={{ fontWeight: 700, fontSize: 14, marginTop: 6 }}>Click or drop a file</div>
+                  <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>PDF, DOCX, MP3, JPG, PNG · max 50 MB</div>
+                </>
+              )}
+            </label>
+          </Field>
+
+          {/* PDF page range picker — only shown after a PDF is selected */}
+          {file && (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) && (
+            <Field label="Page range">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'flex', gap: 12 }}>
+                  {(['all', 'custom'] as const).map(pm => (
+                    <label key={pm} style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
+                      <input type="radio" name="pageMode" checked={pageMode === pm} onChange={() => setPageMode(pm)}
+                        style={{ accentColor: 'var(--brand)' }} />
+                      {pm === 'all' ? 'All pages' : 'Custom range'}
+                    </label>
+                  ))}
+                </div>
+                {pageMode === 'custom' && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <input className="input" value={pages} onChange={e => setPages(e.target.value)}
+                      placeholder='e.g. "1-15" or "3, 7-12, 20"'
+                      style={{ fontFamily: 'var(--font-mono)', fontSize: 13 }} />
+                    <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>
+                      Sprout will focus only on the pages you specify.
+                    </div>
+                  </div>
+                )}
               </div>
-            ) : (
-              <>
-                <Icon name="upload" size={28} stroke="var(--brand)" />
-                <div style={{ fontWeight: 700, fontSize: 14, marginTop: 6 }}>Click or drop a file</div>
-                <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>PDF, DOCX, MP3, JPG, PNG · max 50 MB</div>
-              </>
-            )}
-          </label>
-        </Field>
-        <div className="divider">or paste text</div>
-        <Field label="Notes / text">
-          <textarea className="input" value={text} onChange={e => setText(e.target.value)}
-            placeholder="Paste your study notes…" style={{ minHeight: 110, resize: 'vertical' }} />
-        </Field>
+            </Field>
+          )}
+
+          <div className="divider">or paste text</div>
+          <Field label="Notes / text">
+            <textarea className="input" value={text} onChange={e => setText(e.target.value)}
+              placeholder="Paste your study notes…" style={{ minHeight: 110, resize: 'vertical' }} />
+          </Field>
+        </>)}
+
+        {/* ── Images mode ───────────────────────────────────── */}
+        {mode === 'images' && (<>
+          <Field label="Add photos or scans">
+            <label style={{
+              display: 'block', border: '2px dashed var(--line-2)', borderRadius: 14,
+              padding: 22, textAlign: 'center', cursor: 'pointer', background: 'var(--bg-tint)',
+              transition: 'border-color 0.15s',
+            }}
+            onMouseEnter={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--brand)'; }}
+            onMouseLeave={e => { (e.currentTarget as HTMLElement).style.borderColor = 'var(--line-2)'; }}>
+              <input type="file" multiple accept="image/*" style={{ display: 'none' }}
+                onChange={e => addImages(e.target.files)} />
+              <Icon name="upload" size={28} stroke="var(--brand)" />
+              <div style={{ fontWeight: 700, fontSize: 14, marginTop: 6 }}>Click or drop images</div>
+              <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>
+                JPG, PNG, WEBP, HEIC — select multiple pages at once
+              </div>
+            </label>
+          </Field>
+
+          {images.length > 0 && (
+            <Field label={`${images.length} image${images.length !== 1 ? 's' : ''} — drag to reorder`}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(90px, 1fr))', gap: 8 }}>
+                {images.map((img, i) => (
+                  <div key={i} style={{ position: 'relative', borderRadius: 10, overflow: 'hidden', border: '1.5px solid var(--line)', background: 'var(--bg-tint)' }}>
+                    <img src={img.preview} alt={img.name}
+                      style={{ width: '100%', aspectRatio: '1', objectFit: 'cover', display: 'block' }} />
+                    {/* Page number badge */}
+                    <div style={{ position: 'absolute', top: 4, left: 4, background: 'rgba(0,0,0,0.6)', color: '#fff', borderRadius: 6, fontSize: 10, fontWeight: 700, padding: '2px 5px' }}>
+                      {i + 1}
+                    </div>
+                    {/* Controls */}
+                    <div style={{ position: 'absolute', top: 4, right: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      {i > 0 && (
+                        <button onClick={() => moveImage(i, -1)}
+                          style={{ background: 'rgba(0,0,0,0.55)', border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, padding: '2px 4px', lineHeight: 1 }}>▲</button>
+                      )}
+                      {i < images.length - 1 && (
+                        <button onClick={() => moveImage(i, 1)}
+                          style={{ background: 'rgba(0,0,0,0.55)', border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, padding: '2px 4px', lineHeight: 1 }}>▼</button>
+                      )}
+                      <button onClick={() => removeImage(i)}
+                        style={{ background: 'rgba(200,0,0,0.75)', border: 'none', borderRadius: 4, color: '#fff', cursor: 'pointer', fontSize: 10, padding: '2px 4px', lineHeight: 1 }}>✕</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Field>
+          )}
+
+          <div style={{ fontSize: 12, color: 'var(--ink-3)', padding: '4px 0', display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+            <span style={{ fontSize: 14 }}>ℹ️</span>
+            <span>Images are available for this session only. Re-upload next time to regenerate content.</span>
+          </div>
+        </>)}
       </div>
     </Modal>
   );

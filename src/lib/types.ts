@@ -51,6 +51,9 @@ export interface LibraryFile {
   content?: string | null;
   pdfBase64?: string;   // transient — present in memory, stripped before Supabase/localStorage
   storagePath?: string; // Supabase Storage path — persisted, used to re-fetch PDF binary
+  pages?: string;       // PDF page range requested by user, e.g. "1-15" or "3, 7-12"
+  images?: string[];    // transient base64 array for multi-image documents, stripped before persist
+  imageCount?: number;  // persisted count so the card can show "5 images" after stripping
 }
 
 export interface LibraryFolder {

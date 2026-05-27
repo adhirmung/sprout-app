@@ -44,6 +44,10 @@ function pdfPart(base64: string): Part {
   return { inlineData: { data: base64, mimeType: 'application/pdf' } };
 }
 
+function imagePart(base64: string, mimeType = 'image/jpeg'): Part {
+  return { inlineData: { data: base64, mimeType } };
+}
+
 function textPart(text: string): Part {
   return { text };
 }
@@ -117,12 +121,20 @@ function parseJson<T>(raw: string): T {
 }
 
 // ── Source block helper ───────────────────────────────────────
-function sourceBlock(contentText: string | null, hasPdf: boolean): string {
-  return hasPdf
-    ? 'The full document (text + images) is attached above.'
-    : contentText
-      ? `SOURCE CONTENT — use ONLY facts from this text:\n"""\n${contentText.slice(0, 40_000)}\n"""`
-      : '(No source — use accurate general knowledge for this topic.)';
+function sourceBlock(
+  contentText: string | null,
+  hasPdf:      boolean,
+  hasImages?:  boolean,
+  pages?:      string,
+): string {
+  if (hasImages) return 'The images attached above are the primary source material. Analyse them carefully.';
+  if (hasPdf) {
+    const pageNote = pages ? ` Focus ONLY on pages ${pages} of the document.` : '';
+    return `The full document (text + images) is attached above.${pageNote}`;
+  }
+  return contentText
+    ? `SOURCE CONTENT — use ONLY facts from this text:\n"""\n${contentText.slice(0, 40_000)}\n"""`
+    : '(No source — use accurate general knowledge for this topic.)';
 }
 
 // ── Chat helpers ─────────────────────────────────────────────
@@ -403,9 +415,9 @@ export interface ParagraphQuiz {
 
 // ── Feed prompts ──────────────────────────────────────────────
 
-function buildActivitiesPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
+function buildActivitiesPrompt(topic: string, contentText: string | null, hasPdf: boolean, hasImages = false): string {
   return `You are an expert educational content designer. Generate a rich, sequenced learning feed for: "${topic}"
-${sourceBlock(contentText, hasPdf)}
+${sourceBlock(contentText, hasPdf, hasImages)}
 
 Generate as many cards as needed to achieve full coverage of the source — minimum 12, maximum 20.
 Scale the count to the content: a dense 30-page document warrants 18-20 cards; a short 5-page document 12-14.
@@ -449,9 +461,9 @@ Return ONLY valid JSON — no markdown fences, no extra text:
 }`;
 }
 
-function buildFlashcardsOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean, count = 20): string {
+function buildFlashcardsOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean, count = 20, hasImages = false, pages?: string): string {
   return `You are an expert educator. Generate exactly ${count} flashcards covering "${topic}" comprehensively.
-${sourceBlock(contentText, hasPdf)}
+${sourceBlock(contentText, hasPdf, hasImages, pages)}
 
 Rules:
 - Cover every major concept, person, date, and process in the source
@@ -463,9 +475,9 @@ Return ONLY valid JSON — no markdown:
 { "cards": [{ "type": "flashcard", "question": "...", "answer": "...", "topic": "..." }], "audit": null }`;
 }
 
-function buildQuizOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean): string {
+function buildQuizOnlyPrompt(topic: string, contentText: string | null, hasPdf: boolean, hasImages = false, pages?: string): string {
   return `You are an expert educator. Generate 15 multiple-choice quiz questions about "${topic}".
-${sourceBlock(contentText, hasPdf)}
+${sourceBlock(contentText, hasPdf, hasImages, pages)}
 
 Rules:
 - Spread questions evenly across all major topics
@@ -483,7 +495,11 @@ export async function generateFeed(
   contentText: string | null,
   pdfBase64:   string | null,
   mode:        'activities' | 'flashcards' | 'quiz' = 'activities',
+  images?:     string[],
+  pages?:      string,
 ): Promise<FeedResult> {
+  const hasImages = (images?.length ?? 0) > 0;
+
   // Scale flashcard count by document length so larger docs get fuller coverage
   const flashcardCount = (() => {
     if (mode !== 'flashcards') return 20;
@@ -491,18 +507,25 @@ export async function generateFeed(
     if (len >= 25_000) return 40;
     if (len >= 8_000)  return 30;
     if (len > 0)       return 20;
-    return pdfBase64 ? 30 : 20; // PDF-only with no extracted text
+    if (hasImages)     return images!.length >= 5 ? 30 : 20;
+    return pdfBase64 ? 30 : 20;
   })();
 
-  const promptFn  = mode === 'flashcards'
-    ? (t: string, c: string | null, pdf: boolean) => buildFlashcardsOnlyPrompt(t, c, pdf, flashcardCount)
-    : mode === 'quiz' ? buildQuizOnlyPrompt
-    : buildActivitiesPrompt;
+  const promptFn = mode === 'flashcards'
+    ? (t: string, c: string | null, pdf: boolean) =>
+        buildFlashcardsOnlyPrompt(t, c, pdf, flashcardCount, hasImages, pages)
+    : mode === 'quiz'
+    ? (t: string, c: string | null, pdf: boolean) =>
+        buildQuizOnlyPrompt(t, c, pdf, hasImages, pages)
+    : (t: string, c: string | null, pdf: boolean) =>
+        buildActivitiesPrompt(t, c, pdf, hasImages);
 
   const maxTokens = mode === 'flashcards' ? 16000 : mode === 'quiz' ? 8000 : 16000;
 
   const parts: Part[] = pdfBase64
     ? [pdfPart(pdfBase64), textPart(promptFn(topic, contentText, true))]
+    : hasImages
+    ? [...images!.map(b64 => imagePart(b64)), textPart(promptFn(topic, null, true))]
     : [textPart(promptFn(topic, contentText, false))];
 
   const raw = await generateText(
@@ -740,8 +763,10 @@ async function generateMapFromModel(
   contentText: string | null,
   pdfBase64:   string | null,
   gapFill?:    string[],
+  images?:     string[],
 ): Promise<ContentMap> {
-  const hasPdf = !!pdfBase64;
+  const hasPdf    = !!pdfBase64;
+  const hasImages = (images?.length ?? 0) > 0;
 
   const gapBlock = gapFill?.length
     ? `\n\nAlso include these missing concepts:\n${gapFill.map((g, i) => `${i + 1}. ${g}`).join('\n')}`
@@ -749,6 +774,8 @@ async function generateMapFromModel(
 
   const mapSource = hasPdf
     ? 'The full document (text + images) is attached above.'
+    : hasImages
+    ? 'The images attached above contain the source material. Analyse all of them.'
     : contentText
       ? `SOURCE CONTENT:\n"""\n${contentText.slice(0, 120_000)}\n"""`
       : '(No source content provided.)';
@@ -778,6 +805,8 @@ Return ONLY valid JSON — no markdown fences:
 
   const parts: Part[] = pdfBase64
     ? [pdfPart(pdfBase64), textPart(prompt)]
+    : hasImages
+    ? [...images!.map(b64 => imagePart(b64)), textPart(prompt)]
     : [textPart(prompt)];
 
   const raw = await generateText(
@@ -1153,12 +1182,14 @@ export async function generateContentMap(
   contentText: string | null,
   pdfBase64:   string | null,
   gapFill?:    string[],
+  images?:     string[],
 ): Promise<ContentMap> {
+  const hasImages = (images?.length ?? 0) > 0;
 
   // ── Path 1: markdown heading parse (no API call) ──────────────
-  // Only used when there is NO PDF — PDFs with coloured/visual headings
-  // won't produce useful markdown headings from text extraction.
-  if (!pdfBase64) {
+  // Only used when there is NO PDF and NO images — PDFs/images with visual
+  // headings won't produce useful markdown from text extraction.
+  if (!pdfBase64 && !hasImages) {
     const sections = contentText ? parseSectionsFromMarkdown(contentText) : [];
     if (sections.length > 0) {
       const h1Count    = sections.filter(s => s.level === 1).length;
@@ -1169,20 +1200,15 @@ export async function generateContentMap(
     }
   }
 
-  // ── Path 2: two-pass streaming TOC scanner ───────────────────
-  // Pass 1 (global, ~5–10s): model reads the whole PDF and returns the
-  //   major theme hierarchy + named members + worksheet sections to exclude.
-  // Pass 2 (streaming, ~10–15s): model scans sequentially but now knows
-  //   the full hierarchy — MERCURY → SUBTOPIC of INNER PLANETS, not a TOPIC.
-  // Both passes are separate API calls, each well under Netlify's 26s limit.
+  // ── Path 2: two-pass streaming TOC scanner (PDF only) ────────
   if (pdfBase64) {
     const themeMap = await extractTOCThemes(topic, pdfBase64);
     const map      = await buildStreamingTOC(topic, pdfBase64, themeMap);
     if (map) return map;
   }
 
-  // ── Path 2b: text-only heading extraction (no PDF, no markdown) ─
-  if (contentText) {
+  // ── Path 2b: text-only heading extraction ─────────────────────
+  if (!hasImages && contentText) {
     const headings = await extractSectionHeadings(topic, contentText);
     if (headings.length > 0) {
       const h1Count    = headings.filter(h => h.level === 1).length;
@@ -1193,10 +1219,8 @@ export async function generateContentMap(
     }
   }
 
-  // ── Path 3: full model-driven map — last resort ───────────────
-  // For truly unstructured content (essays, articles) with no discernible
-  // heading structure at all.
-  return generateMapFromModel(topic, contentText, pdfBase64, gapFill);
+  // ── Path 3: model-driven map (images go directly here) ───────
+  return generateMapFromModel(topic, contentText, pdfBase64, gapFill, images);
 }
 
 // ── AI Summary (replaces old Read view) ───────────────────────
@@ -1513,8 +1537,10 @@ export async function generateContentAudit(
   contentText: string | null,
   pdfBase64:   string | null,
   contentMap:  ContentMap,
+  images?:     string[],
 ): Promise<ContentAudit> {
-  const hasPdf = !!pdfBase64;
+  const hasPdf    = !!pdfBase64;
+  const hasImages = (images?.length ?? 0) > 0;
 
   const mapSummary = contentMap.topics.map(t =>
     `• ${t.title}\n${t.subtopics.map(s => `  – ${s.title}: ${s.summary}`).join('\n')}`
@@ -1523,7 +1549,7 @@ export async function generateContentAudit(
   const prompt = `You are a curriculum quality auditor. Compare the original document to the generated topic map and identify exactly what was missed.
 
 Topic: "${topic}"
-${sourceBlock(contentText, hasPdf)}
+${sourceBlock(contentText, hasPdf, hasImages)}
 
 GENERATED TOPIC MAP:
 Synthesis: ${contentMap.synthesis}
@@ -1547,6 +1573,8 @@ Return ONLY valid JSON — no markdown:
 
   const parts: Part[] = pdfBase64
     ? [pdfPart(pdfBase64), textPart(prompt)]
+    : hasImages
+    ? [...images!.map(b64 => imagePart(b64)), textPart(prompt)]
     : [textPart(prompt)];
 
   const raw = await generateText(
@@ -1880,7 +1908,9 @@ export async function streamCourseMaterial(
   contentMap:      ContentMap,
   onTopicComplete: (tr: TopicReading) => void,
   onProgress?:     (msg: string) => void,
+  images?:         string[],
 ): Promise<DocumentReading> {
+  const hasImages = (images?.length ?? 0) > 0;
   const allTopics:  TopicReading[] = [];
   const totalTopics = contentMap.topics.length;
   // Send up to 150 K chars of extracted text per call (covers most documents)
@@ -1978,9 +2008,13 @@ Return ONLY valid JSON — no markdown fences:
 
     try {
       const client = getClient();
+      // For image-based documents, pass images as inline data alongside the prompt
+      const topicParts: Part[] = hasImages && !extractedText
+        ? [...images!.map(b64 => imagePart(b64)), textPart(prompt)]
+        : [textPart(prompt)];
       const stream = await client.models.generateContentStream({
         model:    SMART_MODEL,
-        contents: [{ role: 'user', parts: [textPart(prompt)] }],
+        contents: [{ role: 'user', parts: topicParts }],
         config:   {
           systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
           maxOutputTokens:   8000,   // raised from 2000 — full content per topic
