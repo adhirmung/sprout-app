@@ -2552,6 +2552,141 @@ function PracticeView({
   );
 }
 
+// ── Lightweight inline markdown renderer ─────────────────────
+// Handles the subset of markdown the notes extractor produces:
+// bold, italic, inline code, headings (## / ###), bullet/numbered lists,
+// markdown tables, and paragraph breaks.
+
+function inlineMd(text: string): React.ReactNode {
+  const parts: React.ReactNode[] = [];
+  const re = /\*\*(.+?)\*\*|\*(.+?)\*|`(.+?)`/g;
+  let last = 0, k = 0, m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push(text.slice(last, m.index));
+    if      (m[1] != null) parts.push(<strong key={k++} style={{ fontWeight: 700, color: 'var(--ink)' }}>{m[1]}</strong>);
+    else if (m[2] != null) parts.push(<em key={k++}>{m[2]}</em>);
+    else if (m[3] != null) parts.push(<code key={k++} style={{ fontFamily: 'var(--font-mono)', fontSize: '0.88em', background: 'var(--bg-tint)', padding: '1px 5px', borderRadius: 4 }}>{m[3]}</code>);
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) parts.push(text.slice(last));
+  return <>{parts}</>;
+}
+
+function NoteMarkdown({ content }: { content: string }) {
+  const lines  = content.replace(/\r\n/g, '\n').split('\n');
+  const nodes: React.ReactNode[] = [];
+  let i = 0, key = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Blank line
+    if (!line.trim()) { i++; continue; }
+
+    // ### heading
+    if (line.startsWith('### ')) {
+      nodes.push(<h4 key={key++} style={{ fontSize: 13, fontWeight: 800, margin: '12px 0 4px', color: 'var(--ink)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{inlineMd(line.slice(4))}</h4>);
+      i++; continue;
+    }
+
+    // ## heading
+    if (line.startsWith('## ')) {
+      nodes.push(<h3 key={key++} style={{ fontSize: 15, fontWeight: 700, margin: '14px 0 5px', color: 'var(--ink)' }}>{inlineMd(line.slice(3))}</h3>);
+      i++; continue;
+    }
+
+    // Markdown table — collect consecutive | lines
+    if (line.startsWith('|')) {
+      const rows: string[][] = [];
+      let hasHeader = false;
+      while (i < lines.length && lines[i].trim().startsWith('|')) {
+        const cells = lines[i].split('|').slice(1, -1).map(c => c.trim());
+        if (cells.every(c => /^[-: ]+$/.test(c))) { hasHeader = true; i++; continue; }
+        rows.push(cells);
+        i++;
+      }
+      if (rows.length === 0) continue;
+      const [head, ...body] = hasHeader ? rows : [null as unknown as string[], ...rows];
+      nodes.push(
+        <div key={key++} style={{ overflowX: 'auto', margin: '8px 0' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+            {head && (
+              <thead>
+                <tr>{head.map((c, j) => (
+                  <th key={j} style={{ textAlign: 'left', padding: '6px 10px', borderBottom: '2px solid var(--line)', fontWeight: 700, whiteSpace: 'nowrap' }}>
+                    {inlineMd(c)}
+                  </th>
+                ))}</tr>
+              </thead>
+            )}
+            <tbody>
+              {body.map((row, ri) => (
+                <tr key={ri} style={{ background: ri % 2 === 0 ? 'transparent' : 'var(--bg-tint)' }}>
+                  {row.map((c, ci) => (
+                    <td key={ci} style={{ padding: '5px 10px', borderBottom: '1px solid var(--line)', verticalAlign: 'top' }}>
+                      {inlineMd(c)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+      continue;
+    }
+
+    // Bullet list
+    if (/^[-*] /.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^[-*] /.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*] /, '')); i++;
+      }
+      nodes.push(
+        <ul key={key++} style={{ margin: '4px 0 8px', paddingLeft: 20 }}>
+          {items.map((it, j) => <li key={j} style={{ marginBottom: 3, fontSize: 14, lineHeight: 1.7, color: 'var(--ink-2)' }}>{inlineMd(it)}</li>)}
+        </ul>
+      );
+      continue;
+    }
+
+    // Numbered list
+    if (/^\d+\. /.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\. /.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\. /, '')); i++;
+      }
+      nodes.push(
+        <ol key={key++} style={{ margin: '4px 0 8px', paddingLeft: 22 }}>
+          {items.map((it, j) => <li key={j} style={{ marginBottom: 3, fontSize: 14, lineHeight: 1.7, color: 'var(--ink-2)' }}>{inlineMd(it)}</li>)}
+        </ol>
+      );
+      continue;
+    }
+
+    // Paragraph — absorb consecutive non-special lines
+    const para: string[] = [];
+    while (
+      i < lines.length &&
+      lines[i].trim() &&
+      !lines[i].startsWith('#') &&
+      !lines[i].startsWith('|') &&
+      !/^[-*] /.test(lines[i]) &&
+      !/^\d+\. /.test(lines[i])
+    ) { para.push(lines[i]); i++; }
+
+    if (para.length > 0) {
+      nodes.push(
+        <p key={key++} style={{ margin: '0 0 8px', fontSize: 14, lineHeight: 1.8, color: 'var(--ink-2)' }}>
+          {inlineMd(para.join(' '))}
+        </p>
+      );
+    }
+  }
+
+  return <div style={{ minWidth: 0 }}>{nodes}</div>;
+}
+
 // ── Focus view helpers ────────────────────────────────────────
 
 function FocusTerms({ terms, color }: { terms: { term: string; definition: string }[]; color: string }) {
@@ -2953,7 +3088,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
             {/* Card body — flows freely, no scroll trap */}
             <div style={{ padding: isMobile ? '14px 16px' : '16px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <p style={{ margin: 0, fontSize: isMobile ? 14 : 15, lineHeight: 1.8, color: 'var(--ink-2)' }}>{sub.content}</p>
+              <NoteMarkdown content={sub.content} />
               {subTerms.length > 0 && <FocusTerms terms={subTerms} color={color} />}
             </div>
 
@@ -3128,7 +3263,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                         <div style={{ borderTop: `1px solid ${color}22` }}>
                           {/* Reading content */}
                           <div style={{ padding: '12px 16px 12px 46px' }}>
-                            <p style={{ margin: 0, fontSize: 15, lineHeight: 1.85, color: 'var(--ink-2)' }}>{sub.content}</p>
+                            <NoteMarkdown content={sub.content} />
                           </div>
 
                           {/* Key terms for this subtopic */}

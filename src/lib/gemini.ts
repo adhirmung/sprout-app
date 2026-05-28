@@ -295,11 +295,11 @@ export interface SubtopicQuiz {
 }
 
 export interface TopicReading {
-  topicId:      string;
-  title:        string;
-  subtopics:    { title: string; content: string; quiz: SubtopicQuiz }[];
-  keyTerms:     TopicKeyTerm[];
-  whyItMatters: string;
+  topicId:       string;
+  title:         string;
+  subtopics:     { title: string; content: string; quiz?: SubtopicQuiz }[];
+  keyTerms:      TopicKeyTerm[];
+  whyItMatters?: string;
 }
 
 export interface DocumentReading {
@@ -1921,89 +1921,63 @@ export async function streamCourseMaterial(
     const t = contentMap.topics[i];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
 
-    const hasSubtopics = t.subtopics.length > 0;
+    // ── Adaptive prompt — no pre-imposed structure ────────────────
+    // The model first detects the document's natural organisation for
+    // this section (prose, list, table, definitions, sub-headings, or a
+    // mix), then mirrors it faithfully in rich markdown. This produces
+    // notes that look like the original document instead of a generic
+    // topic+subtopics skeleton.
+    const knownSubtopics = t.subtopics.length > 0
+      ? `Suggested sub-sections (use these if they match the document, discover new ones if they don't):\n${t.subtopics.map(s => `  • "${s.title}"`).join('\n')}`
+      : 'Sub-sections unknown — discover them from the document.';
 
-    // ── Prompt A: topic with known subtopics ──────────────────────
-    // Extract ALL content for each subtopic — no sentence cap.
-    // ── Prompt B: reference section (no subtopics) ────────────────
-    // Vocabulary lists, conjugation tables, synonym/antonym lists, etc.
-    // Auto-group into 1–3 natural subtopics and copy the full content.
-
-    const prompt = hasSubtopics
-      ? `You are an expert educational content organiser. FORMAT and EXTRACT content from the original document — do NOT rewrite or paraphrase.
+    const prompt = `You are a precise educational content extractor. Your task is to faithfully represent the content of one section from the original document.
 
 SUBJECT: "${topic}"
-SOURCE CONTENT (verbatim from the uploaded document):
+
+SOURCE CONTENT (from the uploaded document):
 """
 ${textSlice}
 """
 
-TOPIC OUTLINE:
-Topic (topicId: "${t.id}", title: "${t.title}"):
+SECTION: "${t.title}"
 Overview: ${t.summary}
-Subtopics:
-${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}
+${knownSubtopics}
 
-INSTRUCTIONS:
-For each subtopic "content": find and copy ALL relevant content from the SOURCE CONTENT that covers this subtopic — every definition, rule, example, table row, and list item. Do NOT limit to a fixed number of sentences. Get everything the document says about this subtopic. Preserve bullet lists and numbered lists where the source uses them.
+━━━ YOUR TASK IN 3 STEPS ━━━
 
-Produce for this topic:
-1. "content": Complete document content for each subtopic (every rule, example, and item — do not truncate).
-2. "quiz": one comprehension question — exactly 3 plausible options, 0-based answer index, 1-sentence explanation.
+STEP 1 — DETECT THE SECTION'S NATURAL STRUCTURE:
+Look at how the document actually presents this section. Identify its format:
+  • Prose explanation       → use flowing paragraphs
+  • Numbered rules/steps   → use "1. " ordered list
+  • Unordered items        → use "- " bullet list
+  • Term–definition pairs  → use **Term** — definition pattern
+  • Tabular data           → use markdown table  (| Col | Col |\\n|---|---|\\n| val | val |)
+  • Named sub-headings     → create a sub-section for each heading
+  • Mixed formats          → combine any of the above
 
-Also:
-- "keyTerms": 3–5 key terms with clear, document-grounded definitions.
-- "whyItMatters": one sentence on why this topic matters to a student.
+STEP 2 — DIVIDE INTO 1–5 NATURAL SUB-SECTIONS:
+Use the document's own headings where they exist. Otherwise create logical groupings (e.g. "Overview", "How it works", "Key rules", "Examples"). Each sub-section title should be meaningful and concise.
 
-Rules: subtopic titles must match the outline EXACTLY; all content must come from the document.
+STEP 3 — EXTRACT ALL CONTENT:
+For each sub-section, extract EVERY piece of relevant information from the source:
+  - Every definition, rule, exception, example, and note
+  - Every item in lists and every row in tables
+  - Exact wording from the document — do NOT paraphrase or summarise
+  - Use markdown formatting that matches the document's own style
 
-Return ONLY valid JSON — no markdown fences:
+Return ONLY valid JSON — no markdown fences, no extra text:
 {
   "topicId": "${t.id}",
   "title": "${t.title}",
   "subtopics": [
     {
-      "title": "Subtopic name (must match outline exactly)",
-      "content": "...",
-      "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
+      "title": "Sub-section name",
+      "content": "Rich markdown — bullets, numbered lists, tables, bold terms, paragraphs — whatever fits this section"
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "..."
-}`
-      : `You are an expert educational content organiser. EXTRACT the complete content for this reference section from the original document.
-
-SUBJECT: "${topic}"
-SOURCE CONTENT (verbatim from the uploaded document):
-"""
-${textSlice}
-"""
-
-REFERENCE SECTION: "${t.title}"
-Overview: ${t.summary}
-
-INSTRUCTIONS:
-This is a reference section (vocabulary list, conjugation table, synonym/antonym list, word list, or similar). It has no distinct sub-categories — your job is to find ALL content for this section in the source and copy it completely.
-
-Create 1–3 natural groupings as subtopics (e.g. alphabetical ranges, grammatical groupings, or thematic clusters) and copy the COMPLETE content from the source into them — every entry, every table row, every word, every item. Do NOT omit or summarise anything.
-
-Also:
-- "keyTerms": 2–3 key terms.
-- "whyItMatters": one sentence on why this section helps students.
-
-Return ONLY valid JSON — no markdown fences:
-{
-  "topicId": "${t.id}",
-  "title": "${t.title}",
-  "subtopics": [
-    {
-      "title": "Natural grouping name",
-      "content": "Complete content from the source for this group — every entry, every item.",
-      "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
-    }
-  ],
-  "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "..."
+  "whyItMatters": "One sentence on why this section matters to a student."
 }`;
 
     try {
@@ -2041,22 +2015,13 @@ Return ONLY valid JSON — no markdown fences:
       const parsed = parseJson<TopicReading>(raw);
 
       // ── Sanitise before touching the UI ──────────────────────
-      // If the model response was truncated (hit token limit) and
-      // repairJson closed the brackets, nested objects like "quiz"
-      // can be empty ({}) or have null arrays. Passing those to
-      // ReadView causes quiz.options.map() → TypeError → blank screen.
-      //
-      // Filter to subtopics that have ALL required fields fully formed:
-      //   • title    — string
-      //   • content  — string
-      //   • quiz     — object with question, options array (≥2), numeric answer
+      // Filter to subtopics that have the two required fields:
+      //   • title   — non-empty string
+      //   • content — non-empty string
+      // quiz is now optional (generated on-demand via "Test Me")
       const validSubtopics = (parsed.subtopics ?? []).filter(s =>
-        s?.title &&
-        typeof s.content === 'string' &&
-        s.quiz &&
-        typeof s.quiz.question === 'string' && s.quiz.question.length > 0 &&
-        Array.isArray(s.quiz.options) && s.quiz.options.length >= 2 &&
-        typeof s.quiz.answer === 'number',
+        s?.title && typeof s.title === 'string' && s.title.length > 0 &&
+        typeof s.content === 'string' && s.content.length > 0,
       );
 
       if (validSubtopics.length === 0) {
@@ -2098,39 +2063,32 @@ Return ONLY valid JSON — no markdown fences:
         const gapId  = `gap${gi + 1}`;
         onProgress?.(`Pass 2 — ${gi + 1} of ${gaps.length}: ${gap.title}…`);
 
-        // Reuse Prompt B structure, but source is the gap's already-extracted text —
-        // smaller, faster, and the audit already did the locating work.
-        const gapPrompt = `You are an expert educational content organiser. EXTRACT the complete content for this section from the source text.
+        // Use the same adaptive approach for gap sections.
+        const gapPrompt = `You are a precise educational content extractor. Extract and faithfully represent this section from the document.
 
 SUBJECT: "${topic}"
-SECTION TITLE: "${gap.title}"
-SECTION OVERVIEW: ${gap.summary}
+SECTION: "${gap.title}"
+Overview: ${gap.summary}
 
 SOURCE TEXT (verbatim extract from the document):
 """
 ${gap.rawContent}
 """
 
-INSTRUCTIONS:
-Create 1–3 natural subtopic groupings and copy ALL content from the source into them — every definition, rule, example, table row, and list item. Do NOT paraphrase or omit anything.
+DETECT the section's natural structure (prose, numbered list, bullets, table, definitions, sub-headings, or a mix), then create 1–4 sub-sections that mirror the document's own organisation. Extract ALL content verbatim — every rule, example, item, and table row. Use rich markdown (bold, bullets, numbered lists, tables) to preserve the original's formatting.
 
-Also:
-- "keyTerms": 2–4 key terms with document-grounded definitions.
-- "whyItMatters": one sentence on why this section matters to a student.
-
-Return ONLY valid JSON — no markdown:
+Return ONLY valid JSON — no markdown fences:
 {
   "topicId": "${gapId}",
   "title": "${gap.title}",
   "subtopics": [
     {
-      "title": "Grouping name",
-      "content": "Complete content for this group — every item.",
-      "quiz": { "question": "...", "options": ["A", "B", "C"], "answer": 0, "explanation": "..." }
+      "title": "Sub-section name",
+      "content": "Rich markdown content — bullets, tables, bold terms, paragraphs as needed"
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "..."
+  "whyItMatters": "One sentence."
 }`;
 
         try {
@@ -2161,12 +2119,8 @@ Return ONLY valid JSON — no markdown:
           const parsedGap = parseJson<TopicReading>(gapRaw);
 
           const validSubs = (parsedGap.subtopics ?? []).filter(s =>
-            s?.title &&
-            typeof s.content === 'string' &&
-            s.quiz &&
-            typeof s.quiz.question === 'string' && s.quiz.question.length > 0 &&
-            Array.isArray(s.quiz.options) && s.quiz.options.length >= 2 &&
-            typeof s.quiz.answer === 'number',
+            s?.title && typeof s.title === 'string' && s.title.length > 0 &&
+            typeof s.content === 'string' && s.content.length > 0,
           );
 
           if (validSubs.length > 0) {
