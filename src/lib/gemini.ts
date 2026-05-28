@@ -1902,6 +1902,40 @@ Return ONLY valid JSON — no markdown:
   }
 }
 
+// ── Per-topic text slicer ─────────────────────────────────────
+// Locates a topic's heading inside the full extracted text and returns the
+// text from that heading up to the start of the next topic heading.
+// This prevents content bleeding when a document has many identically-
+// structured sections (e.g. Bhagavad-Gita chapter: TEXT 1 / Translation /
+// Purport  ×  20 — without slicing the model would always drift to whichever
+// TEXT it found most salient in a 150 K-char window).
+function findTopicTextSlice(
+  text:           string,
+  topicTitle:     string,
+  nextTopicTitle: string | undefined,
+  maxChars        = 20_000,
+): string {
+  const lower      = text.toLowerCase();
+  const titleLower = topicTitle.toLowerCase().trim();
+  const startIdx   = lower.indexOf(titleLower);
+
+  // Title not found → fall back to the beginning of the full text
+  if (startIdx === -1) return text.slice(0, maxChars);
+
+  let endIdx = startIdx + maxChars;
+  if (nextTopicTitle) {
+    const nextLower = nextTopicTitle.toLowerCase().trim();
+    // Search for the next topic heading after the current one starts
+    const nextIdx = lower.indexOf(nextLower, startIdx + titleLower.length);
+    if (nextIdx !== -1 && nextIdx < endIdx) endIdx = nextIdx;
+  }
+
+  const slice = text.slice(startIdx, endIdx);
+  // Guard: if slice is implausibly short the match was probably a false
+  // positive (e.g. a one-word title that appears mid-sentence) — fall back
+  return slice.length < 80 ? text.slice(0, maxChars) : slice;
+}
+
 export async function streamCourseMaterial(
   topic:           string,
   extractedText:   string,
@@ -1913,13 +1947,23 @@ export async function streamCourseMaterial(
   const hasImages = (images?.length ?? 0) > 0;
   const allTopics:  TopicReading[] = [];
   const totalTopics = contentMap.topics.length;
-  // Send up to 150 K chars of extracted text per call (covers most documents)
+  // Cap the full text so the per-topic slicer works on a bounded string
   const TEXT_LIMIT  = 150_000;
   const textSlice   = extractedText.slice(0, TEXT_LIMIT);
 
   for (let i = 0; i < totalTopics; i++) {
-    const t = contentMap.topics[i];
+    const t     = contentMap.topics[i];
+    const nextT = contentMap.topics[i + 1];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
+
+    // ── Anchor to this topic's section of the document ────────────
+    // For documents with many identically-structured sections (e.g. every
+    // "TEXT N" in the Bhagavad-Gita has its own Translation + Purport), we
+    // narrow the context to just the slice between this heading and the next.
+    // This prevents the model from drifting to the wrong section's content.
+    const contextText = (hasImages && !extractedText)
+      ? ''
+      : findTopicTextSlice(textSlice, t.title, nextT?.title);
 
     // ── Adaptive prompt — no pre-imposed structure ────────────────
     // The model first detects the document's natural organisation for
@@ -1935,9 +1979,9 @@ export async function streamCourseMaterial(
 
 SUBJECT: "${topic}"
 
-SOURCE CONTENT (from the uploaded document):
+SOURCE CONTENT (extract from the document — this section only):
 """
-${textSlice}
+${contextText}
 """
 
 SECTION: "${t.title}"
