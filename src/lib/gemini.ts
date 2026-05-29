@@ -1954,6 +1954,11 @@ Return ONLY valid JSON — no markdown:
 // structured sections (e.g. Bhagavad-Gita chapter: TEXT 1 / Translation /
 // Purport  ×  20 — without slicing the model would always drift to whichever
 // TEXT it found most salient in a 150 K-char window).
+//
+// Returns '' when the title cannot be found in the text (caller handles the
+// empty case).  Never falls back to the full document — handing the whole
+// document to a "chapter divider" topic is what caused the single massive
+// dropdown.
 function findTopicTextSlice(
   text:           string,
   topicTitle:     string,
@@ -1964,21 +1969,16 @@ function findTopicTextSlice(
   const titleLower = topicTitle.toLowerCase().trim();
   const startIdx   = lower.indexOf(titleLower);
 
-  // Title not found → fall back to the beginning of the full text
-  if (startIdx === -1) return text.slice(0, maxChars);
+  if (startIdx === -1) return ''; // title not found — caller will use summary fallback
 
   let endIdx = startIdx + maxChars;
   if (nextTopicTitle) {
     const nextLower = nextTopicTitle.toLowerCase().trim();
-    // Search for the next topic heading after the current one starts
-    const nextIdx = lower.indexOf(nextLower, startIdx + titleLower.length);
+    const nextIdx   = lower.indexOf(nextLower, startIdx + titleLower.length);
     if (nextIdx !== -1 && nextIdx < endIdx) endIdx = nextIdx;
   }
 
-  const slice = text.slice(startIdx, endIdx);
-  // Guard: if slice is implausibly short the match was probably a false
-  // positive (e.g. a one-word title that appears mid-sentence) — fall back
-  return slice.length < 80 ? text.slice(0, maxChars) : slice;
+  return text.slice(startIdx, endIdx);
 }
 
 export async function streamCourseMaterial(
@@ -2006,9 +2006,26 @@ export async function streamCourseMaterial(
     // "TEXT N" in the Bhagavad-Gita has its own Translation + Purport), we
     // narrow the context to just the slice between this heading and the next.
     // This prevents the model from drifting to the wrong section's content.
-    const contextText = (hasImages && !extractedText)
+    const rawSlice = (hasImages && !extractedText)
       ? ''
       : findTopicTextSlice(textSlice, t.title, nextT?.title);
+
+    // ── Handle divider-only topics ────────────────────────────────
+    // If the slice is very short (the heading exists but has almost no body
+    // text beneath it — e.g. a chapter title like "Contents of the Gita
+    // Summarized" that immediately precedes TEXT 1), we must NOT fall back to
+    // the full document.  Instead, build a minimal context from the content-
+    // map's own summary so the model produces a small overview card rather
+    // than dumping the entire document into one massive dropdown.
+    const BODY_THRESHOLD = 200; // chars — below this we treat it as header-only
+    const contextText =
+      rawSlice.length >= BODY_THRESHOLD
+        ? rawSlice   // normal case — slice has real content
+        : [          // header-only / not-found case — use map metadata only
+            `Section: "${t.title}"`,
+            t.summary ? `Overview: ${t.summary}` : '',
+            ...t.subtopics.map(s => `• ${s.title}: ${s.summary}`),
+          ].filter(Boolean).join('\n');
 
     // ── Adaptive prompt — no pre-imposed structure ────────────────
     // The model first detects the document's natural organisation for
