@@ -28,6 +28,7 @@ import {
   saveApiKey,
   streamCardChat,
   streamCourseMaterial,
+  streamTopicUnderstanding,
 } from '../lib/gemini';
 import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
@@ -2684,6 +2685,29 @@ function NoteMarkdown({ content }: { content: string }) {
       continue;
     }
 
+    // Blockquote (key insight callout)
+    if (line.startsWith('> ')) {
+      const bqLines: string[] = [];
+      while (i < lines.length && lines[i].startsWith('> ')) {
+        bqLines.push(lines[i].slice(2)); i++;
+      }
+      nodes.push(
+        <blockquote key={key++} style={{
+          margin: '14px 0 8px', padding: '12px 18px',
+          borderLeft: '3px solid var(--brand, #4F8EF7)',
+          background: 'var(--brand-tint, #EBF4FF)',
+          borderRadius: '0 10px 10px 0',
+          fontStyle: 'italic',
+          fontSize: 14,
+          lineHeight: 1.75,
+          color: 'var(--ink)',
+        }}>
+          {inlineMd(bqLines.join(' '))}
+        </blockquote>
+      );
+      continue;
+    }
+
     // Paragraph — absorb consecutive non-special lines
     const para: string[] = [];
     while (
@@ -2691,6 +2715,7 @@ function NoteMarkdown({ content }: { content: string }) {
       lines[i].trim() &&
       !lines[i].startsWith('#') &&
       !lines[i].startsWith('|') &&
+      !lines[i].startsWith('> ') &&
       !/^[-*] /.test(lines[i]) &&
       !/^\d+\. /.test(lines[i])
     ) { para.push(lines[i]); i++; }
@@ -2792,8 +2817,11 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
   const [quizLoading, setQuizLoading] = useState<string | null>(null);
   const [quizError,   setQuizError]   = useState<string | null>(null);
 
-  const [viewMode,    setViewMode]    = useState<'list' | 'cards' | 'ask'>('list');
-  const [cardIdx,     setCardIdx]     = useState(0);
+  const [viewMode,       setViewMode]       = useState<'list' | 'cards' | 'ask'>('list');
+  const [cardIdx,        setCardIdx]        = useState(0);
+  const [notesMode,      setNotesMode]      = useState<'study' | 'understand'>('study');
+  const [understandTexts, setUnderstandTexts] = useState<Record<string, string>>({});
+  const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
 
   const isMobile    = useIsMobile();
   const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 820);
@@ -2999,35 +3027,93 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
     </div>
   );
 
+  // ── Understand mode: generate per-topic explanations ─────────
+  const startUnderstandMode = () => {
+    const allTitles = documentReading.topics.map(t => t.title);
+    for (const t of documentReading.topics) {
+      // Skip if already cached or in-flight
+      if (understandTexts[t.topicId] !== undefined) continue;
+      if (understandLoading.has(t.topicId)) continue;
+
+      setUnderstandLoading(prev => { const next = new Set(prev); next.add(t.topicId); return next; });
+
+      void streamTopicUnderstanding(
+        topic,
+        t.title,
+        t.whyItMatters ?? '',
+        (t.subtopics ?? []).map(s => ({ title: s.title })),
+        allTitles,
+        (chunk) => {
+          setUnderstandTexts(prev => ({ ...prev, [t.topicId]: (prev[t.topicId] ?? '') + chunk }));
+        },
+      ).finally(() => {
+        setUnderstandLoading(prev => { const next = new Set(prev); next.delete(t.topicId); return next; });
+      });
+    }
+  };
+
   // ── Sub-action bar shared by both views ──────────────────────
   const subActionBar = (
-    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 20 }}>
-      {/* View toggle */}
-      <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
+    <div style={{ marginBottom: 20 }}>
+      {/* Row 1: View mode + break chip */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        {/* View toggle — only shown in Study mode */}
+        {notesMode === 'study' ? (
+          <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
+            {([
+              { id: 'list',  label: '≡ List'  },
+              { id: 'cards', label: '▣ Focus' },
+            ] as const).map(m => (
+              <button key={m.id} onClick={() => setViewMode(m.id)} style={{
+                padding: '5px 14px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
+                background: viewMode === m.id ? 'var(--card)' : 'transparent',
+                color: viewMode === m.id ? 'var(--ink)' : 'var(--ink-4)',
+                boxShadow: viewMode === m.id ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+                transition: 'all 0.18s',
+              }}>
+                {m.label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          /* Placeholder so break chip stays right-aligned */
+          <div />
+        )}
+
+        {/* Break reminder chip */}
+        {showBreak && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', borderRadius: 20, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.5)' }}>
+            <span style={{ fontSize: 13 }}>⏸</span>
+            <span style={{ fontSize: 11, color: '#78350F', fontWeight: 600 }}>Take a break</span>
+            <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 11, color: '#78350F', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕</button>
+          </div>
+        )}
+      </div>
+
+      {/* Row 2: Study / Understand toggle */}
+      <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)', width: 'fit-content' }}>
         {([
-          { id: 'list',  label: '≡ List'  },
-          { id: 'cards', label: '▣ Focus' },
+          { id: 'study',      label: '📚 Study'      },
+          { id: 'understand', label: '💡 Understand'  },
         ] as const).map(m => (
-          <button key={m.id} onClick={() => setViewMode(m.id)} style={{
-            padding: '5px 14px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
-            background: viewMode === m.id ? 'var(--card)' : 'transparent',
-            color: viewMode === m.id ? 'var(--ink)' : 'var(--ink-4)',
-            boxShadow: viewMode === m.id ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
-            transition: 'all 0.18s',
-          }}>
+          <button
+            key={m.id}
+            onClick={() => {
+              setNotesMode(m.id);
+              if (m.id === 'understand') startUnderstandMode();
+            }}
+            style={{
+              padding: '5px 16px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
+              background: notesMode === m.id ? 'var(--card)' : 'transparent',
+              color: notesMode === m.id ? 'var(--ink)' : 'var(--ink-4)',
+              boxShadow: notesMode === m.id ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+              transition: 'all 0.18s',
+            }}
+          >
             {m.label}
           </button>
         ))}
       </div>
-
-      {/* Break reminder chip (mobile + desktop when no sidebar) */}
-      {showBreak && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 10px', borderRadius: 20, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.5)' }}>
-          <span style={{ fontSize: 13 }}>⏸</span>
-          <span style={{ fontSize: 11, color: '#78350F', fontWeight: 600 }}>Take a break</span>
-          <button onClick={() => setBreakDismissed(true)} style={{ fontSize: 11, color: '#78350F', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>✕</button>
-        </div>
-      )}
     </div>
   );
 
@@ -3210,7 +3296,41 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
         {subActionBar}
 
-        {(viewMode === 'cards' || viewMode === 'ask') ? cardView : (<>
+        {/* ── Understand mode: one conceptual card per topic ── */}
+        {notesMode === 'understand' ? (
+          <div>
+            {documentReading.topics.map((t, i) => {
+              const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
+              const text    = understandTexts[t.topicId];
+              const loading = understandLoading.has(t.topicId);
+              return (
+                <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12 }}>
+                  {/* Topic heading */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                    <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>{i + 1}</div>
+                    <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
+                  </div>
+                  <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
+
+                  {/* Explanation card */}
+                  <div style={{ borderRadius: 16, border: `1.5px solid ${color}33`, background: 'var(--card)', padding: isMobile ? '16px 18px' : '20px 24px', boxShadow: '0 2px 14px rgba(0,0,0,0.05)', minHeight: 80 }}>
+                    {loading && !text ? (
+                      /* Streaming skeleton */
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
+                        <div style={{ width: 18, height: 18, borderRadius: '50%', border: `2px solid ${color}44`, borderTopColor: color, animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
+                        <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
+                      </div>
+                    ) : text ? (
+                      <NoteMarkdown content={text} />
+                    ) : (
+                      <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        ) : (viewMode === 'cards' || viewMode === 'ask') ? cardView : (<>
 
         {/* Topic pills nav */}
         <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
@@ -3401,6 +3521,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
         )}
 
         </>)}
+        {/* end notesMode === 'study' branch */}
       </div>
     </div>
   );

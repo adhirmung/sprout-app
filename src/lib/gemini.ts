@@ -2457,3 +2457,70 @@ Return ONLY valid JSON — no markdown:
   }
   return parsed;
 }
+
+// ── Per-topic conceptual explanation (Understand mode) ────────
+// Streams a 150-220 word plain-language explanation of a single topic.
+// Not a summary — a genuine "knowledgeable friend" explanation with an
+// analogy and a key insight blockquote at the end.
+
+export async function streamTopicUnderstanding(
+  courseTopic:    string,
+  topicTitle:     string,
+  topicSummary:   string,
+  subtopics:      { title: string }[],
+  allTopicTitles: string[],
+  onChunk:        (text: string) => void,
+): Promise<void> {
+  const client = getClient();
+
+  const pos      = allTopicTitles.indexOf(topicTitle);
+  const prevTopic = pos > 0                         ? allTopicTitles[pos - 1] : null;
+  const nextTopic = pos < allTopicTitles.length - 1 ? allTopicTitles[pos + 1] : null;
+
+  const systemInstruction = `\
+You are a warm, knowledgeable teacher explaining ideas to a curious student.
+Your job is NOT to summarise the notes — it is to explain what this topic REALLY means,
+why it matters, and how it connects to the bigger picture.
+Write in flowing, conversational prose. Use one relatable analogy to make the idea concrete.
+Target 150–220 words of main body text.
+End with a single key insight on its own line as a Markdown blockquote (> Your insight here).
+Do NOT use headings, bullet points, or numbered lists. Plain prose + one blockquote only.`;
+
+  const subtopicList = subtopics.map(s => `• ${s.title}`).join('\n');
+
+  const prompt = [
+    `Course: "${courseTopic}"`,
+    `Topic: "${topicTitle}"`,
+    topicSummary ? `Overview: ${topicSummary}` : '',
+    subtopicList  ? `Subtopics covered:\n${subtopicList}` : '',
+    prevTopic     ? `This topic follows: "${prevTopic}"` : '',
+    nextTopic     ? `This topic leads into: "${nextTopic}"` : '',
+    '',
+    'Write a conceptual explanation for a student who wants to truly understand this, not just memorise it.',
+  ].filter(Boolean).join('\n');
+
+  const stream = await client.models.generateContentStream({
+    model:    FAST_MODEL,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    config:   {
+      systemInstruction,
+      maxOutputTokens: 500,
+      temperature:     0.7,
+      thinkingConfig:  { thinkingBudget: 0 },
+    },
+  });
+
+  let inputTokens  = 0;
+  let outputTokens = 0;
+
+  for await (const chunk of stream) {
+    const t = chunk.text ?? '';
+    if (t) onChunk(t);
+    if (chunk.usageMetadata) {
+      inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+    }
+  }
+
+  void dbLogUsage(_currentUserId, 'streamTopicUnderstanding', FAST_MODEL, inputTokens, outputTokens);
+}
