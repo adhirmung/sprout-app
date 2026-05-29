@@ -38,6 +38,26 @@ import type { FeedSource, LearnerProfile } from '../lib/types';
 
 const LARGE_DOC_CHARS = 120_000;
 
+/**
+ * Normalise a fill-in-the-blank answer for lenient comparison.
+ * Steps:
+ *  1. NFD decomposition — splits "ā" into "a" + combining macron
+ *  2. Strip all combining diacritical marks (U+0300–U+036F)
+ *     so "Bhagavān" → "Bhagavan", "kṛṣṇa" → "krsna", etc.
+ *  3. Lower-case
+ *  4. Collapse multiple spaces and trim
+ * This lets users type answers without special characters and still be
+ * marked correct.
+ */
+function normaliseAnswer(s: string): string {
+  return s
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function useIsMobile() {
   const [mobile, setMobile] = useState(() => window.innerWidth < 768);
   useEffect(() => {
@@ -2229,8 +2249,8 @@ function PracticeView({
 
     } else if (currentQuestion.type === 'fill') {
       if (!textInput.trim()) return;
-      const userNorm    = textInput.trim().toLowerCase();
-      const correctNorm = (currentQuestion.blank ?? '').toLowerCase();
+      const userNorm    = normaliseAnswer(textInput);
+      const correctNorm = normaliseAnswer(currentQuestion.blank ?? '');
       const correct     = userNorm === correctNorm ? 1 : 0;
       setSubmitted(true);
       setAnswers(prev => [...prev, { questionId: currentQuestion.id, score: correct, maxScore: 1, userValue: textInput }]);
@@ -4115,7 +4135,7 @@ function FillBlankCard({ card, onRated }: {
   const [scored,    setScored]    = useState(false);
 
   const parts   = card.sentence.split('_____');
-  const results = inputs.map((inp, i) => inp.trim().toLowerCase() === card.blanks[i]?.toLowerCase());
+  const results = inputs.map((inp, i) => normaliseAnswer(inp) === normaliseAnswer(card.blanks[i] ?? ''));
   const allCorrect = results.every(Boolean);
 
   const submit = () => {
