@@ -21,6 +21,7 @@ import {
   generateContentMap,
   generateDocumentDiagnostic,
   generateFeed,
+  generateStudyBrief,
   generateParagraphQuiz,
   generatePracticeQuiz,
   generateVisualComponents,
@@ -30,7 +31,7 @@ import {
   streamCourseMaterial,
   streamTopicUnderstanding,
 } from '../lib/gemini';
-import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -92,6 +93,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
   const [mapEnhancing,      setMapEnhancing]      = useState(false);
+  const [studyBrief,        setStudyBrief]        = useState<StudyBrief | null>(null);
+  const [studyBriefLoading, setStudyBriefLoading] = useState(false);
   const [enhancementSummary, setEnhancementSummary] = useState<{
     addedConcepts: string[];
     originalScore: number;
@@ -198,6 +201,20 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
+
+  // Generate study brief when content map becomes available
+  useEffect(() => {
+    if (!contentMap || !sourceKey) return;
+    const cacheKey = `brief:${sourceKey}`;
+    const cached = Store.get<StudyBrief | null>(cacheKey, null);
+    if (cached) { setStudyBrief(cached); return; }
+    setStudyBriefLoading(true);
+    generateStudyBrief(contentMap, topic, profile)
+      .then(brief => { Store.set(cacheKey, brief); setStudyBrief(brief); })
+      .catch(console.error)
+      .finally(() => setStudyBriefLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [contentMap]);
 
   // Preload cached audit on mount so the quality badge shows while idle
   useEffect(() => {
@@ -743,6 +760,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       auditLoading={auditLoading}
       mapEnhancing={mapEnhancing}
       enhancementSummary={enhancementSummary}
+      studyBrief={studyBrief}
+      studyBriefLoading={studyBriefLoading}
       onBack={() => setPhase('idle')}
       onCourseMaterial={() => startCourseMaterial(contentMap)}
       onPractice={() => {
@@ -757,9 +776,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       onRegenerate={async () => {
         Store.del(`map:${sourceKey}`);
         Store.del(`audit:${sourceKey}`);
+        Store.del(`brief:${sourceKey}`);
         setContentMap(null);
         setContentAudit(null);
         setEnhancementSummary(null);
+        setStudyBrief(null);
         setPhase('mapping');
         setError('');
         try {
@@ -1818,34 +1839,28 @@ function DiagnosticSheet({
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, onBack, onCourseMaterial, onPractice, onRegenerate }: {
-  contentMap:         ContentMap;
-  topic:              string;
-  hasCache:           boolean;
-  hasCourse:          boolean;
-  hasText:            boolean;
-  profile:            LearnerProfile | null;
-  contentAudit:       ContentAudit | null;
-  auditLoading:       boolean;
-  mapEnhancing:       boolean;
-  enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
-  onBack:             () => void;
-  onCourseMaterial:   () => void;
-  onPractice:         (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate:       () => void;
+function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, studyBrief, studyBriefLoading, onBack, onCourseMaterial, onPractice, onRegenerate }: {
+  contentMap:          ContentMap;
+  topic:               string;
+  hasCache:            boolean;
+  hasCourse:           boolean;
+  hasText:             boolean;
+  profile:             LearnerProfile | null;
+  contentAudit:        ContentAudit | null;
+  auditLoading:        boolean;
+  mapEnhancing:        boolean;
+  enhancementSummary:  { addedConcepts: string[]; originalScore: number } | null;
+  studyBrief:          StudyBrief | null;
+  studyBriefLoading:   boolean;
+  onBack:              () => void;
+  onCourseMaterial:    () => void;
+  onPractice:          (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:        () => void;
 }) {
-  const [expanded,     setExpanded]     = useState<Set<string>>(new Set());
-  const [statsOpen,    setStatsOpen]    = useState(false);
+  const [statsOpen, setStatsOpen] = useState(false);
   const isMobile = useIsMobile();
-
-  const toggle = (id: string) => setExpanded(prev => {
-    const next = new Set(prev);
-    next.has(id) ? next.delete(id) : next.add(id);
-    return next;
-  });
-
-  const mapPct = Math.min(45, 30 + Math.max(0, contentMap.topics.length - 4) * 2);
-  const cognitiveTip = getCognitiveTip(profile);
+  void profile;     // passed to generateStudyBrief upstream; kept for future use
+  void contentMap;  // data lives in backend pipeline; kept for future use
 
   const StepDot = ({ n, active }: { n: number; active: boolean }) => (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
@@ -1955,126 +1970,91 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
           </div>
 
           {/* Step 1 label */}
-          <div style={{ textAlign: 'center', marginBottom: 20 }}>
+          <div style={{ textAlign: 'center', marginBottom: 24 }}>
             <div style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 14px', borderRadius: 999, background: 'var(--brand)', color: 'white' }}>
-              <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Step 1 · Topic Map</span>
+              <span style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.06em', textTransform: 'uppercase' }}>Step 1 · Study Plan</span>
             </div>
-            <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ink-3)' }}>Study this first before moving to practice</p>
+            <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--ink-3)' }}>Your personalised approach to this material</p>
           </div>
 
-          {/* Understanding meter */}
-          <div style={{ padding: '14px 18px', borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', marginBottom: 16, boxShadow: '0 1px 6px rgba(0,0,0,0.04)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <div style={{ fontSize: 13, color: 'var(--ink-2)', fontWeight: 600 }}>After understanding this map</div>
-              <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)' }}>{mapPct}%</div>
-            </div>
-            <div style={{ height: 8, borderRadius: 999, background: 'var(--bg-tint)', overflow: 'hidden', marginBottom: 6 }}>
-              <div style={{ width: `${mapPct}%`, height: '100%', borderRadius: 999, background: 'linear-gradient(90deg, var(--brand) 0%, #7ed5a0 100%)' }} />
-            </div>
-            <div style={{ fontSize: 11, color: 'var(--ink-4)' }}>content understanding · complete all 4 steps for 90%+</div>
-          </div>
+          {/* ── Study Brief ────────────────────────────────────── */}
+          {studyBriefLoading && !studyBrief ? (
 
-          {/* Cognitive tip */}
-          {cognitiveTip && (
-            <div style={{ padding: '12px 16px', borderRadius: 12, background: '#FFFBEB', border: '1px solid rgba(244,183,64,0.4)', marginBottom: 20, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-              <span style={{ fontSize: 16, flexShrink: 0 }}>🧠</span>
-              <div>
-                <div style={{ fontSize: 10, fontWeight: 800, color: '#92400E', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 3 }}>Your cognitive profile suggests</div>
-                <div style={{ fontSize: 13, color: '#78350F', lineHeight: 1.6 }}>{cognitiveTip}</div>
-              </div>
-            </div>
-          )}
-
-          {/* Big Picture synthesis */}
-          <div style={{ padding: '18px 20px', borderRadius: 16, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 20 }}>
-            <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--brand)', textTransform: 'uppercase', marginBottom: 8 }}>
-              Big Picture
-            </div>
-            <p style={{ margin: 0, fontSize: 16, lineHeight: 1.85, color: 'var(--ink-2)' }}>
-              {contentMap.synthesis}
-            </p>
-          </div>
-
-          {/* Mind-map style topic tree */}
-          <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--ink-3)', textTransform: 'uppercase', marginBottom: 12 }}>
-            Topics · {contentMap.topics.length}
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: (auditLoading || contentAudit) ? 16 : 20 }}>
-            {contentMap.topics.map((t, i) => {
-              const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
-              const isOpen = expanded.has(t.id);
-              return (
-                <div key={t.id} style={{
-                  borderRadius: 14,
-                  border: `1.5px solid ${isOpen ? color + '44' : 'var(--line)'}`,
-                  background: 'var(--card)',
-                  overflow: 'hidden',
-                  borderLeft: `4px solid ${color}`,
-                  transition: 'border-color 0.2s, box-shadow 0.2s',
-                  boxShadow: isOpen ? `0 2px 12px ${color}18` : 'none',
-                }}>
-                  <button
-                    onClick={() => toggle(t.id)}
-                    style={{ width: '100%', padding: '14px 16px', display: 'flex', alignItems: 'flex-start', gap: 12, background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left' }}
-                  >
-                    {/* Numbered circle in topic color */}
-                    <div style={{
-                      width: 26, height: 26, borderRadius: '50%',
-                      background: isOpen ? color : color + '18',
-                      border: `1.5px solid ${color}`,
-                      display: 'grid', placeItems: 'center',
-                      flexShrink: 0, fontSize: 11, fontWeight: 800,
-                      color: isOpen ? 'white' : color,
-                      fontFamily: 'var(--font-mono)',
-                      transition: 'all 0.2s',
-                    }}>
-                      {i + 1}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--ink)', marginBottom: isOpen ? 0 : 4 }}>{t.title}</div>
-                      {!isOpen && <div style={{ fontSize: 14, color: 'var(--ink-3)', lineHeight: 1.6 }}>{t.summary}</div>}
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                      {!isOpen && (
-                        <span style={{ fontSize: 10, fontWeight: 700, color: color, background: color + '18', padding: '2px 7px', borderRadius: 6 }}>
-                          {t.subtopics.length} subtopics
-                        </span>
-                      )}
-                      <div style={{ transform: isOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s' }}>
-                        <Icon name="chevron-right" size={16} stroke={isOpen ? color : 'var(--ink-4)'} />
-                      </div>
-                    </div>
-                  </button>
-
-                  {isOpen && (
-                    <div style={{ borderTop: `1px solid ${color}22`, paddingBottom: 10 }}>
-                      {/* Topic summary */}
-                      <div style={{ padding: '10px 16px 12px 54px', fontSize: 15, color: 'var(--ink-2)', lineHeight: 1.75, fontStyle: 'italic' }}>
-                        {t.summary}
-                      </div>
-                      {/* Subtopics with colored connector line */}
-                      <div style={{ position: 'relative', paddingLeft: 54 }}>
-                        {/* Vertical connector line */}
-                        <div style={{ position: 'absolute', left: 28, top: 0, bottom: 12, width: 2, background: `linear-gradient(to bottom, ${color}55, ${color}11)`, borderRadius: 2 }} />
-                        {t.subtopics.map((sub) => (
-                          <div key={sub.id} style={{ display: 'flex', gap: 12, padding: '8px 16px 8px 0', position: 'relative' }}>
-                            {/* Horizontal connector */}
-                            <div style={{ position: 'absolute', left: -26, top: 17, width: 18, height: 2, background: color + '55' }} />
-                            {/* Dot */}
-                            <div style={{ width: 8, height: 8, borderRadius: '50%', background: color, flexShrink: 0, marginTop: 5, border: `2px solid white`, boxShadow: `0 0 0 1.5px ${color}` }} />
-                            <div style={{ flex: 1 }}>
-                              <div style={{ fontWeight: 600, fontSize: 14, color: 'var(--ink)', marginBottom: 3 }}>{sub.title}</div>
-                              <div style={{ fontSize: 14, color: 'var(--ink-3)', lineHeight: 1.7 }}>{sub.summary}</div>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+            /* Loading state */
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {[140, 100, 120, 90, 110, 130].map((w, i) => (
+                <div key={i} style={{ height: i === 0 ? 80 : 56, borderRadius: 14, background: 'var(--bg-tint)', border: '1px solid var(--line)', display: 'flex', alignItems: 'center', padding: '0 20px', gap: 12 }}>
+                  <div style={{ width: 20, height: 20, borderRadius: '50%', border: '2.5px solid var(--brand)', borderTopColor: 'transparent', animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
+                  <div style={{ height: 12, width: w, borderRadius: 6, background: 'var(--line)' }} />
                 </div>
-              );
-            })}
-          </div>
+              ))}
+            </div>
+
+          ) : studyBrief ? (
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+
+              {/* 1. Approach */}
+              <div style={{ borderRadius: 14, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', padding: '14px 18px' }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: 'var(--brand)', marginBottom: 8 }}>📐 How to approach this</div>
+                <p style={{ margin: 0, fontSize: 14, lineHeight: 1.8, color: 'var(--ink-2)' }}>{studyBrief.approach}</p>
+              </div>
+
+              {/* 2. Anchor concepts */}
+              <div style={{ borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', padding: '14px 18px' }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: '#D97706', marginBottom: 10 }}>🔑 Master these first</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7 }}>
+                  {studyBrief.anchorConcepts.map((c, i) => (
+                    <span key={i} style={{ padding: '4px 12px', borderRadius: 999, background: '#FFFBEB', border: '1px solid #FCD34D', fontSize: 13, fontWeight: 600, color: '#92400E' }}>{c}</span>
+                  ))}
+                </div>
+              </div>
+
+              {/* 3. Study order */}
+              <div style={{ borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', padding: '14px 18px' }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: '#7C3AED', marginBottom: 8 }}>📋 Recommended order</div>
+                <p style={{ margin: 0, fontSize: 14, lineHeight: 1.8, color: 'var(--ink-2)' }}>{studyBrief.studyOrder}</p>
+              </div>
+
+              {/* 4. Hard spots */}
+              {studyBrief.hardSpots.length > 0 && (
+                <div style={{ borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', padding: '14px 18px' }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: '#DC2626', marginBottom: 10 }}>⚠️ Watch out for</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
+                    {studyBrief.hardSpots.map((h, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                        <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#DC2626', flexShrink: 0, marginTop: 8 }} />
+                        <span style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7 }}>{h}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* 5. Session plan */}
+              <div style={{ borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', padding: '14px 18px' }}>
+                <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: '#059669', marginBottom: 8 }}>⏱ Study sessions</div>
+                <p style={{ margin: 0, fontSize: 14, lineHeight: 1.8, color: 'var(--ink-2)' }}>{studyBrief.sessionPlan}</p>
+              </div>
+
+              {/* 6. Profile insights */}
+              {studyBrief.profileInsights.length > 0 && (
+                <div style={{ borderRadius: 14, background: '#F5F3FF', border: '1px solid #DDD6FE', padding: '14px 18px' }}>
+                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.09em', color: '#5B21B6', marginBottom: 10 }}>🧠 Based on your cognitive profile</div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {studyBrief.profileInsights.map((insight, i) => (
+                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                        <div style={{ width: 5, height: 5, borderRadius: '50%', background: '#7C3AED', flexShrink: 0, marginTop: 8 }} />
+                        <span style={{ fontSize: 14, color: '#4C1D95', lineHeight: 1.7 }}>{insight}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+          ) : null}
 
         </div>
       </div>

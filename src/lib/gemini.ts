@@ -2524,3 +2524,94 @@ Do NOT use headings, bullet points, or numbered lists. Plain prose + one blockqu
 
   void dbLogUsage(_currentUserId, 'streamTopicUnderstanding', FAST_MODEL, inputTokens, outputTokens);
 }
+
+// ── Study brief (personalised plan shown on the Map screen) ───
+
+export type StudyBrief = {
+  approach:        string;    // 2-3 sentence strategy for this material
+  anchorConcepts:  string[];  // 3-5 must-know concepts before anything else
+  studyOrder:      string;    // narrative on recommended reading order
+  hardSpots:       string[];  // 2-4 predicted difficult areas
+  sessionPlan:     string;    // how to break this into sessions with timing
+  profileInsights: string[];  // 2-3 tips derived from cognitive profile
+};
+
+function _briefScoreLabel(score: number): string {
+  if (score >= 75) return 'high';
+  if (score >= 45) return 'moderate';
+  return 'low';
+}
+
+export async function generateStudyBrief(
+  contentMap:  ContentMap,
+  topic:       string,
+  profile:     LearnerProfile | null,
+): Promise<StudyBrief> {
+  const topicList = contentMap.topics
+    .map((t, i) =>
+      `${i + 1}. ${t.title}\n   Subtopics: ${t.subtopics.map(s => s.title).join(', ')}`,
+    )
+    .join('\n');
+
+  const profileBlock = profile
+    ? [
+        `Working memory: ${_briefScoreLabel(profile.workingMemory.score)}`,
+        `Processing speed: ${_briefScoreLabel(profile.processingSpeed.score)}`,
+        `Fluid intelligence (abstract reasoning): ${_briefScoreLabel(profile.fluidIntelligence.score)}`,
+        `Executive function (task switching): ${_briefScoreLabel(profile.executiveFunction.score)}`,
+        `Sustained attention: ${_briefScoreLabel(profile.sustainedAttention.score)}`,
+        profile.confidence.calibrationBias !== undefined
+          ? `Confidence calibration: ${
+              profile.confidence.calibrationBias >  0.1 ? 'overconfident — needs extra verification steps' :
+              profile.confidence.calibrationBias < -0.1 ? 'underconfident — needs reassurance and confidence building' :
+              'well calibrated'
+            }`
+          : '',
+      ].filter(Boolean).join('\n')
+    : 'No cognitive profile available — provide generic, broadly applicable advice.';
+
+  const systemInstruction = `\
+You are an expert learning strategist. Given a content map and a learner's cognitive profile,
+produce a concise, practical, personalised study brief.
+Be specific — reference actual topic names from the map.
+Keep every field brief, direct, and actionable.
+Return ONLY valid JSON — no markdown fences, no extra text.`;
+
+  const prompt = `\
+Topic: "${topic}"
+Overview: ${contentMap.synthesis}
+
+Topics in this material:
+${topicList}
+
+Learner cognitive profile:
+${profileBlock}
+
+Return a JSON object with EXACTLY these keys:
+{
+  "approach":        "2-3 sentences on the overall strategy for THIS specific material",
+  "anchorConcepts":  ["concept 1", "concept 2", "concept 3"],
+  "studyOrder":      "1-2 sentences on recommended reading order and why",
+  "hardSpots":       ["difficult area 1", "difficult area 2", "difficult area 3"],
+  "sessionPlan":     "1-2 sentences on how to split this into sessions with rough timing",
+  "profileInsights": ["tip 1 referencing their actual profile scores", "tip 2", "tip 3"]
+}
+
+anchorConcepts: 3-5 ideas the student must grasp before the rest makes sense.
+hardSpots: 2-4 specific topics/concepts predicted to challenge THIS student.
+profileInsights: MUST be specific to the learner's scores — explain what each score means for studying THIS material.`;
+
+  const raw = await generateText(
+    FAST_MODEL,
+    systemInstruction,
+    [textPart(prompt)],
+    900,
+    'generateStudyBrief',
+  );
+
+  const parsed = parseJson<StudyBrief>(raw);
+  if (!parsed.approach || !Array.isArray(parsed.anchorConcepts)) {
+    throw new Error('Invalid study brief response.');
+  }
+  return parsed;
+}
