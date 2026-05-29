@@ -1981,6 +1981,56 @@ function findTopicTextSlice(
   return text.slice(startIdx, endIdx);
 }
 
+// ── Content-map topic normaliser ──────────────────────────────
+// Applies the same "repeated top-level title → subtopic" heuristic to an
+// already-assembled ContentMap.topics array.  This is necessary because the
+// content map may have been loaded from cache (Supabase/localStorage) and
+// therefore never passed through the heading-level normaliser that runs
+// during generateContentMap.
+//
+// Example: cached map has 61 flat topics (Contents + 20×TEXT + 20×Translation
+// + 20×Purport).  After this function, Translation and Purport become
+// subtopics of their preceding unique TEXT topic, giving 21 topics.
+//
+// Idempotent: if the map is already correctly structured (no repeated
+// top-level titles), it passes through unchanged.
+function normaliseTopicList(topics: Topic[]): Topic[] {
+  // Count occurrences of each title at the top level
+  const freq = new Map<string, number>();
+  for (const t of topics) freq.set(t.title, (freq.get(t.title) ?? 0) + 1);
+
+  const repeated = new Set(
+    [...freq.entries()].filter(([, n]) => n >= 2).map(([title]) => title),
+  );
+
+  if (repeated.size === 0) return topics; // already correct — nothing to do
+
+  const result: Topic[] = [];
+  let topicIdx = 0;
+
+  for (const t of topics) {
+    if (!repeated.has(t.title)) {
+      // Unique title → keep as a top-level topic (preserve any existing subtopics)
+      topicIdx++;
+      result.push({ ...t, subtopics: [...t.subtopics] });
+    } else if (result.length > 0) {
+      // Repeated title → demote to subtopic of the most recent unique topic,
+      // but only if that subtopic hasn't been added yet (avoid duplicates)
+      const parent = result[result.length - 1];
+      if (!parent.subtopics.some(s => s.title === t.title)) {
+        parent.subtopics.push({
+          id:      `${parent.id}s${parent.subtopics.length + 1}`,
+          title:   t.title,
+          summary: t.summary,
+        });
+      }
+    }
+    // If repeated.has(t.title) and result is empty → nothing to parent it to, skip
+  }
+
+  return result;
+}
+
 export async function streamCourseMaterial(
   topic:           string,
   extractedText:   string,
@@ -1991,14 +2041,21 @@ export async function streamCourseMaterial(
 ): Promise<DocumentReading> {
   const hasImages = (images?.length ?? 0) > 0;
   const allTopics:  TopicReading[] = [];
-  const totalTopics = contentMap.topics.length;
+
+  // ── Normalise the topic list at generation time ───────────────
+  // The contentMap might come from cache (generated before the heading
+  // normaliser was deployed).  Re-apply the fix here so every run — fresh
+  // or cached — produces a correctly-structured topic list.
+  const workTopics  = normaliseTopicList(contentMap.topics);
+  const totalTopics = workTopics.length;
+
   // Cap the full text so the per-topic slicer works on a bounded string
   const TEXT_LIMIT  = 150_000;
   const textSlice   = extractedText.slice(0, TEXT_LIMIT);
 
   for (let i = 0; i < totalTopics; i++) {
-    const t     = contentMap.topics[i];
-    const nextT = contentMap.topics[i + 1];
+    const t     = workTopics[i];
+    const nextT = workTopics[i + 1];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
 
     // ── Anchor to this topic's section of the document ────────────
