@@ -684,26 +684,36 @@ async function generateMapFromHeadings(
   topic:    string,
   sections: ParsedSection[],
 ): Promise<ContentMap> {
-  // Build a compact listing of every heading + snippet for the model
+  // Build a compact listing for the summaries call — deduplicate repeated
+  // sub-section titles (e.g. "Translation" × 20) so the model isn't swamped
+  // with identical lines.  The full sections array still drives content-map
+  // assembly below.
+  const seenInListing = new Set<string>();
   const listing = sections.map(s => {
     const indent = s.level === 1 ? '' : '  ';
     const bullet = s.level === 1 ? '●' : '○';
     const hint   = s.snippet ? ` — ${s.snippet.slice(0, 120)}` : '';
-    return `${indent}${bullet} ${s.title}${hint}`;
-  }).join('\n');
+    const line   = `${indent}${bullet} ${s.title}${hint}`;
+    // For recurring sub-section titles, show only the first occurrence in the
+    // listing; repeated occurrences add a count hint instead.
+    const key = `${s.level}:${s.title}`;
+    if (seenInListing.has(key)) return null; // will be filtered out
+    seenInListing.add(key);
+    return line;
+  }).filter(Boolean).join('\n');
 
   const prompt = `Document: "${topic}"
 
-These are the EXACT section headings from the document (● = main section, ○ = sub-section):
+These are the EXACT section headings from the document (● = main section, ○ = sub-section).
+Note: recurring sub-section titles (e.g. "Translation", "Purport") appear under EACH main section even though listed once here.
 ${listing}
 
 Your task:
 1. Write a 2-sentence synthesis describing the overall document.
-2. Write ONE short sentence summarising each section listed above.
+2. Write ONE short sentence summarising each UNIQUE heading shown above.
 
 Rules:
-- Do NOT add, remove, rename, or reorder any section.
-- Every key in "summaries" must match the section title exactly as shown above.
+- Every key in "summaries" must match a heading title above exactly.
 - Keep every summary to 1 sentence (max 20 words).
 
 Return ONLY valid JSON — no markdown fences:
@@ -1124,6 +1134,36 @@ Output one line per item, no blank lines, no other text. Begin scanning now:`;
   return assembleTOC(entries);
 }
 
+// ── Heading-level normaliser ──────────────────────────────────
+// Universal fix for documents with repeated section patterns.
+//
+// Problem: when a document has many identically-structured blocks
+// (e.g. 20 scripture verses each with "Translation" + "Purport"),
+// the heading extractor sometimes returns those recurring sub-titles
+// at level 1 instead of level 2, producing a flat 60-topic list
+// instead of 20 topics each with 2 subtopics.
+//
+// Heuristic: any heading title that appears at level 1 two or more
+// times throughout the document is almost certainly a recurring
+// sub-section (not a unique standalone chapter).  Reclassify it
+// to level 2 so it nests correctly under its preceding unique topic.
+
+function normaliseHeadingLevels(sections: ParsedSection[]): ParsedSection[] {
+  // Count level-1 occurrences per title
+  const freq = new Map<string, number>();
+  for (const s of sections) {
+    if (s.level === 1) freq.set(s.title, (freq.get(s.title) ?? 0) + 1);
+  }
+  // Titles appearing 2+ times at level 1 are recurring sub-sections
+  const repeated = new Set(
+    [...freq.entries()].filter(([, n]) => n >= 2).map(([t]) => t),
+  );
+  if (repeated.size === 0) return sections; // nothing to fix
+  return sections.map(s =>
+    s.level === 1 && repeated.has(s.title) ? { ...s, level: 2 as const } : s,
+  );
+}
+
 // ── Text-only heading extractor (no PDF) ─────────────────────────
 // Used when there is no PDF — extracts section structure from extracted
 // text via a single JSON call. No streaming needed (no binary upload).
@@ -1143,7 +1183,12 @@ List EVERY named section heading and sub-section heading from this document, in 
 
 Rules:
 - Include ALL sections — do not skip, merge, group, or rename any heading.
-- Use level 1 for main section titles, level 2 for sub-sections under them.
+- Level 1 = a UNIQUE main section that identifies a distinct chapter or topic
+  (appears only once, e.g. "Chapter 3", "TEXT 7", "The Solar System").
+- Level 2 = a sub-section that appears WITHIN a main section.
+  CRITICAL: if the same heading title (e.g. "Translation", "Purport",
+  "Examples", "Summary", "Introduction") appears repeatedly under different
+  main sections, it MUST be level 2 — never level 1.
 - Copy the title text exactly as it appears in the document.
 
 Return ONLY valid JSON — no markdown fences, no explanation:
@@ -1193,10 +1238,10 @@ export async function generateContentMap(
     const sections = contentText ? parseSectionsFromMarkdown(contentText) : [];
     if (sections.length > 0) {
       const h1Count    = sections.filter(s => s.level === 1).length;
-      const normalised = h1Count === 0
+      const levelled   = h1Count === 0
         ? sections.map(s => ({ ...s, level: 1 as const }))
         : sections;
-      return generateMapFromHeadings(topic, normalised);
+      return generateMapFromHeadings(topic, normaliseHeadingLevels(levelled));
     }
   }
 
@@ -1211,11 +1256,11 @@ export async function generateContentMap(
   if (!hasImages && contentText) {
     const headings = await extractSectionHeadings(topic, contentText);
     if (headings.length > 0) {
-      const h1Count    = headings.filter(h => h.level === 1).length;
-      const normalised = h1Count === 0
+      const h1Count  = headings.filter(h => h.level === 1).length;
+      const levelled = h1Count === 0
         ? headings.map(h => ({ ...h, level: 1 as const }))
         : headings;
-      return generateMapFromHeadings(topic, normalised);
+      return generateMapFromHeadings(topic, normaliseHeadingLevels(levelled));
     }
   }
 
