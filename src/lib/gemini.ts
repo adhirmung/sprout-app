@@ -2065,27 +2065,45 @@ export async function streamCourseMaterial(
     const nextT = workTopics[i + 1];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
 
-    // ── Anchor to this topic's section of the document ────────────
-    // For documents with many identically-structured sections (e.g. every
-    // "TEXT N" in the Bhagavad-Gita has its own Translation + Purport), we
-    // narrow the context to just the slice between this heading and the next.
-    // This prevents the model from drifting to the wrong section's content.
-    const rawSlice = (hasImages && !extractedText)
-      ? ''
-      : findTopicTextSlice(textSlice, t.title, nextT?.title);
+    // ── Locate this topic's text in the document ──────────────────
+    // Try up to 3 strategies so the model always receives real source
+    // text rather than falling back to AI-generated map summaries.
+    const BODY_THRESHOLD = 200;
 
-    // ── Handle divider-only topics ────────────────────────────────
-    // If the slice is very short (the heading exists but has almost no body
-    // text beneath it — e.g. a chapter title like "Contents of the Gita
-    // Summarized" that immediately precedes TEXT 1), we must NOT fall back to
-    // the full document.  Instead, build a minimal context from the content-
-    // map's own summary so the model produces a small overview card rather
-    // than dumping the entire document into one massive dropdown.
-    const BODY_THRESHOLD = 200; // chars — below this we treat it as header-only
+    let rawSlice = '';
+    if (!hasImages || extractedText) {
+      // Strategy 1: exact topic title match
+      rawSlice = findTopicTextSlice(textSlice, t.title, nextT?.title);
+
+      // Strategy 2: try matching any subtopic title (AI topic titles
+      // sometimes differ from the document headings)
+      if (rawSlice.length < BODY_THRESHOLD && t.subtopics.length > 0) {
+        for (const sub of t.subtopics) {
+          const subSlice = findTopicTextSlice(textSlice, sub.title, nextT?.title);
+          if (subSlice.length >= BODY_THRESHOLD) { rawSlice = subSlice; break; }
+        }
+      }
+
+      // Strategy 3: positional window — topic N of M starts roughly at
+      // (N/M) of the text. Guarantees real document content even when
+      // AI-generated titles have no textual overlap with the source.
+      if (rawSlice.length < BODY_THRESHOLD) {
+        const startRatio = i / totalTopics;
+        const endRatio   = (i + 1) / totalTopics;
+        const startPos   = Math.floor(startRatio * textSlice.length);
+        const endPos     = Math.min(
+          Math.floor(endRatio   * textSlice.length) + 2_000, // a bit of overlap
+          textSlice.length,
+          startPos + 20_000,
+        );
+        rawSlice = textSlice.slice(startPos, endPos);
+      }
+    }
+
     const contextText =
       rawSlice.length >= BODY_THRESHOLD
-        ? rawSlice   // normal case — slice has real content
-        : [          // header-only / not-found case — use map metadata only
+        ? rawSlice
+        : [   // true header-only divider (e.g. "Contents of the Gita Summarized")
             `Section: "${t.title}"`,
             t.summary ? `Overview: ${t.summary}` : '',
             ...t.subtopics.map(s => `• ${s.title}: ${s.summary}`),
@@ -2107,7 +2125,7 @@ export async function streamCourseMaterial(
 
 SUBJECT: "${topic}"
 
-SOURCE CONTENT (verbatim extract for this section):
+SOURCE CONTENT (extract from the document — focus on the "${t.title}" section):
 """
 ${contextText}
 """
