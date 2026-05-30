@@ -3382,18 +3382,40 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                   <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
 
                   {/* Explanation card */}
-                  <div style={{ borderRadius: 16, border: `1.5px solid ${color}33`, background: 'var(--card)', padding: isMobile ? '16px 18px' : '20px 24px', boxShadow: '0 2px 14px rgba(0,0,0,0.05)', minHeight: 80 }}>
-                    {loading && !text ? (
-                      /* Streaming skeleton */
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
-                        <div style={{ width: 18, height: 18, borderRadius: '50%', border: `2px solid ${color}44`, borderTopColor: color, animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
-                        <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
-                      </div>
-                    ) : text ? (
-                      <NoteMarkdown content={text} />
-                    ) : (
-                      <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
-                    )}
+                  <div style={{ borderRadius: 16, border: `1.5px solid ${color}33`, background: 'var(--card)', boxShadow: '0 2px 14px rgba(0,0,0,0.05)', overflow: 'hidden', minHeight: 80 }}>
+                    {/* Card body */}
+                    <div style={{ padding: isMobile ? '16px 18px' : '20px 24px' }}>
+                      {loading && !text ? (
+                        /* Streaming skeleton */
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
+                          <div style={{ width: 18, height: 18, borderRadius: '50%', border: `2px solid ${color}44`, borderTopColor: color, animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
+                          <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
+                        </div>
+                      ) : text ? (
+                        <NoteMarkdown content={text} />
+                      ) : (
+                        <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
+                      )}
+                    </div>
+
+                    {/* Footer: back to notes button */}
+                    <div style={{ borderTop: `1px solid ${color}22`, padding: '10px 18px' }}>
+                      <button
+                        onClick={() => {
+                          setNotesMode('study');
+                          // Scroll after one frame so study-mode DOM is mounted
+                          requestAnimationFrame(() => scrollTo(t.topicId));
+                        }}
+                        style={{
+                          padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
+                          cursor: 'pointer', border: `1.5px solid ${color}55`,
+                          background: 'transparent', color,
+                          transition: 'all 0.2s',
+                        }}
+                      >
+                        📖 View notes for topic {i + 1}
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
