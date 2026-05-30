@@ -2571,10 +2571,26 @@ export async function generateStudyBrief(
     : 'No cognitive profile available — provide generic, broadly applicable advice.';
 
   const systemInstruction = `\
-You are an expert learning strategist. Given a content map and a learner's cognitive profile,
-produce a concise, practical, personalised study brief.
-Be specific — reference actual topic names from the map.
-Keep every field brief, direct, and actionable.
+You are an expert learning strategist with deep knowledge of subject-specific study methods.
+
+Step 1 — Identify the subject type from the content (e.g. biology, chemistry, physics, mathematics,
+history, geography, law, philosophy, religious studies / scripture, language learning, literature,
+economics, psychology, computer science, medicine, etc.).
+
+Step 2 — Apply the best-practice study approach for THAT subject type. Examples:
+- Biology / Science: understand mechanisms and cause-effect chains; link structure to function; use active recall on processes
+- Scripture / Religious studies: read slowly; trace the argument and its spiritual significance; understand Sanskrit/original terms before translation
+- Mathematics: work through examples; understand proofs before memorising; build incrementally
+- History: construct a chronological narrative first; link events by causation; anchor around key figures
+- Law: learn doctrine then apply to facts; case-based reasoning; statutory interpretation
+- Language learning: spaced repetition; phonetic awareness; contextual usage before grammar rules
+- Philosophy: trace each argument step by step; identify premises and conclusions; apply to modern scenarios
+- Literature: understand context before close reading; track themes and motifs; author's intent vs. reader response
+- Economics / Psychology: understand models first; real-world application; statistical thinking
+
+Step 3 — Personalise to the learner's cognitive profile.
+
+Be specific — reference actual topic names from the map. Keep every field brief, direct, actionable.
 Return ONLY valid JSON — no markdown fences, no extra text.`;
 
   const prompt = `\
@@ -2589,17 +2605,17 @@ ${profileBlock}
 
 Return a JSON object with EXACTLY these keys:
 {
-  "approach":        "2-3 sentences on the overall strategy for THIS specific material",
+  "approach":        "2-3 sentences — name the subject type, then give the subject-appropriate strategy for THIS specific material",
   "anchorConcepts":  ["concept 1", "concept 2", "concept 3"],
-  "studyOrder":      "1-2 sentences on recommended reading order and why",
-  "hardSpots":       ["difficult area 1", "difficult area 2", "difficult area 3"],
-  "sessionPlan":     "1-2 sentences on how to split this into sessions with rough timing",
-  "profileInsights": ["tip 1 referencing their actual profile scores", "tip 2", "tip 3"]
+  "studyOrder":      "1-2 sentences on recommended reading order and why, informed by the subject type",
+  "hardSpots":       ["difficult area 1 — why it is hard for this subject type", "difficult area 2", "difficult area 3"],
+  "sessionPlan":     "1-2 sentences on how to split this into sessions with rough timing, suited to this subject",
+  "profileInsights": ["tip 1 referencing their actual profile scores AND the subject", "tip 2", "tip 3"]
 }
 
-anchorConcepts: 3-5 ideas the student must grasp before the rest makes sense.
-hardSpots: 2-4 specific topics/concepts predicted to challenge THIS student.
-profileInsights: MUST be specific to the learner's scores — explain what each score means for studying THIS material.`;
+anchorConcepts: 3-5 ideas the student must grasp before the rest makes sense (specific to this material).
+hardSpots: 2-4 specific topics/concepts predicted to challenge THIS student given the subject type and their profile.
+profileInsights: MUST reference the learner's actual cognitive scores AND explain what they mean for studying THIS subject.`;
 
   const raw = await generateText(
     FAST_MODEL,

@@ -138,6 +138,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const breadcrumb  = source?.path ? source.path.slice(0, -1).join(' › ') : '';
   const isLargeDoc  = (content?.length ?? 0) > LARGE_DOC_CHARS;
   const contentLen  = content?.length ?? 0;
+  // Word count for reading-time estimate on the study brief screen.
+  // Prefer extractedText (AI-cleaned) over raw content; either may be empty for image/PDF-only docs.
+  const sourceWordCount = Math.round(
+    (extractedText || content || '').split(/\s+/).filter(Boolean).length,
+  );
 
   useEffect(() => { if (error) retryRef.current?.focus(); }, [error]);
 
@@ -762,6 +767,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       enhancementSummary={enhancementSummary}
       studyBrief={studyBrief}
       studyBriefLoading={studyBriefLoading}
+      sourceWordCount={sourceWordCount}
       onBack={() => setPhase('idle')}
       onCourseMaterial={() => startCourseMaterial(contentMap)}
       onPractice={() => {
@@ -1839,7 +1845,7 @@ function DiagnosticSheet({
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, studyBrief, studyBriefLoading, onBack, onCourseMaterial, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, studyBrief, studyBriefLoading, sourceWordCount, onBack, onCourseMaterial, onPractice, onRegenerate }: {
   contentMap:          ContentMap;
   topic:               string;
   hasCache:            boolean;
@@ -1852,6 +1858,7 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
   enhancementSummary:  { addedConcepts: string[]; originalScore: number } | null;
   studyBrief:          StudyBrief | null;
   studyBriefLoading:   boolean;
+  sourceWordCount:     number;
   onBack:              () => void;
   onCourseMaterial:    () => void;
   onPractice:          (mode: 'activities' | 'flashcards' | 'quiz') => void;
@@ -1874,7 +1881,7 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
         transition: 'all 0.2s',
       }}>{n}</div>
       <div style={{ fontSize: 10, fontWeight: 700, color: active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-        {n === 1 ? 'Map' : n === 2 ? 'Notes' : 'Practice'}
+        {n === 1 ? 'Plan' : n === 2 ? 'Notes' : 'Practice'}
       </div>
     </div>
   );
@@ -2056,16 +2063,98 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
 
           ) : null}
 
+          {/* ── Learning stats + feature info ──────────────── */}
+          {(() => {
+            const wpm         = getReadingWpm(profile);
+            const readMinutes = sourceWordCount > 100
+              ? Math.max(1, Math.ceil(sourceWordCount / wpm))
+              : null;
+
+            const features = [
+              {
+                icon: '📝',
+                label: 'Notes',
+                color: 'var(--brand)',
+                bg: 'var(--brand-tint)',
+                border: 'var(--brand-soft)',
+                desc: 'AI-structured notes split by topic with subtopic accordions, key terms, and a Study/Understand toggle. Track what you\'ve read and what you\'ve learnt.',
+              },
+              {
+                icon: '✨',
+                label: 'Ask AI',
+                color: '#7C3AED',
+                bg: '#F5F3FF',
+                border: '#DDD6FE',
+                desc: 'Ask anything about this material mid-reading and get a grounded, contextual answer. Available per subtopic in Notes and as a dedicated Ask mode.',
+              },
+              {
+                icon: '🧪',
+                label: 'Practice',
+                color: '#D97706',
+                bg: '#FFFBEB',
+                border: '#FCD34D',
+                desc: 'Multiple-choice, fill-in-the-blank, and written questions generated from the notes. Scored with topic-level feedback so you know exactly where to review.',
+              },
+              {
+                icon: '📋',
+                label: 'Examination',
+                color: '#DC2626',
+                bg: '#FEF2F2',
+                border: '#FECACA',
+                desc: 'A full mock exam across all topics. Simulates real exam conditions with a time estimate, mixed question types, and a final score report.',
+              },
+            ] as const;
+
+            return (
+              <div style={{ marginTop: 28 }}>
+
+                {/* Reading time stat */}
+                {readMinutes !== null && (
+                  <div style={{ marginBottom: 16, padding: '12px 18px', borderRadius: 14, background: 'var(--card)', border: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 14 }}>
+                    <span style={{ fontSize: 22, flexShrink: 0 }}>⏱</span>
+                    <div>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)', marginBottom: 2 }}>
+                        ~{readMinutes < 60
+                          ? `${readMinutes} min`
+                          : `${Math.floor(readMinutes / 60)}h ${readMinutes % 60}m`} to read the notes
+                      </div>
+                      <div style={{ fontSize: 12, color: 'var(--ink-4)' }}>
+                        Based on your reading speed ({wpm} wpm) · {sourceWordCount.toLocaleString()} words in this document
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Feature info cards */}
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', color: 'var(--ink-4)', textTransform: 'uppercase', marginBottom: 10 }}>
+                  Your learning tools
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {features.map(f => (
+                    <div key={f.label} style={{ borderRadius: 14, background: f.bg, border: `1px solid ${f.border}`, padding: '12px 16px', display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                      <span style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>{f.icon}</span>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: f.color, marginBottom: 3 }}>{f.label}</div>
+                        <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.65 }}>{f.desc}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+              </div>
+            );
+          })()}
+
         </div>
       </div>
 
       {/* Step nav bar */}
       <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
         <div style={{ display: 'flex', alignItems: 'center', maxWidth: 420, width: '100%' }}>
-          {/* Step 1 — Map (active) */}
+          {/* Step 1 — Plan (active) */}
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>1</div>
-            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Map</span>
+            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Plan</span>
           </div>
 
           {/* Line 1→2 */}
