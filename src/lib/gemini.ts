@@ -4,18 +4,12 @@ import { dbLogUsage } from './supabase';
 
 // ── Model config ──────────────────────────────────────────────
 // Netlify Edge Functions have a hard 26s wall-clock timeout.
-//
-// gemini-2.5-flash: best quality but CAN think internally even with
-//   thinkingBudget:0, delaying first-token 30–60s → edge fn dies.
-//   Use only for one-shot calls where quality matters most AND the
-//   input is small enough that thinking won't trigger.
-//
-// gemini-2.0-flash: no thinking capability at all → first token in
-//   1–3s guaranteed.  Use for sequential / looping calls (e.g. per-
-//   topic notes) where any single call timing out breaks the whole run.
-const SMART_MODEL = 'gemini-2.5-flash';   // quality calls (map, brief, TOC)
-const FAST_MODEL  = 'gemini-2.5-flash';   // chat / booster (small, fast)
-const NOTES_MODEL = 'gemini-2.0-flash';   // per-topic notes loop — no thinking risk
+// All generation calls use streaming (generateContentStream) so the
+// edge function resolves as soon as Gemini sends the first SSE chunk.
+// thinkingBudget:0 disables thinking on gemini-2.5-flash, keeping
+// first-token latency to ~2-5s — safely within the 26s limit.
+const SMART_MODEL = 'gemini-2.5-flash';
+const FAST_MODEL  = 'gemini-2.5-flash';
 
 // ── Current user (set once on auth, used for usage logging) ───
 let _currentUserId: string | null = null;
@@ -1936,12 +1930,13 @@ Return ONLY valid JSON — no markdown:
 
   const client = getClient();
   const stream = await client.models.generateContentStream({
-    model:    NOTES_MODEL,   // 2.0-flash: no thinking → reliable first-token within 26s
+    model:    SMART_MODEL,
     contents: [{ role: 'user', parts: [textPart(prompt)] }],
     config:   {
       systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
       maxOutputTokens:   8000,
       temperature:       0.0,
+      thinkingConfig:    { thinkingBudget: 0 },
     },
   });
 
@@ -2155,7 +2150,7 @@ Return ONLY valid JSON — no markdown fences, no extra text:
         ? [...images!.map(b64 => imagePart(b64)), textPart(prompt)]
         : [textPart(prompt)];
       const stream = await client.models.generateContentStream({
-        model:    NOTES_MODEL, // 2.0-flash: no thinking → first-token always <5s
+        model:    SMART_MODEL,
         contents: [{ role: 'user', parts: topicParts }],
         config:   {
           systemInstruction:
@@ -2164,6 +2159,7 @@ Return ONLY valid JSON — no markdown fences, no extra text:
             'Never summarise. Never give overviews. Return only valid JSON.',
           maxOutputTokens:   8000,
           temperature:       0.1,
+          thinkingConfig:    { thinkingBudget: 0 },
         },
       });
 
@@ -2263,7 +2259,7 @@ Return ONLY valid JSON — no markdown fences:
         try {
           const client = getClient();
           const gapStream = await client.models.generateContentStream({
-            model:    NOTES_MODEL, // no-thinking model keeps gap-fill within 26s
+            model:    SMART_MODEL,
             contents: [{ role: 'user', parts: [textPart(gapPrompt)] }],
             config:   {
               systemInstruction:
@@ -2272,6 +2268,7 @@ Return ONLY valid JSON — no markdown fences:
                 'Never summarise. Never give overviews. Return only valid JSON.',
               maxOutputTokens:   8000,
               temperature:       0.1,
+              thinkingConfig:    { thinkingBudget: 0 },
             },
           });
 
@@ -2285,7 +2282,7 @@ Return ONLY valid JSON — no markdown fences:
               gapOut = chunk.usageMetadata.candidatesTokenCount ?? gapOut;
             }
           }
-          void dbLogUsage(_currentUserId, 'streamCourseMaterial_gap', NOTES_MODEL, gapIn, gapOut);
+          void dbLogUsage(_currentUserId, 'streamCourseMaterial_gap', SMART_MODEL, gapIn, gapOut);
 
           const parsedGap = parseJson<TopicReading>(gapRaw);
 
