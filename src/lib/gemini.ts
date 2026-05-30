@@ -2091,43 +2091,44 @@ export async function streamCourseMaterial(
             ...t.subtopics.map(s => `• ${s.title}: ${s.summary}`),
           ].filter(Boolean).join('\n');
 
-    // ── Adaptive prompt — no pre-imposed structure ────────────────
-    // The model first detects the document's natural organisation for
-    // this section (prose, list, table, definitions, sub-headings, or a
-    // mix), then mirrors it faithfully in rich markdown. This produces
-    // notes that look like the original document instead of a generic
-    // topic+subtopics skeleton.
-    const knownSubtopics = t.subtopics.length > 0
-      ? `Suggested sub-sections (use these if they match the document, discover new ones if they don't):\n${t.subtopics.map(s => `  • "${s.title}"`).join('\n')}`
-      : 'Sub-sections unknown — discover them from the document.';
+    // ── Per-topic extraction prompt ───────────────────────────────
+    // Subtopics from the content map are pre-defined — the model's job
+    // is to find and copy verbatim content from the source for each one,
+    // NOT to re-structure or summarise the document.
+    const subtopicsOutline = t.subtopics.length > 0
+      ? t.subtopics.map(s => `  • "${s.title}"${s.summary ? ': ' + s.summary : ''}`).join('\n')
+      : '  • (discover 2–4 natural sub-sections from the source content)';
 
-    const prompt = `SUBJECT: "${topic}"
-SECTION: "${t.title}"
-Overview: ${t.summary}
-${knownSubtopics}
+    const contentInstruction = contextText.length >= BODY_THRESHOLD
+      ? `For each sub-section "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain that sub-section. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise. If the source uses bullet points, tables, or numbered lists, reproduce them fully.`
+      : `For each sub-section "content": write 4–6 clear, specific, factually accurate sentences based on the section overview and sub-section context provided.`;
 
-SOURCE CONTENT — copy this into the JSON below:
+    const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
+
+SUBJECT: "${topic}"
+
+SOURCE CONTENT (verbatim extract for this section):
 """
 ${contextText}
 """
 
-━━━ EXTRACTION RULES (read before writing) ━━━
+SECTION: "${t.title}"
+Overview: ${t.summary}
 
-⚠ DO NOT SUMMARISE. DO NOT GIVE AN OVERVIEW. DO NOT PARAPHRASE.
-Your job is to COPY the source content into the JSON format — not describe it.
+Sub-sections to produce:
+${subtopicsOutline}
 
-If the source has 8 bullet points → your output must have all 8 bullet points.
-If the source has a table → your output must have the full table.
-If the source has a numbered list → copy every numbered item.
-If the source has definitions → copy every definition verbatim.
-Your "content" fields must be at least as long as the corresponding source section.
+INSTRUCTIONS:
+${contentInstruction}
 
-FORMAT RULES:
-• Mirror the document's own structure: prose → paragraphs, rules → "1." lists,
-  items → "- " bullets, term+definition → **Term** — definition, table → markdown table.
-• Split into 1–5 sub-sections using the document's own headings, or logical groupings
-  ("Definition", "Rules", "Examples", "Types", "Key Points") when the source has no headings.
-• Bold (**term**) every key term, use markdown tables for tabular data.
+For each sub-section also produce:
+- "keyTerms" (top level, not per sub-section): 3–5 key terms with document-grounded definitions.
+- "whyItMatters": one sentence on why this section matters to a student.
+
+Rules:
+- Produce content for EVERY sub-section listed above — do not skip any.
+- Sub-section titles must match the outline exactly (or be the ones you discovered if none were listed).
+- Content must come from the source, not be invented.
 
 Return ONLY valid JSON — no markdown fences, no extra text:
 {
@@ -2135,12 +2136,12 @@ Return ONLY valid JSON — no markdown fences, no extra text:
   "title": "${t.title}",
   "subtopics": [
     {
-      "title": "Sub-section name",
-      "content": "Full extracted content in markdown — every rule, definition, example, bullet and table row from the source"
+      "title": "Sub-section name (must match outline)",
+      "content": "Verbatim sentences / bullet points / table from the source"
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "One sentence on why this section matters to a student."
+  "whyItMatters": "..."
 }`;
 
     try {
@@ -2153,10 +2154,7 @@ Return ONLY valid JSON — no markdown fences, no extra text:
         model:    SMART_MODEL,
         contents: [{ role: 'user', parts: topicParts }],
         config:   {
-          systemInstruction:
-            'You are a verbatim document content extractor. ' +
-            'Copy every rule, definition, example, bullet point, and table row from the source into the JSON. ' +
-            'Never summarise. Never give overviews. Return only valid JSON.',
+          systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
           maxOutputTokens:   8000,
           temperature:       0.1,
           thinkingConfig:    { thinkingBudget: 0 },
@@ -2230,17 +2228,20 @@ Return ONLY valid JSON — no markdown fences, no extra text:
         onProgress?.(`Pass 2 — ${gi + 1} of ${gaps.length}: ${gap.title}…`);
 
         // Use the same adaptive approach for gap sections.
-        const gapPrompt = `SUBJECT: "${topic}"
+        const gapPrompt = `You are an expert educational content organiser. Extract and reorganise content from the original document — not rewrite it.
+
+SUBJECT: "${topic}"
 SECTION: "${gap.title}"
 Overview: ${gap.summary}
 
-SOURCE TEXT — copy this into the JSON below:
+SOURCE TEXT (verbatim extract from the document):
 """
 ${gap.rawContent}
 """
 
-⚠ DO NOT SUMMARISE. Copy every rule, definition, example, bullet, and table row from the source verbatim into the JSON.
-Split into 1–4 sub-sections using the document's own headings or logical groupings. Use markdown that mirrors the source (bold, bullets, numbered lists, tables).
+INSTRUCTIONS:
+Find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE TEXT above for each sub-section. Copy the EXACT words — do NOT paraphrase, reword, or summarise. If the source uses bullet points, tables, or numbered lists, reproduce them fully.
+Divide into 1–4 natural sub-sections using the document's own headings or logical groupings.
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -2249,7 +2250,7 @@ Return ONLY valid JSON — no markdown fences:
   "subtopics": [
     {
       "title": "Sub-section name",
-      "content": "Full extracted content — every rule, example, bullet and table row from the source"
+      "content": "Verbatim sentences / bullets / table from the source"
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
@@ -2262,10 +2263,7 @@ Return ONLY valid JSON — no markdown fences:
             model:    SMART_MODEL,
             contents: [{ role: 'user', parts: [textPart(gapPrompt)] }],
             config:   {
-              systemInstruction:
-                'You are a verbatim document content extractor. ' +
-                'Copy every rule, definition, example, bullet point, and table row from the source into the JSON. ' +
-                'Never summarise. Never give overviews. Return only valid JSON.',
+              systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
               maxOutputTokens:   8000,
               temperature:       0.1,
               thinkingConfig:    { thinkingBudget: 0 },
