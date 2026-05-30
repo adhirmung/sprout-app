@@ -2617,13 +2617,31 @@ anchorConcepts: 3-5 ideas the student must grasp before the rest makes sense (sp
 hardSpots: 2-4 specific topics/concepts predicted to challenge THIS student given the subject type and their profile.
 profileInsights: MUST reference the learner's actual cognitive scores AND explain what they mean for studying THIS subject.`;
 
-  const raw = await generateText(
-    FAST_MODEL,
-    systemInstruction,
-    [textPart(prompt)],
-    900,
-    'generateStudyBrief',
-  );
+  // Use streaming internally to avoid Netlify's 26s edge-function timeout.
+  // Same pattern as generateDocumentDiagnostic — accumulate chunks, parse at end.
+  const client = getClient();
+  const stream = await client.models.generateContentStream({
+    model:    FAST_MODEL,
+    contents: [{ role: 'user', parts: [textPart(prompt)] }],
+    config:   {
+      systemInstruction,
+      maxOutputTokens: 900,
+      temperature:     0.3,
+      thinkingConfig:  { thinkingBudget: 0 },
+    },
+  });
+
+  let raw        = '';
+  let inTokens   = 0;
+  let outTokens  = 0;
+  for await (const chunk of stream) {
+    if (chunk.text) raw += chunk.text;
+    if (chunk.usageMetadata) {
+      inTokens  = chunk.usageMetadata.promptTokenCount     ?? inTokens;
+      outTokens = chunk.usageMetadata.candidatesTokenCount ?? outTokens;
+    }
+  }
+  void dbLogUsage(_currentUserId, 'generateStudyBrief', FAST_MODEL, inTokens, outTokens);
 
   const parsed = parseJson<StudyBrief>(raw);
   if (!parsed.approach || !Array.isArray(parsed.anchorConcepts)) {
