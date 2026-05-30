@@ -2106,40 +2106,33 @@ export async function streamCourseMaterial(
       ? `Suggested sub-sections (use these if they match the document, discover new ones if they don't):\n${t.subtopics.map(s => `  • "${s.title}"`).join('\n')}`
       : 'Sub-sections unknown — discover them from the document.';
 
-    const prompt = `You are a precise educational content extractor. Your task is to faithfully represent the content of one section from the original document.
-
-SUBJECT: "${topic}"
-
-SOURCE CONTENT (extract from the document — this section only):
-"""
-${contextText}
-"""
-
+    const prompt = `SUBJECT: "${topic}"
 SECTION: "${t.title}"
 Overview: ${t.summary}
 ${knownSubtopics}
 
-━━━ YOUR TASK IN 3 STEPS ━━━
+SOURCE CONTENT — copy this into the JSON below:
+"""
+${contextText}
+"""
 
-STEP 1 — DETECT THE SECTION'S NATURAL STRUCTURE:
-Look at how the document actually presents this section. Identify its format:
-  • Prose explanation       → use flowing paragraphs
-  • Numbered rules/steps   → use "1. " ordered list
-  • Unordered items        → use "- " bullet list
-  • Term–definition pairs  → use **Term** — definition pattern
-  • Tabular data           → use markdown table  (| Col | Col |\\n|---|---|\\n| val | val |)
-  • Named sub-headings     → create a sub-section for each heading
-  • Mixed formats          → combine any of the above
+━━━ EXTRACTION RULES (read before writing) ━━━
 
-STEP 2 — DIVIDE INTO 1–5 NATURAL SUB-SECTIONS:
-Use the document's own headings where they exist. Otherwise create logical groupings (e.g. "Overview", "How it works", "Key rules", "Examples"). Each sub-section title should be meaningful and concise.
+⚠ DO NOT SUMMARISE. DO NOT GIVE AN OVERVIEW. DO NOT PARAPHRASE.
+Your job is to COPY the source content into the JSON format — not describe it.
 
-STEP 3 — EXTRACT ALL CONTENT:
-For each sub-section, extract EVERY piece of relevant information from the source:
-  - Every definition, rule, exception, example, and note
-  - Every item in lists and every row in tables
-  - Exact wording from the document — do NOT paraphrase or summarise
-  - Use markdown formatting that matches the document's own style
+If the source has 8 bullet points → your output must have all 8 bullet points.
+If the source has a table → your output must have the full table.
+If the source has a numbered list → copy every numbered item.
+If the source has definitions → copy every definition verbatim.
+Your "content" fields must be at least as long as the corresponding source section.
+
+FORMAT RULES:
+• Mirror the document's own structure: prose → paragraphs, rules → "1." lists,
+  items → "- " bullets, term+definition → **Term** — definition, table → markdown table.
+• Split into 1–5 sub-sections using the document's own headings, or logical groupings
+  ("Definition", "Rules", "Examples", "Types", "Key Points") when the source has no headings.
+• Bold (**term**) every key term, use markdown tables for tabular data.
 
 Return ONLY valid JSON — no markdown fences, no extra text:
 {
@@ -2148,7 +2141,7 @@ Return ONLY valid JSON — no markdown fences, no extra text:
   "subtopics": [
     {
       "title": "Sub-section name",
-      "content": "Rich markdown — bullets, numbered lists, tables, bold terms, paragraphs — whatever fits this section"
+      "content": "Full extracted content in markdown — every rule, definition, example, bullet and table row from the source"
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
@@ -2165,7 +2158,10 @@ Return ONLY valid JSON — no markdown fences, no extra text:
         model:    NOTES_MODEL, // 2.0-flash: no thinking → first-token always <5s
         contents: [{ role: 'user', parts: topicParts }],
         config:   {
-          systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+          systemInstruction:
+            'You are a verbatim document content extractor. ' +
+            'Copy every rule, definition, example, bullet point, and table row from the source into the JSON. ' +
+            'Never summarise. Never give overviews. Return only valid JSON.',
           maxOutputTokens:   8000,
           temperature:       0.1,
         },
@@ -2238,18 +2234,17 @@ Return ONLY valid JSON — no markdown fences, no extra text:
         onProgress?.(`Pass 2 — ${gi + 1} of ${gaps.length}: ${gap.title}…`);
 
         // Use the same adaptive approach for gap sections.
-        const gapPrompt = `You are a precise educational content extractor. Extract and faithfully represent this section from the document.
-
-SUBJECT: "${topic}"
+        const gapPrompt = `SUBJECT: "${topic}"
 SECTION: "${gap.title}"
 Overview: ${gap.summary}
 
-SOURCE TEXT (verbatim extract from the document):
+SOURCE TEXT — copy this into the JSON below:
 """
 ${gap.rawContent}
 """
 
-DETECT the section's natural structure (prose, numbered list, bullets, table, definitions, sub-headings, or a mix), then create 1–4 sub-sections that mirror the document's own organisation. Extract ALL content verbatim — every rule, example, item, and table row. Use rich markdown (bold, bullets, numbered lists, tables) to preserve the original's formatting.
+⚠ DO NOT SUMMARISE. Copy every rule, definition, example, bullet, and table row from the source verbatim into the JSON.
+Split into 1–4 sub-sections using the document's own headings or logical groupings. Use markdown that mirrors the source (bold, bullets, numbered lists, tables).
 
 Return ONLY valid JSON — no markdown fences:
 {
@@ -2258,7 +2253,7 @@ Return ONLY valid JSON — no markdown fences:
   "subtopics": [
     {
       "title": "Sub-section name",
-      "content": "Rich markdown content — bullets, tables, bold terms, paragraphs as needed"
+      "content": "Full extracted content — every rule, example, bullet and table row from the source"
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
@@ -2271,7 +2266,10 @@ Return ONLY valid JSON — no markdown fences:
             model:    NOTES_MODEL, // no-thinking model keeps gap-fill within 26s
             contents: [{ role: 'user', parts: [textPart(gapPrompt)] }],
             config:   {
-              systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+              systemInstruction:
+                'You are a verbatim document content extractor. ' +
+                'Copy every rule, definition, example, bullet point, and table row from the source into the JSON. ' +
+                'Never summarise. Never give overviews. Return only valid JSON.',
               maxOutputTokens:   8000,
               temperature:       0.1,
             },
