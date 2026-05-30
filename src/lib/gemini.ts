@@ -56,6 +56,9 @@ function textPart(text: string): Part {
 // Non-streaming for all JSON tasks (streaming only needed for chat).
 // Logs token usage fire-and-forget.
 
+// Uses streaming internally so chunks keep the Netlify edge-function
+// connection alive — preventing the 26s timeout on slow responses.
+// All callers continue to receive the full accumulated text string.
 async function generateText(
   model:             string,
   systemInstruction: string,
@@ -65,28 +68,30 @@ async function generateText(
 ): Promise<string> {
   const client = getClient();
 
-  const response = await client.models.generateContent({
+  const stream = await client.models.generateContentStream({
     model,
     contents: [{ role: 'user', parts }],
     config:   {
       systemInstruction,
       maxOutputTokens,
-      temperature: 0.1,
-      // Disable thinking tokens — keeps responses under Netlify's 26s edge-function limit.
-      // 2.5-pro has mandatory thinking (60s+); 2.5-flash has optional thinking.
+      temperature:    0.1,
       thinkingConfig: { thinkingBudget: 0 },
     },
   });
 
-  const text = response.text ?? '';
+  let text      = '';
+  let inTokens  = 0;
+  let outTokens = 0;
 
-  const usage = response.usageMetadata;
-  void dbLogUsage(
-    _currentUserId, fnName, model,
-    usage?.promptTokenCount     ?? 0,
-    usage?.candidatesTokenCount ?? 0,
-  );
+  for await (const chunk of stream) {
+    if (chunk.text) text += chunk.text;
+    if (chunk.usageMetadata) {
+      inTokens  = chunk.usageMetadata.promptTokenCount     ?? inTokens;
+      outTokens = chunk.usageMetadata.candidatesTokenCount ?? outTokens;
+    }
+  }
 
+  void dbLogUsage(_currentUserId, fnName, model, inTokens, outTokens);
   return text;
 }
 
