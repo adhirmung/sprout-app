@@ -484,8 +484,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     setAuditLoading(true);
     let audit: ContentAudit | null = null;
     try {
-      const auditPdf = content ? null : resolvedPdf;
-      audit = await generateContentAudit(topic, content, auditPdf, initialMap);
+      // Prefer already-extracted plain text over raw PDF binary to avoid proxy timeouts.
+      // extractedText is populated before runMapEnhancement is ever called, so this
+      // eliminates the large base64 payload that pushes requests past the 26s edge-fn limit.
+      const auditText = content ?? extractedText;
+      const auditPdf  = auditText ? null : resolvedPdf;
+      audit = await generateContentAudit(topic, auditText, auditPdf, initialMap);
       Store.set(auditKey, audit);
       setContentAudit(audit);
       if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
@@ -559,7 +563,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     if (!audit) {
       try {
         setAuditLoading(true);
-        audit = await generateContentAudit(topic, content, content ? null : resolvedPdf, map, images ?? undefined);
+        const boostAuditText = content ?? extractedText;
+        audit = await generateContentAudit(topic, boostAuditText, boostAuditText ? null : resolvedPdf, map, images ?? undefined);
         Store.set(`audit:${sourceKey}`, audit);
         setContentAudit(audit);
         if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
