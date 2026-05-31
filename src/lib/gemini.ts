@@ -220,109 +220,24 @@ export async function streamCardChat(
   void dbLogUsage(_currentUserId, 'streamCardChat', FAST_MODEL, inputTokens, outputTokens);
 }
 
-// ── Document classifier ───────────────────────────────────────
-// Lightweight first pass: one fast Gemini call returns a JSON profile of
-// the document so the extraction + notes prompts can self-adapt.
-
-export interface DocClassification {
-  /** Visual layout / format of the document */
-  docType:        'slideshow' | 'textbook' | 'worksheet' | 'article' | 'reference';
-  /** How image-heavy the document is */
-  diagramDensity: 'none' | 'low' | 'high';
-  /** Whether the document contains data tables worth recreating */
-  tableDensity:   'none' | 'low' | 'high';
-  /** Primary language */
-  language:       string;
-  /** Approximate reading/grade level, e.g. "Grade 9–10" */
-  readingLevel:   string;
-  /** Subject area, e.g. "Biology" */
-  subject:        string;
-}
-
-async function classifyDocument(pdfBase64: string): Promise<DocClassification> {
-  const prompt = `Analyse this document and return a JSON classification. Return ONLY valid JSON — no markdown, no extra text:
-{
-  "docType": "slideshow",
-  "diagramDensity": "high",
-  "tableDensity": "low",
-  "language": "English",
-  "readingLevel": "Grade 9-10",
-  "subject": "Biology"
-}
-
-Definitions:
-- docType: "slideshow" = presentation slides with sparse text per slide; "textbook" = structured chapters with headings and body paragraphs; "worksheet" = exercises/questions; "article" = flowing prose; "reference" = vocabulary lists, grammar tables, or index content
-- diagramDensity: "none" = no diagrams; "low" = a few diagrams but text is dominant; "high" = many diagrams, clipart, illustrations, or anatomy images
-- tableDensity: "none" = no data tables; "low" = 1–3 tables; "high" = many data tables
-- readingLevel: approximate grade level of the text (e.g. "Grade 7-8", "Grade 10-12")
-- subject: the academic subject area (e.g. "Biology", "History", "Mathematics", "English")`;
-
-  try {
-    const raw = await generateText(
-      FAST_MODEL,
-      'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-      [pdfPart(pdfBase64), textPart(prompt)],
-      256,
-      'classifyDocument',
-    );
-    const parsed = parseJson<DocClassification>(raw);
-    // Validate required fields; fall back to safe defaults if missing
-    return {
-      docType:        parsed.docType        ?? 'textbook',
-      diagramDensity: parsed.diagramDensity ?? 'low',
-      tableDensity:   parsed.tableDensity   ?? 'low',
-      language:       parsed.language       ?? 'English',
-      readingLevel:   parsed.readingLevel   ?? 'Grade 8-10',
-      subject:        parsed.subject        ?? 'General',
-    };
-  } catch {
-    return { docType: 'textbook', diagramDensity: 'low', tableDensity: 'low', language: 'English', readingLevel: 'Grade 8-10', subject: 'General' };
-  }
-}
-
 // ── PDF extractor ─────────────────────────────────────────────
-// 1. Classifies the document (doc type, diagram/table density, subject, level).
-// 2. Streams the full text extraction with a prompt adapted to the doc type.
-// Returns both the text and the classification so callers can adapt downstream
-// prompts (notes, map, feed) without re-analysing the PDF.
-
-export interface ExtractedDocument {
-  text:           string;
-  classification: DocClassification;
-}
+// Streams the full text extraction from a PDF.
+// Returns the extracted text string directly.
 
 export async function extractPdfContent(
   pdfBase64: string,
   onChunk?:  (accumulated: string, newChunk: string) => void,
-): Promise<ExtractedDocument> {
+): Promise<string> {
   const client = getClient();
-
-  // ── Step 1: classify (fast, non-streaming) ────────────────────
-  const classification = await classifyDocument(pdfBase64);
-
-  // ── Step 2: build an extraction prompt tuned to the doc type ──
-  const isSlideshow     = classification.docType === 'slideshow';
-  const heavyDiagrams   = classification.diagramDensity === 'high';
-  const hasTables       = classification.tableDensity   !== 'none';
-
-  const diagramRule = isSlideshow || heavyDiagrams
-    ? `- DIAGRAMS & ILLUSTRATIONS: skip entirely — this document has many visual elements; extract ONLY written text, headings, and bullet points
-- DIAGRAM LABELS: if a diagram has labelled parts (arrows pointing to organs, structures, etc.), extract ONLY the text labels as a simple bullet list — do NOT describe the diagram`
-    : `- DIAGRAMS & ILLUSTRATIONS: skip decorative images and clipart — do NOT describe or caption them
-- DIAGRAM LABELS: if a diagram has labelled parts, extract ONLY the text labels as a simple bullet list`;
-
-  const tableRule = hasTables
-    ? `- DATA TABLES: recreate as Markdown tables (| col | col |\\n|---|---|\\n| val | val |)`
-    : `- DATA TABLES: if any data tables exist, recreate as Markdown tables (| col | col | format)`;
 
   const prompt = `Extract the COMPLETE text content of this document. Include every heading, subheading, body paragraph, and table.
 - Use # for main headings, ## for subheadings, ### for smaller headings
 - Reproduce ALL body text verbatim — do not skip, summarise, or paraphrase any written content
-${tableRule}
-${diagramRule}
+- DATA TABLES: recreate as Markdown tables (| col | col |\n|---|---|\n| val | val |)
+- DIAGRAMS & ILLUSTRATIONS: skip entirely — do NOT describe, caption, or transcribe decorative images, clipart, or anatomy diagrams
+- DIAGRAM LABELS: if a diagram has labelled parts (e.g. arrows pointing to parts of an organ), extract ONLY the text labels as a simple bullet list — do not describe the diagram itself
 - Do NOT add commentary, notes, or your own interpretation`;
 
-  // ── Step 3: stream the extraction ─────────────────────────────
   const stream = await client.models.generateContentStream({
     model:    SMART_MODEL,
     contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
@@ -351,7 +266,7 @@ ${diagramRule}
   }
 
   void dbLogUsage(_currentUserId, 'extractPdfContent', SMART_MODEL, inputTokens, outputTokens);
-  return { text: accumulated, classification };
+  return accumulated;
 }
 
 // ── Types ─────────────────────────────────────────────────────
@@ -389,7 +304,7 @@ export interface SubtopicQuiz {
 export interface TopicReading {
   topicId:       string;
   title:         string;
-  subtopics:     { title: string; content: string; bullets?: string[]; quiz?: SubtopicQuiz }[];
+  subtopics:     { title: string; content?: string; bullets?: string[]; quiz?: SubtopicQuiz }[];
   keyTerms:      TopicKeyTerm[];
   whyItMatters?: string;
 }
@@ -466,11 +381,6 @@ export interface VisualSet {
   components: VisualComponent[];
 }
 
-export interface ContentAudit {
-  coverageScore:  number;
-  missedConcepts: string[];
-  suggestions:    string[];
-}
 
 export interface PracticeQuestion {
   id:            string;
@@ -1360,6 +1270,78 @@ export async function generateContentMap(
   return generateMapFromModel(topic, contentText, pdfBase64, gapFill, images);
 }
 
+// ── Topic Bullets ─────────────────────────────────────────────
+// Single-call replacement for the old multi-call streamCourseMaterial.
+// Generates 2-3 bullet points per subtopic for ALL topics in one request.
+// Cost: ~$0.004/session vs ~$0.03 for old approach.
+
+export interface TopicBullets {
+  topicId:   string;
+  title:     string;
+  subtopics: { title: string; bullets: string[] }[];
+  keyTerms:  TopicKeyTerm[];
+}
+
+export async function generateTopicBullets(
+  extractedText: string,
+  contentMap:    ContentMap,
+): Promise<TopicBullets[]> {
+  const TEXT_LIMIT  = 120_000;
+  const textSlice   = extractedText.slice(0, TEXT_LIMIT);
+
+  const topicListing = contentMap.topics.map(t =>
+    `Topic (id: "${t.id}"): "${t.title}"\n` +
+    (t.subtopics.length > 0
+      ? t.subtopics.map(s => `  - "${s.title}"`).join('\n')
+      : '  (no subtopics — treat the topic itself as the single section)')
+  ).join('\n\n');
+
+  const prompt = `You are an expert educator creating concise study notes.
+
+DOCUMENT TEXT:
+${textSlice}
+
+TOPIC STRUCTURE:
+${topicListing}
+
+TASK:
+For EVERY topic and subtopic listed above, generate study bullets based solely on the document text.
+
+Rules:
+- 2–3 bullet points per subtopic. Each bullet is 1 clear, factual sentence.
+- For topics with no subtopics, generate 2–3 bullets for the topic itself.
+- keyTerms: 3–6 important terms per topic with a short definition (≤ 15 words).
+- Use ONLY information present in the document text — do not invent or generalise.
+- Preserve the exact topicId values from the structure above.
+
+Return ONLY valid JSON — no markdown, no extra text:
+{
+  "topics": [
+    {
+      "topicId": "<exact id from structure>",
+      "title": "<topic title>",
+      "subtopics": [
+        { "title": "<subtopic title>", "bullets": ["bullet 1", "bullet 2", "bullet 3"] }
+      ],
+      "keyTerms": [
+        { "term": "Term", "definition": "Short definition" }
+      ]
+    }
+  ]
+}`;
+
+  const raw = await generateText(
+    SMART_MODEL,
+    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+    [textPart(prompt)],
+    8000,
+    'generateTopicBullets',
+  );
+
+  const parsed = parseJson<{ topics: TopicBullets[] }>(raw);
+  return Array.isArray(parsed.topics) ? parsed.topics : [];
+}
+
 // ── AI Summary (replaces old Read view) ───────────────────────
 //
 // Generates a creative, freely-structured summary of the document.
@@ -1380,7 +1362,7 @@ export async function generateAISummary(
   if (courseMaterial && courseMaterial.topics.length > 0) {
     sourceBlock = courseMaterial.topics.map(t =>
       `## ${t.title}${t.whyItMatters ? `\n_${t.whyItMatters}_` : ''}\n` +
-      t.subtopics.map(s => `### ${s.title}\n${s.content}`).join('\n\n')
+      t.subtopics.map(s => `### ${s.title}\n${s.content ?? ''}`).join('\n\n')
     ).join('\n\n---\n\n');
   } else if (contentMap && contentText) {
     // No notes yet — use map structure + raw text slice
@@ -1667,68 +1649,6 @@ export async function generateVisualComponents(
   return { components: [dynamicVisual] };
 }
 
-// ── Content audit ─────────────────────────────────────────────
-
-export async function generateContentAudit(
-  topic:       string,
-  contentText: string | null,
-  pdfBase64:   string | null,
-  contentMap:  ContentMap,
-  images?:     string[],
-): Promise<ContentAudit> {
-  const hasPdf    = !!pdfBase64;
-  const hasImages = (images?.length ?? 0) > 0;
-
-  const mapSummary = contentMap.topics.map(t =>
-    `• ${t.title}\n${t.subtopics.map(s => `  – ${s.title}: ${s.summary}`).join('\n')}`
-  ).join('\n');
-
-  const prompt = `You are a curriculum quality auditor. Compare the original document to the generated topic map and identify exactly what was missed.
-
-Topic: "${topic}"
-${sourceBlock(contentText, hasPdf, hasImages)}
-
-GENERATED TOPIC MAP:
-Synthesis: ${contentMap.synthesis}
-
-Topics covered:
-${mapSummary}
-
-Task: List EVERY important concept, named entity, specific date, named person/mission/device, specific statistic, key process, or testable fact from the original document that is NOT represented in the topic map above.
-
-Be very specific. If nothing is missed, return an empty array.
-
-Give a coverageScore 0–100: what percentage of the document's important, testable content is represented in the map.
-Give 1–3 concrete suggestions for what the map should add or emphasise.
-
-Return ONLY valid JSON — no markdown:
-{
-  "coverageScore": <0–100>,
-  "missedConcepts": ["Specific missed item with brief context"],
-  "suggestions":    ["Actionable suggestion"]
-}`;
-
-  const parts: Part[] = pdfBase64
-    ? [pdfPart(pdfBase64), textPart(prompt)]
-    : hasImages
-    ? [...images!.map(b64 => imagePart(b64)), textPart(prompt)]
-    : [textPart(prompt)];
-
-  const raw = await generateText(
-    SMART_MODEL,
-    'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-    parts,
-    2000,
-    'generateContentAudit',
-  );
-
-  const parsed = parseJson<ContentAudit>(raw);
-  if (typeof parsed.coverageScore !== 'number' || !Array.isArray(parsed.missedConcepts)) {
-    throw new Error('Invalid audit response.');
-  }
-  return parsed;
-}
-
 // ── Practice quiz ─────────────────────────────────────────────
 
 export async function generatePracticeQuiz(
@@ -1742,7 +1662,7 @@ export async function generatePracticeQuiz(
 
   const contentSummary = documentReading.topics.map(t =>
     `TOPIC "${t.title}" (topicId: "${t.topicId}"):\n` +
-    t.subtopics.map(s => `  - ${s.title}: ${s.content}`).join('\n') +
+    t.subtopics.map(s => `  - ${s.title}: ${s.content ?? ''}`).join('\n') +
     `\n  Key terms: ${t.keyTerms.map(k => k.term).join(', ')}`
   ).join('\n\n');
 
@@ -1950,461 +1870,23 @@ Return ONLY valid JSON — no markdown fences:
   return { topics: allTopics };
 }
 
-// ── Streaming course material (new architecture) ──────────────
-// Generates notes one topic at a time using extractedText (no PDF binary).
-// Each call is text-only + small output ≈ 3–5 s — well within the 26s limit.
-// Topics stream in progressively; the UI can switch to 'course' after topic 1.
-
-// ── Notes gap detector (Pass 2) ───────────────────────────────
-//
-// After Pass 1 has generated notes for every content-map topic, this
-// streams a coverage-audit call: it shows the model the full document
-// plus every covered topic/subtopic title and asks for any significant
-// sections that were missed.  Each gap is returned with its verbatim
-// source text already extracted so the fill step stays small and fast.
-
-interface NoteGap {
-  title:      string;
-  summary:    string;
-  rawContent: string; // verbatim text the model pulled from the doc for this gap
-}
-
-async function detectNotesGaps(
-  topic:         string,
-  textSlice:     string,
-  coveredTopics: TopicReading[],
-): Promise<NoteGap[]> {
-  const coveredList = coveredTopics.flatMap(t =>
-    [`• ${t.title}`, ...t.subtopics.map(s => `  – ${s.title}`)]
-  ).join('\n');
-
-  const prompt = `You are a curriculum coverage auditor. Notes have already been generated for the topics listed below. Your job is to find important content sections in the original document that were NOT covered.
-
-SUBJECT: "${topic}"
-
-ALREADY COVERED (do NOT re-generate these):
-${coveredList}
-
-SOURCE DOCUMENT:
-"""
-${textSlice}
-"""
-
-TASK:
-1. Read the document carefully.
-2. Identify any significant content section, chapter, or named topic that appears in the document but is NOT represented in the already-covered list above.
-3. For each uncovered section return:
-   - "title": a concise title for the missing section
-   - "summary": one sentence describing what it covers
-   - "rawContent": copy the COMPLETE relevant text from the source for this section — every definition, rule, example, list item, and table row. Do NOT paraphrase or summarise.
-
-Only include genuinely significant educational content. Skip introductions without content, decorative headings, page numbers, and instructions to students.
-If nothing is missed return an empty "gaps" array.
-Cap output at 5 gaps maximum.
-
-Return ONLY valid JSON — no markdown:
-{
-  "gaps": [
-    {
-      "title": "Missing section title",
-      "summary": "One sentence description.",
-      "rawContent": "Complete verbatim text from the document for this section…"
-    }
-  ]
-}`;
-
-  const client = getClient();
-  const stream = await client.models.generateContentStream({
-    model:    SMART_MODEL,
-    contents: [{ role: 'user', parts: [textPart(prompt)] }],
-    config:   {
-      systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-      maxOutputTokens:   8000,
-      temperature:       0.0,
-      thinkingConfig:    { thinkingBudget: 0 },
-    },
-  });
-
-  let raw = '';
-  for await (const chunk of stream) {
-    if (chunk.text) raw += chunk.text;
-  }
-
-  try {
-    const parsed = parseJson<{ gaps: NoteGap[] }>(raw);
-    return Array.isArray(parsed.gaps) ? parsed.gaps.slice(0, 5) : [];
-  } catch {
-    console.error('[detectNotesGaps] parse error — skipping Pass 2:', raw.slice(0, 300));
-    return [];
-  }
-}
-
-
-// ── Content-map topic normaliser ──────────────────────────────
-// Applies the same "repeated top-level title → subtopic" heuristic to an
-// already-assembled ContentMap.topics array.  This is necessary because the
-// content map may have been loaded from cache (Supabase/localStorage) and
-// therefore never passed through the heading-level normaliser that runs
-// during generateContentMap.
-//
-// Example: cached map has 61 flat topics (Contents + 20×TEXT + 20×Translation
-// + 20×Purport).  After this function, Translation and Purport become
-// subtopics of their preceding unique TEXT topic, giving 21 topics.
-//
-// Idempotent: if the map is already correctly structured (no repeated
-// top-level titles), it passes through unchanged.
-function normaliseTopicList(topics: Topic[]): Topic[] {
-  // Count occurrences of each title at the top level
-  const freq = new Map<string, number>();
-  for (const t of topics) freq.set(t.title, (freq.get(t.title) ?? 0) + 1);
-
-  const repeated = new Set(
-    [...freq.entries()].filter(([, n]) => n >= 2).map(([title]) => title),
-  );
-
-  if (repeated.size === 0) return topics; // already correct — nothing to do
-
-  const result: Topic[] = [];
-  let topicIdx = 0;
-
-  for (const t of topics) {
-    if (!repeated.has(t.title)) {
-      // Unique title → keep as a top-level topic (preserve any existing subtopics)
-      topicIdx++;
-      result.push({ ...t, subtopics: [...t.subtopics] });
-    } else if (result.length > 0) {
-      // Repeated title → demote to subtopic of the most recent unique topic,
-      // but only if that subtopic hasn't been added yet (avoid duplicates)
-      const parent = result[result.length - 1];
-      if (!parent.subtopics.some(s => s.title === t.title)) {
-        parent.subtopics.push({
-          id:      `${parent.id}s${parent.subtopics.length + 1}`,
-          title:   t.title,
-          summary: t.summary,
-        });
-      }
-    }
-    // If repeated.has(t.title) and result is empty → nothing to parent it to, skip
-  }
-
-  return result;
-}
-
-export async function streamCourseMaterial(
-  topic:           string,
-  extractedText:   string,
-  contentMap:      ContentMap,
-  onTopicComplete: (tr: TopicReading) => void,
-  onProgress?:     (msg: string) => void,
-  images?:         string[],
-  classification?: DocClassification,
-): Promise<DocumentReading> {
-  const hasImages = (images?.length ?? 0) > 0;
-  const allTopics:  TopicReading[] = [];
-
-  // ── Normalise the topic list at generation time ───────────────
-  // The contentMap might come from cache (generated before the heading
-  // normaliser was deployed).  Re-apply the fix here so every run — fresh
-  // or cached — produces a correctly-structured topic list.
-  const workTopics  = normaliseTopicList(contentMap.topics);
-  const totalTopics = workTopics.length;
-
-  // Cap the full text so the per-topic slicer works on a bounded string
-  const TEXT_LIMIT  = 150_000;
-  const textSlice   = extractedText.slice(0, TEXT_LIMIT);
-
-  // ── Classification-aware content rules ─────────────────────────
-  // Diagrams: be aggressive about skipping if the doc is visual-heavy
-  const isVisualHeavy = classification?.docType === 'slideshow' || classification?.diagramDensity === 'high';
-  const diagramContentRule = isVisualHeavy
-    ? `- This document is visual-heavy (${classification?.docType ?? 'slideshow'}). SKIP all diagram descriptions, illustration references, clipart captions, and any text that describes a picture or image
-- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
-- Extract ONLY written prose, bullet points, headings, and table data`
-    : `- SKIP diagram descriptions, illustration references, decorative image captions, and visual-only labels
-- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
-- All content must be actual written text from the document — not descriptions of pictures`;
-
-  const docCtx = classification
-    ? `Document: ${classification.subject} — ${classification.docType} (${classification.readingLevel})`
-    : '';
-
-  for (let i = 0; i < totalTopics; i++) {
-    const t = workTopics[i];
-    onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
-
-    const hasSubtopics = t.subtopics.length > 0;
-
-    const prompt = hasSubtopics
-      ? `You are an expert educational content organiser. FORMAT and EXTRACT content from the original document — do NOT rewrite or paraphrase.
-${docCtx ? `\n${docCtx}` : ''}
-SUBJECT: "${topic}"
-SOURCE CONTENT (verbatim from the uploaded document):
-"""
-${textSlice}
-"""
-
-TOPIC OUTLINE:
-Topic (topicId: "${t.id}", title: "${t.title}"):
-Overview: ${t.summary}
-Subtopics:
-${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}
-
-INSTRUCTIONS:
-For each subtopic "content": find and copy ALL relevant content from the SOURCE CONTENT that covers this subtopic — every definition, rule, example, table row, and list item. Do NOT limit to a fixed number of sentences. Get everything the document says about this subtopic. Preserve bullet lists and numbered lists where the source uses them.
-
-Content rules:
-${diagramContentRule}
-
-Also:
-- "keyTerms": 3–5 key terms with clear, document-grounded definitions.
-- "whyItMatters": one sentence on why this topic matters to a student.
-
-Rules: subtopic titles must match the outline EXACTLY; all content must come from the document.
-
-Return ONLY valid JSON — no markdown fences:
-{
-  "topicId": "${t.id}",
-  "title": "${t.title}",
-  "subtopics": [
-    {
-      "title": "Subtopic name (must match outline exactly)",
-      "bullets": ["Key point 1 (max 15 words)", "Key point 2 (max 15 words)", "Key point 3 (max 15 words)"],
-      "content": "..."
-    }
-  ],
-  "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "..."
-}
-
-bullets = exactly 2–3 short key points (max 15 words each) that summarise this subtopic for a student who needs a quick overview. content = the full verbatim detail used for testing.`
-      : `You are an expert educational content organiser. EXTRACT the complete content for this reference section from the original document.
-${docCtx ? `\n${docCtx}` : ''}
-SUBJECT: "${topic}"
-SOURCE CONTENT (verbatim from the uploaded document):
-"""
-${textSlice}
-"""
-
-REFERENCE SECTION: "${t.title}"
-Overview: ${t.summary}
-
-INSTRUCTIONS:
-This is a reference section (vocabulary list, conjugation table, synonym/antonym list, word list, or similar). Find ALL content for this section in the source and copy it completely.
-
-Create 1–3 natural groupings as subtopics (e.g. alphabetical ranges, grammatical groupings, or thematic clusters) and copy the COMPLETE content from the source into them — every entry, every table row, every word, every item. Do NOT omit or summarise anything.
-
-Content rules:
-${diagramContentRule}
-
-Also:
-- "keyTerms": 2–3 key terms.
-- "whyItMatters": one sentence on why this section helps students.
-
-Return ONLY valid JSON — no markdown fences:
-{
-  "topicId": "${t.id}",
-  "title": "${t.title}",
-  "subtopics": [
-    {
-      "title": "Natural grouping name",
-      "bullets": ["Key point 1 (max 15 words)", "Key point 2 (max 15 words)"],
-      "content": "Complete content from the source for this group — every entry, every item."
-    }
-  ],
-  "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "..."
-}
-
-bullets = 2–3 short key points (max 15 words each) summarising this group. content = full verbatim detail.`;
-
-    try {
-      const client = getClient();
-      // For image-based documents, pass images as inline data alongside the prompt
-      const topicParts: Part[] = hasImages && !extractedText
-        ? [...images!.map(b64 => imagePart(b64)), textPart(prompt)]
-        : [textPart(prompt)];
-      const stream = await client.models.generateContentStream({
-        model:    SMART_MODEL,
-        contents: [{ role: 'user', parts: topicParts }],
-        config:   {
-          systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-          maxOutputTokens:   8000,
-          temperature:       0.1,
-          thinkingConfig:    { thinkingBudget: 0 },
-        },
-      });
-
-      let raw          = '';
-      let inputTokens  = 0;
-      let outputTokens = 0;
-
-      for await (const chunk of stream) {
-        const chunkText = chunk.text ?? '';
-        if (chunkText) raw += chunkText;
-        if (chunk.usageMetadata) {
-          inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
-          outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
-        }
-      }
-
-      void dbLogUsage(_currentUserId, 'streamCourseMaterial', SMART_MODEL, inputTokens, outputTokens);
-
-      const parsed = parseJson<TopicReading>(raw);
-
-      // ── Sanitise before touching the UI ──────────────────────
-      // Filter to subtopics that have the two required fields:
-      //   • title   — non-empty string
-      //   • content — non-empty string
-      // quiz is now optional (generated on-demand via "Test Me")
-      const validSubtopics = (parsed.subtopics ?? []).filter(s =>
-        s?.title && typeof s.title === 'string' && s.title.length > 0 &&
-        typeof s.content === 'string' && s.content.length > 0,
-      );
-
-      if (validSubtopics.length === 0) {
-        console.error(`[streamCourseMaterial] topic "${t.title}" — no valid subtopics after sanitisation`);
-        continue;
-      }
-
-      const tr: TopicReading = {
-        ...parsed,
-        topicId:      t.id,
-        title:        t.title,
-        subtopics:    validSubtopics,
-        keyTerms:     Array.isArray(parsed.keyTerms) ? parsed.keyTerms : [],
-        whyItMatters: parsed.whyItMatters ?? '',
-      };
-      allTopics.push(tr);
-      onTopicComplete(tr);
-    } catch (e) {
-      console.error(`[streamCourseMaterial] topic "${t.title}" error:`, e);
-      // continue — partial results are better than nothing
-    }
-  }
-
-  if (allTopics.length === 0) throw new Error('Failed to generate course material. Please retry.');
-
-  // ── Pass 2: gap detection + fill ──────────────────────────────
-  // Ask the model what significant content from the document wasn't
-  // covered in Pass 1, then generate proper TopicReadings for each gap.
-  // Uses streaming throughout — no Netlify timeout risk.
-  try {
-    onProgress?.('Pass 2 — Checking for missed content…');
-    const gaps = await detectNotesGaps(topic, textSlice, allTopics);
-
-    if (gaps.length > 0) {
-      onProgress?.(`Pass 2 — Found ${gaps.length} uncovered section${gaps.length > 1 ? 's' : ''} — filling…`);
-
-      for (let gi = 0; gi < gaps.length; gi++) {
-        const gap    = gaps[gi];
-        const gapId  = `gap${gi + 1}`;
-        onProgress?.(`Pass 2 — ${gi + 1} of ${gaps.length}: ${gap.title}…`);
-
-        // Use the same adaptive approach for gap sections.
-        const gapPrompt = `You are an expert educational content organiser. Extract and reorganise content from the original document — not rewrite it.
-
-SUBJECT: "${topic}"
-SECTION: "${gap.title}"
-Overview: ${gap.summary}
-
-SOURCE TEXT (verbatim extract from the document):
-"""
-${gap.rawContent}
-"""
-
-INSTRUCTIONS:
-Find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE TEXT above for each sub-section. Copy the EXACT words — do NOT paraphrase, reword, or summarise. If the source uses bullet points, tables, or numbered lists, reproduce them fully.
-Divide into 1–4 natural sub-sections using the document's own headings or logical groupings.
-
-Return ONLY valid JSON — no markdown fences:
-{
-  "topicId": "${gapId}",
-  "title": "${gap.title}",
-  "subtopics": [
-    {
-      "title": "Sub-section name",
-      "content": "Verbatim sentences / bullets / table from the source"
-    }
-  ],
-  "keyTerms": [{ "term": "...", "definition": "..." }],
-  "whyItMatters": "One sentence."
-}`;
-
-        try {
-          const client = getClient();
-          const gapStream = await client.models.generateContentStream({
-            model:    SMART_MODEL,
-            contents: [{ role: 'user', parts: [textPart(gapPrompt)] }],
-            config:   {
-              systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-              maxOutputTokens:   8000,
-              temperature:       0.1,
-              thinkingConfig:    { thinkingBudget: 0 },
-            },
-          });
-
-          let gapRaw = '';
-          let gapIn  = 0;
-          let gapOut = 0;
-          for await (const chunk of gapStream) {
-            if (chunk.text) gapRaw += chunk.text;
-            if (chunk.usageMetadata) {
-              gapIn  = chunk.usageMetadata.promptTokenCount     ?? gapIn;
-              gapOut = chunk.usageMetadata.candidatesTokenCount ?? gapOut;
-            }
-          }
-          void dbLogUsage(_currentUserId, 'streamCourseMaterial_gap', SMART_MODEL, gapIn, gapOut);
-
-          const parsedGap = parseJson<TopicReading>(gapRaw);
-
-          const validSubs = (parsedGap.subtopics ?? []).filter(s =>
-            s?.title && typeof s.title === 'string' && s.title.length > 0 &&
-            typeof s.content === 'string' && s.content.length > 0,
-          );
-
-          if (validSubs.length > 0) {
-            const gapTR: TopicReading = {
-              ...parsedGap,
-              topicId:      gapId,
-              title:        gap.title,
-              subtopics:    validSubs,
-              keyTerms:     Array.isArray(parsedGap.keyTerms) ? parsedGap.keyTerms : [],
-              whyItMatters: parsedGap.whyItMatters ?? '',
-            };
-            allTopics.push(gapTR);
-            onTopicComplete(gapTR);
-          }
-        } catch (gapErr) {
-          console.error(`[streamCourseMaterial] gap fill "${gap.title}" error:`, gapErr);
-          // continue — skip this gap, keep the rest
-        }
-      }
-    }
-  } catch (pass2Err) {
-    console.error('[streamCourseMaterial] Pass 2 error (non-fatal):', pass2Err);
-    // Pass 2 is best-effort — never block Pass 1 results
-  }
-
-  return { topics: allTopics };
-}
 
 // ── Paragraph quiz ────────────────────────────────────────────
 
 export async function generateParagraphQuiz(
-  subtopicTitle:   string,
-  subtopicContent: string,
-  topicTitle:      string,
-): Promise<ParagraphQuiz> {
-  const prompt = `You are an expert educator. Generate exactly 5 multiple-choice questions to test understanding of the following study paragraph.
+  extractedText:  string,
+  subTopicTitle:  string,
+  topicTitle:     string,
+): Promise<ParagraphQuestion[]> {
+  const prompt = `You are an expert educator. Generate exactly 5 multiple-choice questions to test understanding of the following subtopic.
 
-TOPIC: ${topicTitle}
-SUBTOPIC: ${subtopicTitle}
+Generate questions specifically about '${subTopicTitle}' (part of topic '${topicTitle}') based on the source document.
 
-PARAGRAPH CONTENT:
-${subtopicContent}
+SOURCE DOCUMENT (excerpt):
+${extractedText.slice(0, 6000)}
 
 Rules:
-- Each question must be directly answerable from the paragraph content above.
+- Each question must be directly answerable from the source document above.
 - Provide exactly 4 answer options per question (A, B, C, D).
 - Exactly one option is correct; the other 3 are plausible distractors.
 - Vary difficulty: 2 recall questions, 2 comprehension questions, 1 application/inference question.
@@ -2426,112 +1908,11 @@ Return ONLY valid JSON — no markdown:
     'generateParagraphQuiz',
   );
 
-  const parsed = parseJson<ParagraphQuiz>(raw);
+  const parsed = parseJson<{ questions: ParagraphQuestion[] }>(raw);
   if (!Array.isArray(parsed.questions) || parsed.questions.length === 0) {
     throw new Error('Invalid quiz response. Please retry.');
   }
-  return parsed;
-}
-
-// ── Document Diagnostic ───────────────────────────────────────
-// Two-part quality test:
-//   1. Did the AI read the full document? (page/section inventory)
-//   2. Are those sections faithfully represented in the notes?
-
-export interface DocumentDiagnostic {
-  /** Estimated number of pages the AI processed (0 = could not determine) */
-  pagesEstimated: number;
-  /** Every major section / chapter the AI identified in the document */
-  sectionsFound: string[];
-  /** 0–100: how completely the *notes* cover the full document */
-  notesCoverageScore: number;
-  /** Specific topics / concepts present in the doc but absent from the notes */
-  missingFromNotes: string[];
-  /** One-sentence verdict on read completeness */
-  readVerdict: string;
-  /** One-sentence verdict on notes quality */
-  notesVerdict: string;
-}
-
-export async function generateDocumentDiagnostic(
-  topic:          string,
-  contentText:    string | null,
-  pdfBase64:      string | null,
-  courseMaterial: DocumentReading,
-): Promise<DocumentDiagnostic> {
-  // Build a compact title-only index — all topics + subtopics fit in ~2 k chars
-  // regardless of document size, so the model always sees the full coverage list.
-  // (Sending 300-char content snippets per subtopic bloated the summary past the
-  //  old 6 000-char slice, meaning only the first 4–5 topics were visible and
-  //  the model correctly — but wrongly — reported ~20% coverage.)
-  const notesSummary = courseMaterial.topics.map((t, i) =>
-    `${i + 1}. ${t.title}\n` +
-    t.subtopics.map(s => `   • ${s.title}`).join('\n')
-  ).join('\n');
-
-  const prompt = `You are a document quality auditor. Perform a two-part diagnostic:
-
-TOPIC: "${topic}"
-${sourceBlock(contentText, !!pdfBase64)}
-
---- NOTES COVERAGE INDEX (every topic and subtopic already in the notes) ---
-${notesSummary}
---- END COVERAGE INDEX (${courseMaterial.topics.length} topics, ${courseMaterial.topics.reduce((n, t) => n + t.subtopics.length, 0)} subtopics total) ---
-
-PART 1 — DID THE AI READ THE FULL DOCUMENT?
-• Estimate the total number of pages in the original document.
-• List EVERY major section, chapter, or topic heading you can identify in the document.
-• Did the content appear to cut off, or was the full document accessible?
-
-PART 2 — HOW COMPLETELY ARE THE NOTES?
-Important: the coverage index above represents ALL the topics already covered in the notes — not just the first few. Use the FULL list when judging coverage.
-• What percentage (0–100) of the document's important, testable content is represented by the topics and subtopics listed above?
-• List only specific topics, sections, or named concepts that appear in the DOCUMENT but are genuinely ABSENT from the coverage index above.
-
-Return ONLY valid JSON — no markdown:
-{
-  "pagesEstimated": <integer, 0 if unknown>,
-  "sectionsFound": ["Section name — brief description of content", "..."],
-  "notesCoverageScore": <0-100>,
-  "missingFromNotes": ["Specific missing topic or concept", "..."],
-  "readVerdict": "One sentence: did the AI read the full document?",
-  "notesVerdict": "One sentence: how complete are the notes?"
-}`;
-
-  // Stream to avoid Netlify's 26 s edge-function timeout on large PDFs
-  const client = getClient();
-  const parts: Part[] = pdfBase64
-    ? [pdfPart(pdfBase64), textPart(prompt)]
-    : [textPart(prompt)];
-
-  const stream = await client.models.generateContentStream({
-    model:    SMART_MODEL,
-    contents: [{ role: 'user', parts }],
-    config:   {
-      systemInstruction: 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
-      maxOutputTokens:   3000,
-      temperature:       0.0,
-      thinkingConfig:    { thinkingBudget: 0 },
-    },
-  });
-
-  let raw        = '';
-  let diagIn     = 0;
-  let diagOut    = 0;
-  for await (const chunk of stream) {
-    if (chunk.text) raw += chunk.text;
-    if (chunk.usageMetadata) {
-      diagIn  = chunk.usageMetadata.promptTokenCount     ?? diagIn;
-      diagOut = chunk.usageMetadata.candidatesTokenCount ?? diagOut;
-    }
-  }
-  void dbLogUsage(_currentUserId, 'generateDocumentDiagnostic', SMART_MODEL, diagIn, diagOut);
-
-  const parsed = parseJson<DocumentDiagnostic>(raw);
-  if (typeof parsed.notesCoverageScore !== 'number' || !Array.isArray(parsed.sectionsFound)) {
-    throw new Error('Invalid diagnostic response.');
-  }
-  return parsed;
+  return parsed.questions;
 }
 
 // ── Per-topic conceptual explanation (Understand mode) ────────

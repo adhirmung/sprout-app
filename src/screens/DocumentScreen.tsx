@@ -16,22 +16,19 @@ import {
   buildChatSystemPrompt,
   evaluateWrittenAnswer,
   extractPdfContent,
-  generateBoosterCards,
-  generateContentAudit,
   generateContentMap,
-  generateDocumentDiagnostic,
   generateFeed,
   generateStudyBrief,
   generateParagraphQuiz,
   generatePracticeQuiz,
+  generateTopicBullets,
   generateVisualComponents,
   hasApiKey,
   saveApiKey,
   streamCardChat,
-  streamCourseMaterial,
   streamTopicUnderstanding,
 } from '../lib/gemini';
-import type { ChatMessage, ContentAudit, ContentMap, DocClassification, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -89,16 +86,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [courseMaterial,  setCourseMaterial]  = useState<DocumentReading | null>(null);
-  const [contentAudit,    setContentAudit]    = useState<ContentAudit | null>(null);
-  const [auditLoading,    setAuditLoading]    = useState(false);
   const [gapCardsAdded,   setGapCardsAdded]   = useState(0);
-  const [mapEnhancing,      setMapEnhancing]      = useState(false);
   const [studyBrief,        setStudyBrief]        = useState<StudyBrief | null>(null);
   const [studyBriefLoading, setStudyBriefLoading] = useState(false);
-  const [enhancementSummary, setEnhancementSummary] = useState<{
-    addedConcepts: string[];
-    originalScore: number;
-  } | null>(null);
   const [cards,        setCards]        = useState<FeedCard[]>([]);
   const [audit,        setAudit]        = useState<FeedAudit | null>(null);
   // Queue-based navigation (enables spaced repetition)
@@ -117,10 +107,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [showTutor,         setShowTutor]         = useState(false);
   const [courseProgressMsg, setCourseProgressMsg] = useState('');
   const [extractedText,      setExtractedText]      = useState<string | null>(null);
-  const [docClassification,  setDocClassification]  = useState<DocClassification | null>(null);
-  const [courseStreaming,   setCourseStreaming]   = useState(false);
-  const [diagnostic,        setDiagnostic]        = useState<DocumentDiagnostic | null>(null);
-  const [diagnosticLoading, setDiagnosticLoading] = useState(false);
   // ── Lifted from ReadView so they survive within-session navigation ──
   const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
@@ -167,15 +153,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
-    const cachedAudit = Store.get<ContentAudit | null>(`audit:${sourceKey}`, null);
-    if (cachedAudit && typeof cachedAudit.coverageScore === 'number') {
-      setContentAudit(cachedAudit);
-    } else if (userId) {
-      dbLoadContent<ContentAudit>(userId, sourceKey, 'audit')
-        .then(data => { if (data && typeof data.coverageScore === 'number') { Store.set(`audit:${sourceKey}`, data); setContentAudit(data); } })
-        .catch(() => {});
-    }
-
     const cachedCourse = Store.get<DocumentReading | null>(`course:${sourceKey}`, null);
     if (cachedCourse?.topics?.length && cachedCourse.topics[0]?.subtopics?.length) {
       setCourseMaterial(cachedCourse);
@@ -185,22 +162,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
-    // Preload extracted text + classification (PDF extraction cache)
+    // Preload extracted text (PDF extraction cache)
     const cachedExtract = Store.get<string | null>(`extract:${sourceKey}`, null);
     if (cachedExtract) {
       setExtractedText(cachedExtract);
-      const cachedClassify = Store.get<DocClassification | null>(`classify:${sourceKey}`, null);
-      if (cachedClassify) setDocClassification(cachedClassify);
     } else if (userId) {
-      dbLoadContent<{ text: string; classification?: DocClassification }>(userId, sourceKey, 'extract')
+      dbLoadContent<{ text: string }>(userId, sourceKey, 'extract')
         .then(data => {
           if (data?.text) {
             Store.set(`extract:${sourceKey}`, data.text);
             setExtractedText(data.text);
-            if (data.classification) {
-              Store.set(`classify:${sourceKey}`, data.classification);
-              setDocClassification(data.classification);
-            }
           }
         })
         .catch(() => {});
@@ -269,22 +240,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     const t = setTimeout(() => setGapCardsAdded(0), 5000);
     return () => clearTimeout(t);
   }, [gapCardsAdded]);
-
-  const runDiagnostic = async () => {
-    if (!courseMaterial) return;
-    setDiagnosticLoading(true);
-    setDiagnostic(null);
-    try {
-      let resolvedPdf = pdfBase64;
-      if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
-      const report = await generateDocumentDiagnostic(topic, content, resolvedPdf, courseMaterial);
-      setDiagnostic(report);
-    } catch (e) {
-      console.error('Diagnostic failed:', e);
-    } finally {
-      setDiagnosticLoading(false);
-    }
-  };
 
   const generate = async (force = false, mode: 'activities' | 'flashcards' | 'quiz' = 'activities') => {
     setPhase('loading');
@@ -384,8 +339,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       setCards(result.cards); setAudit(result.audit);
       setQueue(result.cards.map((_, i) => i)); setQueuePos(0);
       setStartTime(Date.now()); setPhase('running');
-      // Pass 2: background audit → auto-append gap cards
-      void runTwoPassBoost(resolvedPdf, modeKey, result.cards);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
       setPhase('idle');
@@ -394,46 +347,31 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   // ── ensureExtractedText ───────────────────────────────────────
   // Returns cached extracted text or streams a fresh Gemini extraction.
-  // Also populates docClassification state when a fresh extraction runs.
   // Caller must have already set an appropriate phase/progress message before calling.
   const ensureExtractedText = async (resolvedPdf: string): Promise<string> => {
     // 1. In-memory state
-    if (extractedText) {
-      // Load classification from local cache if state not yet populated
-      if (!docClassification) {
-        const cachedClassify = Store.get<DocClassification | null>(`classify:${sourceKey}`, null);
-        if (cachedClassify) setDocClassification(cachedClassify);
-      }
-      return extractedText;
-    }
+    if (extractedText) return extractedText;
 
     // 2. localStorage
     const cached = Store.get<string | null>(`extract:${sourceKey}`, null);
     if (cached) {
       setExtractedText(cached);
-      const cachedClassify = Store.get<DocClassification | null>(`classify:${sourceKey}`, null);
-      if (cachedClassify) setDocClassification(cachedClassify);
       return cached;
     }
 
     // 3. Supabase
     if (userId) {
-      const dbCached = await dbLoadContent<{ text: string; classification?: DocClassification }>(userId, sourceKey, 'extract').catch(() => null);
+      const dbCached = await dbLoadContent<{ text: string }>(userId, sourceKey, 'extract').catch(() => null);
       if (dbCached?.text) {
         Store.set(`extract:${sourceKey}`, dbCached.text);
         setExtractedText(dbCached.text);
-        if (dbCached.classification) {
-          Store.set(`classify:${sourceKey}`, dbCached.classification);
-          setDocClassification(dbCached.classification);
-        }
         return dbCached.text;
       }
     }
 
     // 4. Stream extraction from PDF via Gemini multimodal
-    //    extractPdfContent now classifies the document first, then extracts text
     let chunkCount = 0;
-    const { text, classification } = await extractPdfContent(resolvedPdf, (accumulated, _chunk) => {
+    const text = await extractPdfContent(resolvedPdf, (accumulated, _chunk) => {
       chunkCount++;
       if (chunkCount % 4 === 0) {
         const words = Math.round(accumulated.split(/\s+/).length / 100) * 100;
@@ -442,10 +380,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     });
 
     setExtractedText(text);
-    setDocClassification(classification);
     Store.set(`extract:${sourceKey}`, text);
-    Store.set(`classify:${sourceKey}`, classification);
-    if (userId) dbSaveContent(userId, sourceKey, 'extract', { text, classification }).catch(console.error);
+    if (userId) dbSaveContent(userId, sourceKey, 'extract', { text }).catch(console.error);
     return text;
   };
 
@@ -494,141 +430,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
       setContentMap(map);
       setPhase('map');
-
-      // Pass 2: audit → enhanced map (runs in background while user reads pass 1)
-      void runMapEnhancement(map, resolvedPdf);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to generate topic map. Please retry.');
       setPhase('idle');
     }
   };
 
-  /**
-   * Pass 2 for Map: audit the first-pass map, then regenerate it with every
-   * missed concept explicitly forced into the prompt. The improved map swaps
-   * in place — the user sees the first pass while pass 2 runs in the background.
-   */
-  const runMapEnhancement = async (initialMap: ContentMap, resolvedPdf: string | null) => {
-    const auditKey = `audit:${sourceKey}`;
-    const mapKey   = `map:${sourceKey}`;
-
-    // Step 1: run coverage audit on the first-pass map
-    setAuditLoading(true);
-    let audit: ContentAudit | null = null;
-    try {
-      // Prefer already-extracted plain text over raw PDF binary to avoid proxy timeouts.
-      // extractedText is populated before runMapEnhancement is ever called, so this
-      // eliminates the large base64 payload that pushes requests past the 26s edge-fn limit.
-      const auditText = content ?? extractedText;
-      const auditPdf  = auditText ? null : resolvedPdf;
-      audit = await generateContentAudit(topic, auditText, auditPdf, initialMap);
-      Store.set(auditKey, audit);
-      setContentAudit(audit);
-      if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
-    } catch { return; /* non-fatal */ }
-    finally { setAuditLoading(false); }
-
-    if (!audit || audit.missedConcepts.length === 0) return; // map already complete
-
-    // Step 2: regenerate map with gap concepts forced in
-    setMapEnhancing(true);
-    try {
-      const enhanced = await generateContentMap(
-        topic, content, resolvedPdf, audit.missedConcepts,
-      );
-      Store.set(mapKey, enhanced);
-      if (userId) dbSaveContent(userId, sourceKey, 'map', enhanced).catch(console.error);
-      setContentMap(enhanced);
-
-      // Record what was added so the Enhancement Summary panel can display it
-      setEnhancementSummary({
-        addedConcepts: audit.missedConcepts,
-        originalScore: audit.coverageScore,
-      });
-
-      // Gaps are now baked into the map — clear the missed-items list so the
-      // audit panel doesn't keep showing items that have already been incorporated.
-      const resolvedAudit: ContentAudit = {
-        coverageScore:  100,
-        missedConcepts: [],
-        suggestions:    audit.suggestions,
-      };
-      Store.set(auditKey, resolvedAudit);
-      if (userId) dbSaveContent(userId, sourceKey, 'audit', resolvedAudit).catch(console.error);
-      setContentAudit(resolvedAudit);
-    } catch { /* non-fatal — first-pass map stays visible */ }
-    finally { setMapEnhancing(false); }
-  };
-
-  /**
-   * Two-pass boost: runs silently after fresh card generation.
-   * 1. Ensures a content map exists (generates one if needed).
-   * 2. Runs a coverage audit against that map (with full caching).
-   * 3. Generates one targeted flashcard per missed concept and appends
-   *    them to the live card feed — the learner sees them seamlessly after
-   *    the first-pass cards.
-   */
-  const runTwoPassBoost = async (
-    resolvedPdf: string | null,
-    modeKey: string,
-    firstPassCards: FeedCard[],
-  ) => {
-    // ── Step 1: get or generate map (needed for audit) ────────
-    let map: ContentMap | null = Store.get<ContentMap | null>(`map:${sourceKey}`, null);
-    if (!map?.synthesis && userId) {
-      map = await dbLoadContent<ContentMap>(userId, sourceKey, 'map').catch(() => null);
-    }
-    if (!map?.synthesis) {
-      try {
-        map = await generateContentMap(topic, content, resolvedPdf);
-        Store.set(`map:${sourceKey}`, map);
-        setContentMap(map);
-        if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
-      } catch { return; /* can't audit without a map */ }
-    }
-
-    // ── Step 2: get or run coverage audit ────────────────────
-    let audit: ContentAudit | null = Store.get<ContentAudit | null>(`audit:${sourceKey}`, null);
-    if (!audit && userId) {
-      audit = await dbLoadContent<ContentAudit>(userId, sourceKey, 'audit').catch(() => null);
-    }
-    if (!audit) {
-      try {
-        setAuditLoading(true);
-        const boostAuditText = content ?? extractedText;
-        audit = await generateContentAudit(topic, boostAuditText, boostAuditText ? null : resolvedPdf, map, images ?? undefined);
-        Store.set(`audit:${sourceKey}`, audit);
-        setContentAudit(audit);
-        if (userId) dbSaveContent(userId, sourceKey, 'audit', audit).catch(console.error);
-      } catch { return; }
-      finally { setAuditLoading(false); }
-    } else {
-      // Populate the map-view audit panel if not already set
-      setContentAudit(audit);
-    }
-
-    if (!audit || audit.missedConcepts.length === 0) return;
-
-    // ── Step 3: generate gap cards and append to feed ─────────
-    try {
-      const gapCards = await generateBoosterCards(topic, audit.missedConcepts, content);
-      if (gapCards.length === 0) return;
-
-      setCards(prev => [...prev, ...gapCards]);
-      setQueue(prev => [...prev, ...gapCards.map((_, i) => firstPassCards.length + i)]);
-      setGapCardsAdded(gapCards.length);
-
-      // Persist combined set so the next load already has gap cards baked in
-      const combined = [...firstPassCards, ...gapCards];
-      if (userId) {
-        dbSaveGeneratedCards(userId, modeKey, topic, { cards: combined, audit: null }, contentLen).catch(console.error);
-      } else {
-        Store.set(`feed:${modeKey}`, { cards: combined, audit: null });
-      }
-    } catch { /* non-fatal — gap cards are an enhancement */ }
-  };
-
-  const startCourseMaterial = async (map: ContentMap) => {
+  const startBullets = async (map: ContentMap) => {
     const cached = Store.get<DocumentReading | null>(`course:${sourceKey}`, null);
     if (cached?.topics?.length && cached.topics[0]?.subtopics?.length) {
       setCourseMaterial(cached); setPhase('course'); return;
@@ -660,38 +468,30 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         setCourseProgressMsg('Building notes…');
       }
 
-      // ── Stream topics one by one ──────────────────────────────
-      // Switch to 'course' phase after the first topic arrives so the user
-      // can start reading while the remaining topics are still being generated.
-      setCourseStreaming(true);
-      const allTopics: TopicReading[] = [];
+      const bullets = await generateTopicBullets(et, map);
+      const reading: DocumentReading = {
+        topics: bullets.map(tb => ({
+          topicId:      tb.topicId,
+          title:        tb.title,
+          subtopics:    tb.subtopics.map(s => ({
+            title:   s.title,
+            content: '',
+            bullets: s.bullets,
+          })),
+          keyTerms:     tb.keyTerms ?? [],
+          whyItMatters: '',
+        })),
+      };
 
-      await streamCourseMaterial(
-        topic, et, map,
-        (tr) => {
-          allTopics.push(tr);
-          setCourseMaterial(prev =>
-            prev ? { topics: [...prev.topics, tr] } : { topics: [tr] },
-          );
-          // Reveal the notes view the moment the first topic is ready
-          if (allTopics.length === 1) setPhase('course');
-        },
-        (msg) => setCourseProgressMsg(msg),
-        images ?? undefined,
-        docClassification ?? undefined,
-      );
+      setCourseMaterial(reading);
+      setPhase('course');
 
-      setCourseStreaming(false);
-
-      // Cache the complete set now that all topics have arrived
-      const cm = { topics: allTopics };
-      Store.set(`course:${sourceKey}`, cm);
-      if (userId) dbSaveContent(userId, sourceKey, 'course', cm).catch(console.error);
+      Store.set(`course:${sourceKey}`, reading);
+      if (userId) dbSaveContent(userId, sourceKey, 'course', reading).catch(console.error);
 
     } catch (e) {
-      setCourseStreaming(false);
-      const msg = e instanceof Error ? e.message : 'Failed to generate course material. Please retry.';
-      console.error('[startCourseMaterial] error:', e);
+      const msg = e instanceof Error ? e.message : 'Failed to generate notes. Please retry.';
+      console.error('[startBullets] error:', e);
       setError(msg);
       setPhase('map');
     }
@@ -758,35 +558,28 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     <NotesErrorBoundary onReset={async () => {
       Store.del(`course:${sourceKey}`);
       setCourseMaterial(null);
-      setDiagnostic(null);
-      await startCourseMaterial(contentMap);
+      await startBullets(contentMap);
     }}>
       <ReadView
         documentReading={courseMaterial}
         topic={topic}
         hasCache={!!Store.get<DocumentReading | null>(`course:${sourceKey}`, null)}
         profile={profile}
-        enhancementSummary={null}
-        contentAudit={null}
+        extractedText={extractedText ?? ''}
         isCourse={true}
         hasCourseMaterial={true}
-        courseStreaming={courseStreaming}
-        diagnostic={diagnostic}
-        diagnosticLoading={diagnosticLoading}
-        onRunDiagnostic={runDiagnostic}
+        courseStreaming={false}
         subStatuses={subStatuses}
         onSubStatusChange={setSubStatuses}
         focusChatMessages={focusChatMessages}
         onFocusChatMessagesChange={setFocusChatMessages}
-        onBack={() => { if (!courseStreaming) setPhase('map'); }}
+        onBack={() => setPhase('map')}
         onPractice={() => setPhase('practice')}
         onStudy={() => { void generate(false, 'activities'); }}
         onRegenerate={async () => {
-          if (courseStreaming) return; // don't allow while streaming
           Store.del(`course:${sourceKey}`);
           setCourseMaterial(null);
-          setDiagnostic(null);
-          await startCourseMaterial(contentMap);
+          await startBullets(contentMap);
         }}
       />
     </NotesErrorBoundary>
@@ -800,31 +593,24 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       hasCourse={!!courseMaterial}
       hasText={true}
       profile={profile}
-      contentAudit={contentAudit}
-      auditLoading={auditLoading}
-      mapEnhancing={mapEnhancing}
-      enhancementSummary={enhancementSummary}
       studyBrief={studyBrief}
       studyBriefLoading={studyBriefLoading}
       sourceWordCount={sourceWordCount}
       onBack={() => setPhase('idle')}
-      onCourseMaterial={() => startCourseMaterial(contentMap)}
+      onCourseMaterial={() => startBullets(contentMap)}
       onPractice={() => {
         if (courseMaterial ?? documentReading) {
           setPhase('practice');
         } else {
           // Notes not loaded yet — generate them first, then auto-jump to practice
           setPendingPractice(true);
-          void startCourseMaterial(contentMap);
+          void startBullets(contentMap);
         }
       }}
       onRegenerate={async () => {
         Store.del(`map:${sourceKey}`);
-        Store.del(`audit:${sourceKey}`);
         Store.del(`brief:${sourceKey}`);
         setContentMap(null);
-        setContentAudit(null);
-        setEnhancementSummary(null);
         setStudyBrief(null);
         setPhase('mapping');
         setError('');
@@ -836,7 +622,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (userId) dbSaveContent(userId, sourceKey, 'map', map).catch(console.error);
           setContentMap(map);
           setPhase('map');
-          void runMapEnhancement(map, resolvedPdf);
         } catch (e) {
           setError(e instanceof Error ? e.message : 'Failed to generate topic map.');
           setPhase('idle');
@@ -1604,297 +1389,15 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
   return 25;
 }
 
-// ── Coverage Stats overlay (map + read) ──────────────────────
-
-function CoverageStatsOverlay({
-  contentAudit,
-  auditLoading,
-  enhancing,
-  enhancementSummary,
-  context,
-  onClose,
-}: {
-  contentAudit:       ContentAudit | null;
-  auditLoading:       boolean;
-  enhancing:          boolean;
-  enhancementSummary: { addedConcepts: string[]; originalScore: number } | null;
-  context:            'map' | 'reading';
-  onClose:            () => void;
-}) {
-  const label       = context === 'map' ? 'map' : 'reading';
-  const score       = contentAudit?.coverageScore ?? 0;
-  const tips        = contentAudit?.suggestions   ?? [];
-  const isActive    = auditLoading || enhancing;
-  const scoreColor  = score >= 85 ? '#16A34A' : score >= 65 ? '#D97706' : '#DC2626';
-  const scoreBg     = score >= 85 ? '#F0FDF4'  : score >= 65 ? '#FFFBEB' : '#FEF2F2';
-
-  return (
-    /* Backdrop */
-    <div
-      onClick={onClose}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 400, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-    >
-      {/* Sheet */}
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{
-          background: 'var(--card)', borderRadius: '20px 20px 0 0',
-          width: '100%', maxWidth: 600, maxHeight: '75vh',
-          display: 'flex', flexDirection: 'column',
-          boxShadow: '0 -8px 40px rgba(0,0,0,0.18)',
-        }}
-      >
-        {/* Handle + title */}
-        <div style={{ padding: '12px 20px 0', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-          <div style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--line)' }} />
-          <div style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
-            <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)' }}>Coverage Stats</div>
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 22, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>×</button>
-          </div>
-        </div>
-
-        {/* Scrollable body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px 24px' }}>
-
-          {/* Status while loading */}
-          {isActive && !contentAudit && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '14px 0', color: 'var(--ink-3)', fontSize: 13, fontWeight: 600 }}>
-              <div style={{ width: 16, height: 16, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-              {auditLoading ? 'Analysing document coverage…' : 'Weaving in missing concepts…'}
-            </div>
-          )}
-
-          {/* Score section */}
-          {contentAudit && (
-            <>
-              <div style={{ borderRadius: 12, background: scoreBg, border: `1px solid ${scoreColor}33`, padding: '14px 16px', marginBottom: 16 }}>
-                {enhancementSummary ? (
-                  <>
-                    <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 8 }}>Coverage improved</div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                      <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 26, fontWeight: 800, color: '#DC2626', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{enhancementSummary.originalScore}%</div>
-                        <div style={{ fontSize: 10, color: 'var(--ink-4)', marginTop: 2 }}>pass 1</div>
-                      </div>
-                      <div style={{ flex: 1, height: 2, background: 'var(--line)', borderRadius: 1 }} />
-                      <div style={{ fontSize: 18, color: scoreColor }}>→</div>
-                      <div style={{ flex: 1, height: 2, background: 'var(--line)', borderRadius: 1 }} />
-                      <div style={{ textAlign: 'center' }}>
-                        <div style={{ fontSize: 26, fontWeight: 800, color: '#16A34A', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>100%</div>
-                        <div style={{ fontSize: 10, color: 'var(--ink-4)', marginTop: 2 }}>pass 2</div>
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <>
-                    <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 4 }}>Coverage score</div>
-                    <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{score}%</div>
-                    <div style={{ fontSize: 12, color: scoreColor, marginTop: 4, opacity: 0.75 }}>
-                      {score >= 85 ? 'Excellent — all key concepts covered' : score >= 65 ? 'Good — minor gaps found' : 'Partial — notable gaps found'}
-                    </div>
-                  </>
-                )}
-              </div>
-
-              {/* Concepts added in pass 2 */}
-              {enhancementSummary && enhancementSummary.addedConcepts.length > 0 && (
-                <div style={{ marginBottom: 16 }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#1D4ED8', marginBottom: 10 }}>
-                    Added to {label} in pass 2
-                  </div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 7 }}>
-                    {enhancementSummary.addedConcepts.map((concept, i) => (
-                      <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                        <div style={{ width: 18, height: 18, borderRadius: '50%', background: '#DBEAFE', border: '1.5px solid #93C5FD', display: 'grid', placeItems: 'center', flexShrink: 0, fontSize: 10, color: '#1D4ED8', fontWeight: 800 }}>✓</div>
-                        <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6, paddingTop: 1 }}>{concept}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Suggestions */}
-              {tips.length > 0 && (
-                <div>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-3)', marginBottom: 8 }}>Suggestions</div>
-                  {tips.map((tip, i) => (
-                    <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 6 }}>
-                      <span style={{ color: 'var(--brand)', fontSize: 13, flexShrink: 0 }}>→</span>
-                      <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{tip}</div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-
-          {/* Still enhancing (audit already done, pass 2 running) */}
-          {enhancing && contentAudit && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 0', color: 'var(--brand)', fontSize: 13, fontWeight: 600 }}>
-              <div style={{ width: 14, height: 14, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-              Enhancing {label} — weaving in {contentAudit?.missedConcepts?.length ?? ''} missing concepts…
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ── Diagnostic Report Sheet ───────────────────────────────────
-
-function DiagnosticSheet({
-  diagnostic,
-  loading,
-  onClose,
-  onRun,
-}: {
-  diagnostic:  DocumentDiagnostic | null;
-  loading:     boolean;
-  onClose:     () => void;
-  onRun:       () => void;
-}) {
-  const notesScore   = diagnostic?.notesCoverageScore ?? 0;
-  const scoreColor   = notesScore >= 85 ? '#16A34A' : notesScore >= 65 ? '#D97706' : '#DC2626';
-  const scoreBg      = notesScore >= 85 ? '#F0FDF4'  : notesScore >= 65 ? '#FFFBEB' : '#FEF2F2';
-
-  return (
-    <div
-      onClick={onClose}
-      style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 400, display: 'flex', alignItems: 'flex-end', justifyContent: 'center' }}
-    >
-      <div
-        onClick={e => e.stopPropagation()}
-        style={{
-          background: 'var(--card)', borderRadius: '20px 20px 0 0',
-          width: '100%', maxWidth: 600, maxHeight: '80vh',
-          display: 'flex', flexDirection: 'column',
-          boxShadow: '0 -8px 40px rgba(0,0,0,0.18)',
-        }}
-      >
-        {/* Handle + title */}
-        <div style={{ padding: '12px 20px 0', flexShrink: 0 }}>
-          <div style={{ width: 36, height: 4, borderRadius: 2, background: 'var(--line)', margin: '0 auto 12px' }} />
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
-            <div>
-              <div style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)' }}>🔬 AI Diagnostic Report</div>
-              <div style={{ fontSize: 11, color: 'var(--ink-4)', marginTop: 2 }}>Tests document read coverage and notes quality</div>
-            </div>
-            <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 22, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>×</button>
-          </div>
-        </div>
-
-        {/* Body */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px 28px' }}>
-
-          {/* No report yet */}
-          {!diagnostic && !loading && (
-            <div style={{ textAlign: 'center', padding: '24px 0' }}>
-              <div style={{ fontSize: 36, marginBottom: 12 }}>🔍</div>
-              <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--ink)', marginBottom: 6 }}>Run a diagnostic</div>
-              <div style={{ fontSize: 13, color: 'var(--ink-3)', lineHeight: 1.6, marginBottom: 20 }}>
-                Tests whether the AI read the full document and how completely the notes cover it.
-              </div>
-              <button
-                onClick={onRun}
-                className="btn btn-primary"
-                style={{ fontSize: 14, padding: '10px 24px' }}
-              >
-                Run Diagnostic
-              </button>
-            </div>
-          )}
-
-          {/* Loading */}
-          {loading && (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '28px 0', color: 'var(--ink-3)', fontSize: 13 }}>
-              <div style={{ width: 28, height: 28, border: '3px solid var(--brand)', borderTop: '3px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-              <div style={{ fontWeight: 600 }}>Reading document and comparing notes…</div>
-              <div style={{ fontSize: 12, opacity: 0.7 }}>This may take 10–20 seconds</div>
-            </div>
-          )}
-
-          {/* Report */}
-          {diagnostic && !loading && (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-
-              {/* Notes coverage score */}
-              <div style={{ borderRadius: 12, background: scoreBg, border: `1px solid ${scoreColor}33`, padding: '14px 16px' }}>
-                <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: scoreColor, marginBottom: 4 }}>Notes Coverage</div>
-                <div style={{ fontSize: 32, fontWeight: 800, color: scoreColor, fontFamily: 'var(--font-mono)', lineHeight: 1 }}>{notesScore}%</div>
-                <div style={{ fontSize: 12, color: scoreColor, marginTop: 6, opacity: 0.85, lineHeight: 1.5 }}>{diagnostic.notesVerdict}</div>
-              </div>
-
-              {/* Document read check */}
-              <div style={{ borderRadius: 12, background: 'var(--bg-tint)', border: '1px solid var(--line)', padding: '14px 16px' }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: 'var(--ink-3)' }}>Document Read</div>
-                  {diagnostic.pagesEstimated > 0 && (
-                    <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)', background: 'var(--brand-tint)', padding: '2px 8px', borderRadius: 20 }}>
-                      ~{diagnostic.pagesEstimated} pages
-                    </div>
-                  )}
-                </div>
-                <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.5, marginBottom: diagnostic.sectionsFound.length > 0 ? 10 : 0 }}>{diagnostic.readVerdict}</div>
-                {diagnostic.sectionsFound.length > 0 && (
-                  <>
-                    <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Sections identified ({diagnostic.sectionsFound.length})</div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                      {diagnostic.sectionsFound.map((s, i) => (
-                        <div key={i} style={{ fontSize: 12, color: 'var(--ink-2)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                          <span style={{ color: 'var(--brand)', flexShrink: 0, fontWeight: 700 }}>·</span>
-                          <span style={{ lineHeight: 1.5 }}>{s}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </>
-                )}
-              </div>
-
-              {/* Missing from notes */}
-              {diagnostic.missingFromNotes.length > 0 && (
-                <div style={{ borderRadius: 12, background: '#FEF2F2', border: '1px solid #FCA5A533', padding: '14px 16px' }}>
-                  <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#DC2626', marginBottom: 8 }}>Missing from Notes</div>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    {diagnostic.missingFromNotes.map((item, i) => (
-                      <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                        <span style={{ color: '#DC2626', flexShrink: 0, fontWeight: 700, fontSize: 13 }}>✕</span>
-                        <div style={{ fontSize: 13, color: '#7F1D1D', lineHeight: 1.5 }}>{item}</div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Re-run button */}
-              <button
-                onClick={onRun}
-                className="btn btn-ghost"
-                style={{ fontSize: 13, padding: '8px 16px', color: 'var(--ink-3)', alignSelf: 'center' }}
-              >
-                🔄 Re-run Diagnostic
-              </button>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, contentAudit, auditLoading, mapEnhancing, enhancementSummary, studyBrief, studyBriefLoading, sourceWordCount, onBack, onCourseMaterial, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, studyBrief, studyBriefLoading, sourceWordCount, onBack, onCourseMaterial, onPractice, onRegenerate }: {
   contentMap:          ContentMap;
   topic:               string;
   hasCache:            boolean;
   hasCourse:           boolean;
   hasText:             boolean;
   profile:             LearnerProfile | null;
-  contentAudit:        ContentAudit | null;
-  auditLoading:        boolean;
-  mapEnhancing:        boolean;
-  enhancementSummary:  { addedConcepts: string[]; originalScore: number } | null;
   studyBrief:          StudyBrief | null;
   studyBriefLoading:   boolean;
   sourceWordCount:     number;
@@ -1903,7 +1406,6 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
   onPractice:          (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:        () => void;
 }) {
-  const [statsOpen, setStatsOpen] = useState(false);
   const isMobile = useIsMobile();
   void profile;     // passed to generateStudyBrief upstream; kept for future use
   void contentMap;  // data lives in backend pipeline; kept for future use
@@ -1937,37 +1439,6 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          {/* Coverage stats icon */}
-          {(auditLoading || mapEnhancing || contentAudit) && (
-            <button
-              onClick={() => setStatsOpen(true)}
-              aria-label="Coverage stats"
-              title="Coverage stats"
-              style={{
-                display: 'flex', alignItems: 'center', gap: 5,
-                padding: '5px 10px', borderRadius: 20,
-                background: enhancementSummary ? '#DBEAFE' : auditLoading || mapEnhancing ? 'var(--bg-tint)' : 'var(--bg-tint)',
-                border: `1.5px solid ${enhancementSummary ? '#93C5FD' : 'var(--line)'}`,
-                cursor: 'pointer', fontSize: 11, fontWeight: 800,
-                color: enhancementSummary ? '#1D4ED8' : 'var(--ink-3)',
-              }}
-            >
-              {auditLoading || mapEnhancing
-                ? <div style={{ width: 11, height: 11, border: '1.5px solid currentColor', borderTop: '1.5px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-                : <span>📊</span>
-              }
-              <span>
-                {auditLoading && !contentAudit
-                  ? 'Auditing…'
-                  : mapEnhancing
-                    ? 'Enhancing…'
-                    : enhancementSummary
-                      ? `${enhancementSummary.originalScore}%→100%`
-                      : `${contentAudit?.coverageScore ?? 0}%`
-                }
-              </span>
-            </button>
-          )}
           {hasCache && (
             <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
               <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
@@ -1975,32 +1446,6 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, con
           )}
         </div>
       </div>
-
-      {/* Coverage stats overlay */}
-      {statsOpen && (
-        <CoverageStatsOverlay
-          contentAudit={contentAudit}
-          auditLoading={auditLoading}
-          enhancing={mapEnhancing}
-          enhancementSummary={enhancementSummary}
-          context="map"
-          onClose={() => setStatsOpen(false)}
-        />
-      )}
-
-      {/* Enhancing banner — visible while pass 2 regenerates the map */}
-      {mapEnhancing && (
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 10,
-          padding: '9px 20px', background: 'var(--brand-tint)',
-          borderBottom: '1px solid var(--brand-soft)', flexShrink: 0,
-        }}>
-          <div style={{ width: 14, height: 14, border: '2px solid var(--brand)', borderTop: '2px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--brand)' }}>
-            ✦ Enhancing coverage — weaving in missing concepts…
-          </span>
-        </div>
-      )}
 
       {/* Scrollable content */}
       <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '24px 24px' }}>
@@ -2881,19 +2326,15 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onStudy, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, isCourse, hasCourseMaterial, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onStudy, onRegenerate }: {
   documentReading:           DocumentReading;
   topic:                     string;
   hasCache:                  boolean;
   profile:                   LearnerProfile | null;
-  enhancementSummary:        { addedConcepts: string[]; originalScore: number } | null;
-  contentAudit:              ContentAudit | null;
+  extractedText:             string;
   isCourse?:                 boolean;
   hasCourseMaterial?:        boolean;
   courseStreaming?:           boolean;
-  diagnostic?:               DocumentDiagnostic | null;
-  diagnosticLoading?:        boolean;
-  onRunDiagnostic?:          () => void;
   subStatuses:               Record<string, SubStatus>;
   onSubStatusChange:         React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
   focusChatMessages:         ChatMessage[];
@@ -2903,8 +2344,6 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
   onStudy?:                  () => void;
   onRegenerate:              () => void;
 }) {
-  const [statsOpen,         setStatsOpen]         = useState(false);
-  const [diagnosticOpen,    setDiagnosticOpen]    = useState(false);
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
   const [elapsedSec,        setElapsedSec]        = useState(0);
@@ -2950,7 +2389,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
   // Total words for reading time estimate
   const totalWords = documentReading.topics.reduce((sum, t) =>
-    sum + (t.subtopics ?? []).reduce((s, sub) => s + sub.content.split(/\s+/).length, 0), 0);
+    sum + (t.subtopics ?? []).reduce((s, sub) => s + (sub.content ?? '').split(/\s+/).length, 0), 0);
   const totalReadMinutes = Math.max(1, Math.ceil(totalWords / wpm));
 
   // Progress driven by user-marked subtopics
@@ -3023,7 +2462,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
   });
 
   // Generate (or retrieve cached) paragraph quiz and open the modal
-  const openTestMe = async (key: string, subTitle: string, subContent: string, topicTitle: string, color: string) => {
+  const openTestMe = async (key: string, subTitle: string, topicTitle: string, color: string) => {
     setQuizError(null);
     if (quizCache[key]) {
       setActiveQuiz({ key, questions: quizCache[key], color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
@@ -3031,9 +2470,9 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
     }
     setQuizLoading(key);
     try {
-      const result = await generateParagraphQuiz(subTitle, subContent, topicTitle);
-      setQuizCache(prev => ({ ...prev, [key]: result.questions }));
-      setActiveQuiz({ key, questions: result.questions, color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
+      const result = await generateParagraphQuiz(extractedText, subTitle, topicTitle);
+      setQuizCache(prev => ({ ...prev, [key]: result }));
+      setActiveQuiz({ key, questions: result, color, qIdx: 0, selected: null, revealed: false, score: 0, done: false });
     } catch (e) {
       setQuizError(e instanceof Error ? e.message : 'Could not generate questions — please retry.');
     } finally {
@@ -3255,7 +2694,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
   const handleFocusChat = async (text: string) => {
     if (!allCards[safeCardIdx]) return;
     const { sub, topic: ct } = allCards[safeCardIdx];
-    const cardDesc = `Subtopic: "${sub.title}"\nContent: ${sub.content}`;
+    const cardDesc = `Subtopic: "${sub.title}"\nContent: ${sub.content ?? ''}`;
     const sys = buildChatSystemPrompt(topic, null, cardDesc, profile);
     const userMsg: ChatMessage = { role: 'user', content: text };
     const history = [...focusChatMessages, userMsg];
@@ -3307,7 +2746,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
             {/* Card body — flows freely, no scroll trap */}
             <div style={{ padding: isMobile ? '14px 16px' : '16px 22px', display: 'flex', flexDirection: 'column', gap: 14 }}>
-              <NoteMarkdown content={sub.content} />
+              <NoteMarkdown content={sub.content ?? ''} />
               {subTerms.length > 0 && <FocusTerms terms={subTerms} color={color} />}
             </div>
 
@@ -3341,7 +2780,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                   ✓ Read
                 </button>
                 <button
-                  onClick={() => openTestMe(key, sub.title, sub.content, ct.title, color)}
+                  onClick={() => openTestMe(key, sub.title, ct.title, color)}
                   disabled={quizLoading === key}
                   style={{ padding: '8px 18px', borderRadius: 10, fontSize: 12, fontWeight: 700, cursor: quizLoading === key ? 'default' : 'pointer', border: `1.5px solid ${color}66`, background: color + '0f', color, transition: 'all 0.2s', whiteSpace: 'nowrap', opacity: quizLoading === key ? 0.6 : 1 }}>
                   {quizLoading === key ? '⏳ Loading…' : '🧪 Test Me'}
@@ -3542,7 +2981,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                             {(() => {
                               const bullets: string[] = Array.isArray(sub.bullets) && sub.bullets.length > 0
                                 ? sub.bullets
-                                : sub.content
+                                : (sub.content ?? '')
                                     .split(/(?<=[.!?])\s+/)
                                     .filter(s => s.trim().length > 10)
                                     .slice(0, 3)
@@ -3587,7 +3026,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                               ✓ Read
                             </button>
                             <button
-                              onClick={() => openTestMe(key, sub.title, sub.content, t.title, color)}
+                              onClick={() => openTestMe(key, sub.title, t.title, color)}
                               disabled={quizLoading === key}
                               style={{
                                 flex: 1, minWidth: 80, padding: '6px 10px', borderRadius: 8, fontSize: 12, fontWeight: 700,
@@ -3864,56 +3303,6 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-          {/* Coverage stats icon */}
-          {enhancementSummary && (
-            <button
-              onClick={() => setStatsOpen(true)}
-              aria-label="Coverage stats"
-              title="Coverage stats"
-              style={{
-                display: 'flex', alignItems: 'center', gap: 5,
-                padding: '5px 10px', borderRadius: 20,
-                background: '#DBEAFE',
-                border: '1.5px solid #93C5FD',
-                cursor: 'pointer', fontSize: 11, fontWeight: 800,
-                color: '#1D4ED8',
-              }}
-            >
-              <span>📊</span>
-              <span>{`${enhancementSummary.originalScore}%→100%`}</span>
-            </button>
-          )}
-          {/* Diagnostic button — only in Course Material view */}
-          {isCourse && onRunDiagnostic && (
-            <button
-              onClick={() => {
-                setDiagnosticOpen(true);
-                if (!diagnostic && !diagnosticLoading) onRunDiagnostic();
-              }}
-              aria-label="AI Diagnostic Report"
-              title="AI Diagnostic Report"
-              style={{
-                display: 'flex', alignItems: 'center', gap: 5,
-                padding: '5px 10px', borderRadius: 20,
-                background: diagnostic
-                  ? (diagnostic.notesCoverageScore >= 85 ? '#F0FDF4' : diagnostic.notesCoverageScore >= 65 ? '#FFFBEB' : '#FEF2F2')
-                  : 'var(--bg-tint)',
-                border: `1.5px solid ${diagnostic
-                  ? (diagnostic.notesCoverageScore >= 85 ? '#86EFAC' : diagnostic.notesCoverageScore >= 65 ? '#FCD34D' : '#FCA5A5')
-                  : 'var(--line)'}`,
-                cursor: 'pointer', fontSize: 11, fontWeight: 800,
-                color: diagnostic
-                  ? (diagnostic.notesCoverageScore >= 85 ? '#16A34A' : diagnostic.notesCoverageScore >= 65 ? '#D97706' : '#DC2626')
-                  : 'var(--ink-3)',
-              }}
-            >
-              {diagnosticLoading
-                ? <div style={{ width: 11, height: 11, border: '1.5px solid currentColor', borderTop: '1.5px solid transparent', borderRadius: '50%', animation: 'spin 0.8s linear infinite' }} />
-                : <span>🔬</span>
-              }
-              <span>{diagnosticLoading ? 'Testing…' : diagnostic ? `${diagnostic.notesCoverageScore}%` : 'Diagnose'}</span>
-            </button>
-          )}
           {hasCache && (
             <button className="btn btn-ghost" onClick={onRegenerate} style={{ fontSize: 12, padding: '6px 10px', color: 'var(--ink-3)', gap: 5 }}>
               <Icon name="refresh" size={13} stroke="var(--ink-3)" /> Refresh
@@ -3921,28 +3310,6 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
           )}
         </div>
       </div>
-
-      {/* Diagnostic sheet */}
-      {diagnosticOpen && isCourse && (
-        <DiagnosticSheet
-          diagnostic={diagnostic ?? null}
-          loading={!!diagnosticLoading}
-          onClose={() => setDiagnosticOpen(false)}
-          onRun={() => { onRunDiagnostic?.(); }}
-        />
-      )}
-
-      {/* Coverage stats overlay */}
-      {statsOpen && (
-        <CoverageStatsOverlay
-          contentAudit={contentAudit}
-          auditLoading={false}
-          enhancing={false}
-          enhancementSummary={enhancementSummary}
-          context="reading"
-          onClose={() => setStatsOpen(false)}
-        />
-      )}
 
       {/* Body — always row layout; sidebar visible in both List and Focus modes */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'row', overflow: 'hidden', minHeight: 0 }}>
