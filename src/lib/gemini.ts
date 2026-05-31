@@ -231,11 +231,12 @@ export async function extractPdfContent(
 ): Promise<string> {
   const client = getClient();
 
-  const prompt = `Extract the COMPLETE text content of this document. Include every heading, subheading, body paragraph, table cell, caption, label, and footnote.
-- Format tables as Markdown tables (| col | col | format)
-- For charts, diagrams, or images: write a brief description in [square brackets] explaining what is shown
+  const prompt = `Extract the COMPLETE text content of this document. Include every heading, subheading, body paragraph, and table.
 - Use # for main headings, ## for subheadings, ### for smaller headings
-- Reproduce ALL text verbatim — do not skip, summarise, or paraphrase any section
+- Reproduce ALL body text verbatim — do not skip, summarise, or paraphrase any written content
+- DATA TABLES: recreate as Markdown tables (| col | col |\\n|---|---|\\n| val | val |)
+- DIAGRAMS & ILLUSTRATIONS: skip entirely — do NOT describe, caption, or transcribe decorative images, clipart, or anatomy diagrams
+- DIAGRAM LABELS: if a diagram has labelled parts (e.g. arrows pointing to parts of an organ), extract ONLY the text labels as a simple bullet list — do not describe the diagram itself
 - Do NOT add commentary, notes, or your own interpretation`;
 
   const stream = await client.models.generateContentStream({
@@ -2051,6 +2052,11 @@ ${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}
 INSTRUCTIONS:
 For each subtopic "content": find and copy ALL relevant content from the SOURCE CONTENT that covers this subtopic — every definition, rule, example, table row, and list item. Do NOT limit to a fixed number of sentences. Get everything the document says about this subtopic. Preserve bullet lists and numbered lists where the source uses them.
 
+Content rules:
+- SKIP diagram descriptions, illustration references, decorative image captions, and visual-only labels
+- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
+- All content must be actual written text from the document — not descriptions of pictures
+
 Also:
 - "keyTerms": 3–5 key terms with clear, document-grounded definitions.
 - "whyItMatters": one sentence on why this topic matters to a student.
@@ -2085,6 +2091,11 @@ INSTRUCTIONS:
 This is a reference section (vocabulary list, conjugation table, synonym/antonym list, word list, or similar). Find ALL content for this section in the source and copy it completely.
 
 Create 1–3 natural groupings as subtopics (e.g. alphabetical ranges, grammatical groupings, or thematic clusters) and copy the COMPLETE content from the source into them — every entry, every table row, every word, every item. Do NOT omit or summarise anything.
+
+Content rules:
+- SKIP diagram descriptions, illustration references, and decorative image captions
+- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
+- All content must be actual written text from the document — not descriptions of pictures
 
 Also:
 - "keyTerms": 2–3 key terms.
