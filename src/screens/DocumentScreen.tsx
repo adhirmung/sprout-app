@@ -31,7 +31,7 @@ import {
   streamCourseMaterial,
   streamTopicUnderstanding,
 } from '../lib/gemini';
-import type { ChatMessage, ContentAudit, ContentMap, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import type { ChatMessage, ContentAudit, ContentMap, DocClassification, DocumentDiagnostic, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, TopicReading, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -116,7 +116,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [needsKey,  setNeedsKey]  = useState(!hasApiKey());
   const [showTutor,         setShowTutor]         = useState(false);
   const [courseProgressMsg, setCourseProgressMsg] = useState('');
-  const [extractedText,    setExtractedText]    = useState<string | null>(null);
+  const [extractedText,      setExtractedText]      = useState<string | null>(null);
+  const [docClassification,  setDocClassification]  = useState<DocClassification | null>(null);
   const [courseStreaming,   setCourseStreaming]   = useState(false);
   const [diagnostic,        setDiagnostic]        = useState<DocumentDiagnostic | null>(null);
   const [diagnosticLoading, setDiagnosticLoading] = useState(false);
@@ -184,13 +185,24 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
-    // Preload extracted text (PDF extraction cache)
+    // Preload extracted text + classification (PDF extraction cache)
     const cachedExtract = Store.get<string | null>(`extract:${sourceKey}`, null);
     if (cachedExtract) {
       setExtractedText(cachedExtract);
+      const cachedClassify = Store.get<DocClassification | null>(`classify:${sourceKey}`, null);
+      if (cachedClassify) setDocClassification(cachedClassify);
     } else if (userId) {
-      dbLoadContent<{ text: string }>(userId, sourceKey, 'extract')
-        .then(data => { if (data?.text) { Store.set(`extract:${sourceKey}`, data.text); setExtractedText(data.text); } })
+      dbLoadContent<{ text: string; classification?: DocClassification }>(userId, sourceKey, 'extract')
+        .then(data => {
+          if (data?.text) {
+            Store.set(`extract:${sourceKey}`, data.text);
+            setExtractedText(data.text);
+            if (data.classification) {
+              Store.set(`classify:${sourceKey}`, data.classification);
+              setDocClassification(data.classification);
+            }
+          }
+        })
         .catch(() => {});
     }
 
@@ -382,28 +394,46 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   // ── ensureExtractedText ───────────────────────────────────────
   // Returns cached extracted text or streams a fresh Gemini extraction.
+  // Also populates docClassification state when a fresh extraction runs.
   // Caller must have already set an appropriate phase/progress message before calling.
   const ensureExtractedText = async (resolvedPdf: string): Promise<string> => {
     // 1. In-memory state
-    if (extractedText) return extractedText;
+    if (extractedText) {
+      // Load classification from local cache if state not yet populated
+      if (!docClassification) {
+        const cachedClassify = Store.get<DocClassification | null>(`classify:${sourceKey}`, null);
+        if (cachedClassify) setDocClassification(cachedClassify);
+      }
+      return extractedText;
+    }
 
     // 2. localStorage
     const cached = Store.get<string | null>(`extract:${sourceKey}`, null);
-    if (cached) { setExtractedText(cached); return cached; }
+    if (cached) {
+      setExtractedText(cached);
+      const cachedClassify = Store.get<DocClassification | null>(`classify:${sourceKey}`, null);
+      if (cachedClassify) setDocClassification(cachedClassify);
+      return cached;
+    }
 
     // 3. Supabase
     if (userId) {
-      const dbCached = await dbLoadContent<{ text: string }>(userId, sourceKey, 'extract').catch(() => null);
+      const dbCached = await dbLoadContent<{ text: string; classification?: DocClassification }>(userId, sourceKey, 'extract').catch(() => null);
       if (dbCached?.text) {
         Store.set(`extract:${sourceKey}`, dbCached.text);
         setExtractedText(dbCached.text);
+        if (dbCached.classification) {
+          Store.set(`classify:${sourceKey}`, dbCached.classification);
+          setDocClassification(dbCached.classification);
+        }
         return dbCached.text;
       }
     }
 
     // 4. Stream extraction from PDF via Gemini multimodal
+    //    extractPdfContent now classifies the document first, then extracts text
     let chunkCount = 0;
-    const text = await extractPdfContent(resolvedPdf, (accumulated, _chunk) => {
+    const { text, classification } = await extractPdfContent(resolvedPdf, (accumulated, _chunk) => {
       chunkCount++;
       if (chunkCount % 4 === 0) {
         const words = Math.round(accumulated.split(/\s+/).length / 100) * 100;
@@ -412,8 +442,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     });
 
     setExtractedText(text);
+    setDocClassification(classification);
     Store.set(`extract:${sourceKey}`, text);
-    if (userId) dbSaveContent(userId, sourceKey, 'extract', { text }).catch(console.error);
+    Store.set(`classify:${sourceKey}`, classification);
+    if (userId) dbSaveContent(userId, sourceKey, 'extract', { text, classification }).catch(console.error);
     return text;
   };
 
@@ -646,6 +678,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         },
         (msg) => setCourseProgressMsg(msg),
         images ?? undefined,
+        docClassification ?? undefined,
       );
 
       setCourseStreaming(false);

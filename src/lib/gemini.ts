@@ -220,25 +220,109 @@ export async function streamCardChat(
   void dbLogUsage(_currentUserId, 'streamCardChat', FAST_MODEL, inputTokens, outputTokens);
 }
 
+// ── Document classifier ───────────────────────────────────────
+// Lightweight first pass: one fast Gemini call returns a JSON profile of
+// the document so the extraction + notes prompts can self-adapt.
+
+export interface DocClassification {
+  /** Visual layout / format of the document */
+  docType:        'slideshow' | 'textbook' | 'worksheet' | 'article' | 'reference';
+  /** How image-heavy the document is */
+  diagramDensity: 'none' | 'low' | 'high';
+  /** Whether the document contains data tables worth recreating */
+  tableDensity:   'none' | 'low' | 'high';
+  /** Primary language */
+  language:       string;
+  /** Approximate reading/grade level, e.g. "Grade 9–10" */
+  readingLevel:   string;
+  /** Subject area, e.g. "Biology" */
+  subject:        string;
+}
+
+async function classifyDocument(pdfBase64: string): Promise<DocClassification> {
+  const prompt = `Analyse this document and return a JSON classification. Return ONLY valid JSON — no markdown, no extra text:
+{
+  "docType": "slideshow",
+  "diagramDensity": "high",
+  "tableDensity": "low",
+  "language": "English",
+  "readingLevel": "Grade 9-10",
+  "subject": "Biology"
+}
+
+Definitions:
+- docType: "slideshow" = presentation slides with sparse text per slide; "textbook" = structured chapters with headings and body paragraphs; "worksheet" = exercises/questions; "article" = flowing prose; "reference" = vocabulary lists, grammar tables, or index content
+- diagramDensity: "none" = no diagrams; "low" = a few diagrams but text is dominant; "high" = many diagrams, clipart, illustrations, or anatomy images
+- tableDensity: "none" = no data tables; "low" = 1–3 tables; "high" = many data tables
+- readingLevel: approximate grade level of the text (e.g. "Grade 7-8", "Grade 10-12")
+- subject: the academic subject area (e.g. "Biology", "History", "Mathematics", "English")`;
+
+  try {
+    const raw = await generateText(
+      FAST_MODEL,
+      'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      [pdfPart(pdfBase64), textPart(prompt)],
+      256,
+      'classifyDocument',
+    );
+    const parsed = parseJson<DocClassification>(raw);
+    // Validate required fields; fall back to safe defaults if missing
+    return {
+      docType:        parsed.docType        ?? 'textbook',
+      diagramDensity: parsed.diagramDensity ?? 'low',
+      tableDensity:   parsed.tableDensity   ?? 'low',
+      language:       parsed.language       ?? 'English',
+      readingLevel:   parsed.readingLevel   ?? 'Grade 8-10',
+      subject:        parsed.subject        ?? 'General',
+    };
+  } catch {
+    return { docType: 'textbook', diagramDensity: 'low', tableDensity: 'low', language: 'English', readingLevel: 'Grade 8-10', subject: 'General' };
+  }
+}
+
 // ── PDF extractor ─────────────────────────────────────────────
-// Streams the full document content (text + tables + image descriptions)
-// via Gemini multimodal. Returns rich markdown. Because we stream, the
-// Netlify 26s edge-function timeout never fires — chunks arrive continuously.
+// 1. Classifies the document (doc type, diagram/table density, subject, level).
+// 2. Streams the full text extraction with a prompt adapted to the doc type.
+// Returns both the text and the classification so callers can adapt downstream
+// prompts (notes, map, feed) without re-analysing the PDF.
+
+export interface ExtractedDocument {
+  text:           string;
+  classification: DocClassification;
+}
 
 export async function extractPdfContent(
   pdfBase64: string,
   onChunk?:  (accumulated: string, newChunk: string) => void,
-): Promise<string> {
+): Promise<ExtractedDocument> {
   const client = getClient();
+
+  // ── Step 1: classify (fast, non-streaming) ────────────────────
+  const classification = await classifyDocument(pdfBase64);
+
+  // ── Step 2: build an extraction prompt tuned to the doc type ──
+  const isSlideshow     = classification.docType === 'slideshow';
+  const heavyDiagrams   = classification.diagramDensity === 'high';
+  const hasTables       = classification.tableDensity   !== 'none';
+
+  const diagramRule = isSlideshow || heavyDiagrams
+    ? `- DIAGRAMS & ILLUSTRATIONS: skip entirely — this document has many visual elements; extract ONLY written text, headings, and bullet points
+- DIAGRAM LABELS: if a diagram has labelled parts (arrows pointing to organs, structures, etc.), extract ONLY the text labels as a simple bullet list — do NOT describe the diagram`
+    : `- DIAGRAMS & ILLUSTRATIONS: skip decorative images and clipart — do NOT describe or caption them
+- DIAGRAM LABELS: if a diagram has labelled parts, extract ONLY the text labels as a simple bullet list`;
+
+  const tableRule = hasTables
+    ? `- DATA TABLES: recreate as Markdown tables (| col | col |\\n|---|---|\\n| val | val |)`
+    : `- DATA TABLES: if any data tables exist, recreate as Markdown tables (| col | col | format)`;
 
   const prompt = `Extract the COMPLETE text content of this document. Include every heading, subheading, body paragraph, and table.
 - Use # for main headings, ## for subheadings, ### for smaller headings
 - Reproduce ALL body text verbatim — do not skip, summarise, or paraphrase any written content
-- DATA TABLES: recreate as Markdown tables (| col | col |\\n|---|---|\\n| val | val |)
-- DIAGRAMS & ILLUSTRATIONS: skip entirely — do NOT describe, caption, or transcribe decorative images, clipart, or anatomy diagrams
-- DIAGRAM LABELS: if a diagram has labelled parts (e.g. arrows pointing to parts of an organ), extract ONLY the text labels as a simple bullet list — do not describe the diagram itself
+${tableRule}
+${diagramRule}
 - Do NOT add commentary, notes, or your own interpretation`;
 
+  // ── Step 3: stream the extraction ─────────────────────────────
   const stream = await client.models.generateContentStream({
     model:    SMART_MODEL,
     contents: [{ role: 'user', parts: [pdfPart(pdfBase64), textPart(prompt)] }],
@@ -267,7 +351,7 @@ export async function extractPdfContent(
   }
 
   void dbLogUsage(_currentUserId, 'extractPdfContent', SMART_MODEL, inputTokens, outputTokens);
-  return accumulated;
+  return { text: accumulated, classification };
 }
 
 // ── Types ─────────────────────────────────────────────────────
@@ -2013,6 +2097,7 @@ export async function streamCourseMaterial(
   onTopicComplete: (tr: TopicReading) => void,
   onProgress?:     (msg: string) => void,
   images?:         string[],
+  classification?: DocClassification,
 ): Promise<DocumentReading> {
   const hasImages = (images?.length ?? 0) > 0;
   const allTopics:  TopicReading[] = [];
@@ -2028,6 +2113,21 @@ export async function streamCourseMaterial(
   const TEXT_LIMIT  = 150_000;
   const textSlice   = extractedText.slice(0, TEXT_LIMIT);
 
+  // ── Classification-aware content rules ─────────────────────────
+  // Diagrams: be aggressive about skipping if the doc is visual-heavy
+  const isVisualHeavy = classification?.docType === 'slideshow' || classification?.diagramDensity === 'high';
+  const diagramContentRule = isVisualHeavy
+    ? `- This document is visual-heavy (${classification?.docType ?? 'slideshow'}). SKIP all diagram descriptions, illustration references, clipart captions, and any text that describes a picture or image
+- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
+- Extract ONLY written prose, bullet points, headings, and table data`
+    : `- SKIP diagram descriptions, illustration references, decorative image captions, and visual-only labels
+- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
+- All content must be actual written text from the document — not descriptions of pictures`;
+
+  const docCtx = classification
+    ? `Document: ${classification.subject} — ${classification.docType} (${classification.readingLevel})`
+    : '';
+
   for (let i = 0; i < totalTopics; i++) {
     const t = workTopics[i];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
@@ -2036,7 +2136,7 @@ export async function streamCourseMaterial(
 
     const prompt = hasSubtopics
       ? `You are an expert educational content organiser. FORMAT and EXTRACT content from the original document — do NOT rewrite or paraphrase.
-
+${docCtx ? `\n${docCtx}` : ''}
 SUBJECT: "${topic}"
 SOURCE CONTENT (verbatim from the uploaded document):
 """
@@ -2053,9 +2153,7 @@ INSTRUCTIONS:
 For each subtopic "content": find and copy ALL relevant content from the SOURCE CONTENT that covers this subtopic — every definition, rule, example, table row, and list item. Do NOT limit to a fixed number of sentences. Get everything the document says about this subtopic. Preserve bullet lists and numbered lists where the source uses them.
 
 Content rules:
-- SKIP diagram descriptions, illustration references, decorative image captions, and visual-only labels
-- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
-- All content must be actual written text from the document — not descriptions of pictures
+${diagramContentRule}
 
 Also:
 - "keyTerms": 3–5 key terms with clear, document-grounded definitions.
@@ -2077,7 +2175,7 @@ Return ONLY valid JSON — no markdown fences:
   "whyItMatters": "..."
 }`
       : `You are an expert educational content organiser. EXTRACT the complete content for this reference section from the original document.
-
+${docCtx ? `\n${docCtx}` : ''}
 SUBJECT: "${topic}"
 SOURCE CONTENT (verbatim from the uploaded document):
 """
@@ -2093,9 +2191,7 @@ This is a reference section (vocabulary list, conjugation table, synonym/antonym
 Create 1–3 natural groupings as subtopics (e.g. alphabetical ranges, grammatical groupings, or thematic clusters) and copy the COMPLETE content from the source into them — every entry, every table row, every word, every item. Do NOT omit or summarise anything.
 
 Content rules:
-- SKIP diagram descriptions, illustration references, and decorative image captions
-- If the source contains a data table, recreate it as a Markdown table (| col | col | format)
-- All content must be actual written text from the document — not descriptions of pictures
+${diagramContentRule}
 
 Also:
 - "keyTerms": 2–3 key terms.
