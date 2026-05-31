@@ -1954,39 +1954,6 @@ Return ONLY valid JSON — no markdown:
   }
 }
 
-// ── Per-topic text slicer ─────────────────────────────────────
-// Locates a topic's heading inside the full extracted text and returns the
-// text from that heading up to the start of the next topic heading.
-// This prevents content bleeding when a document has many identically-
-// structured sections (e.g. Bhagavad-Gita chapter: TEXT 1 / Translation /
-// Purport  ×  20 — without slicing the model would always drift to whichever
-// TEXT it found most salient in a 150 K-char window).
-//
-// Returns '' when the title cannot be found in the text (caller handles the
-// empty case).  Never falls back to the full document — handing the whole
-// document to a "chapter divider" topic is what caused the single massive
-// dropdown.
-function findTopicTextSlice(
-  text:           string,
-  topicTitle:     string,
-  nextTopicTitle: string | undefined,
-  maxChars        = 20_000,
-): string {
-  const lower      = text.toLowerCase();
-  const titleLower = topicTitle.toLowerCase().trim();
-  const startIdx   = lower.indexOf(titleLower);
-
-  if (startIdx === -1) return ''; // title not found — caller will use summary fallback
-
-  let endIdx = startIdx + maxChars;
-  if (nextTopicTitle) {
-    const nextLower = nextTopicTitle.toLowerCase().trim();
-    const nextIdx   = lower.indexOf(nextLower, startIdx + titleLower.length);
-    if (nextIdx !== -1 && nextIdx < endIdx) endIdx = nextIdx;
-  }
-
-  return text.slice(startIdx, endIdx);
-}
 
 // ── Content-map topic normaliser ──────────────────────────────
 // Applies the same "repeated top-level title → subtopic" heuristic to an
@@ -2061,101 +2028,76 @@ export async function streamCourseMaterial(
   const textSlice   = extractedText.slice(0, TEXT_LIMIT);
 
   for (let i = 0; i < totalTopics; i++) {
-    const t     = workTopics[i];
-    const nextT = workTopics[i + 1];
+    const t = workTopics[i];
     onProgress?.(`Generating notes — ${i + 1} of ${totalTopics}: ${t.title}…`);
 
-    // ── Locate this topic's text in the document ──────────────────
-    // Try up to 3 strategies so the model always receives real source
-    // text rather than falling back to AI-generated map summaries.
-    const BODY_THRESHOLD = 200;
+    const hasSubtopics = t.subtopics.length > 0;
 
-    let rawSlice = '';
-    if (!hasImages || extractedText) {
-      // Strategy 1: exact topic title match
-      rawSlice = findTopicTextSlice(textSlice, t.title, nextT?.title);
-
-      // Strategy 2: try matching any subtopic title (AI topic titles
-      // sometimes differ from the document headings)
-      if (rawSlice.length < BODY_THRESHOLD && t.subtopics.length > 0) {
-        for (const sub of t.subtopics) {
-          const subSlice = findTopicTextSlice(textSlice, sub.title, nextT?.title);
-          if (subSlice.length >= BODY_THRESHOLD) { rawSlice = subSlice; break; }
-        }
-      }
-
-      // Strategy 3: positional window — topic N of M starts roughly at
-      // (N/M) of the text. Guarantees real document content even when
-      // AI-generated titles have no textual overlap with the source.
-      if (rawSlice.length < BODY_THRESHOLD) {
-        const startRatio = i / totalTopics;
-        const endRatio   = (i + 1) / totalTopics;
-        const startPos   = Math.floor(startRatio * textSlice.length);
-        const endPos     = Math.min(
-          Math.floor(endRatio   * textSlice.length) + 2_000, // a bit of overlap
-          textSlice.length,
-          startPos + 20_000,
-        );
-        rawSlice = textSlice.slice(startPos, endPos);
-      }
-    }
-
-    const contextText =
-      rawSlice.length >= BODY_THRESHOLD
-        ? rawSlice
-        : [   // true header-only divider (e.g. "Contents of the Gita Summarized")
-            `Section: "${t.title}"`,
-            t.summary ? `Overview: ${t.summary}` : '',
-            ...t.subtopics.map(s => `• ${s.title}: ${s.summary}`),
-          ].filter(Boolean).join('\n');
-
-    // ── Per-topic extraction prompt ───────────────────────────────
-    // Subtopics from the content map are pre-defined — the model's job
-    // is to find and copy verbatim content from the source for each one,
-    // NOT to re-structure or summarise the document.
-    const subtopicsOutline = t.subtopics.length > 0
-      ? t.subtopics.map(s => `  • "${s.title}"${s.summary ? ': ' + s.summary : ''}`).join('\n')
-      : '  • (discover 2–4 natural sub-sections from the source content)';
-
-    const contentInstruction = contextText.length >= BODY_THRESHOLD
-      ? `For each sub-section "content": find and copy 3–6 CONSECUTIVE sentences VERBATIM from the SOURCE CONTENT above that directly explain that sub-section. Copy the EXACT words as they appear — do NOT paraphrase, reword, or summarise. If the source uses bullet points, tables, or numbered lists, reproduce them fully.`
-      : `For each sub-section "content": write 4–6 clear, specific, factually accurate sentences based on the section overview and sub-section context provided.`;
-
-    const prompt = `You are an expert educational content organiser. Your job is to EXTRACT and REORGANISE content from the original document — not rewrite it.
+    const prompt = hasSubtopics
+      ? `You are an expert educational content organiser. FORMAT and EXTRACT content from the original document — do NOT rewrite or paraphrase.
 
 SUBJECT: "${topic}"
-
-SOURCE CONTENT (extract from the document — focus on the "${t.title}" section):
+SOURCE CONTENT (verbatim from the uploaded document):
 """
-${contextText}
+${textSlice}
 """
 
-SECTION: "${t.title}"
+TOPIC OUTLINE:
+Topic (topicId: "${t.id}", title: "${t.title}"):
 Overview: ${t.summary}
-
-Sub-sections to produce:
-${subtopicsOutline}
+Subtopics:
+${t.subtopics.map(s => `  • "${s.title}": ${s.summary}`).join('\n')}
 
 INSTRUCTIONS:
-${contentInstruction}
+For each subtopic "content": find and copy ALL relevant content from the SOURCE CONTENT that covers this subtopic — every definition, rule, example, table row, and list item. Do NOT limit to a fixed number of sentences. Get everything the document says about this subtopic. Preserve bullet lists and numbered lists where the source uses them.
 
-For each sub-section also produce:
-- "keyTerms" (top level, not per sub-section): 3–5 key terms with document-grounded definitions.
-- "whyItMatters": one sentence on why this section matters to a student.
+Also:
+- "keyTerms": 3–5 key terms with clear, document-grounded definitions.
+- "whyItMatters": one sentence on why this topic matters to a student.
 
-Rules:
-- Produce content for EVERY sub-section listed above — do not skip any.
-- Sub-section titles must match the outline exactly (or be the ones you discovered if none were listed).
-- Content must come from the source, not be invented.
+Rules: subtopic titles must match the outline EXACTLY; all content must come from the document.
 
-Return ONLY valid JSON — no markdown fences, no extra text:
+Return ONLY valid JSON — no markdown fences:
 {
   "topicId": "${t.id}",
   "title": "${t.title}",
   "subtopics": [
     {
-      "title": "Sub-section name (must match outline)",
-      "content": "Verbatim sentences / bullet points / table from the source"
+      "title": "Subtopic name (must match outline exactly)",
+      "content": "..."
+    }
+  ],
+  "keyTerms": [{ "term": "...", "definition": "..." }],
+  "whyItMatters": "..."
+}`
+      : `You are an expert educational content organiser. EXTRACT the complete content for this reference section from the original document.
+
+SUBJECT: "${topic}"
+SOURCE CONTENT (verbatim from the uploaded document):
+"""
+${textSlice}
+"""
+
+REFERENCE SECTION: "${t.title}"
+Overview: ${t.summary}
+
+INSTRUCTIONS:
+This is a reference section (vocabulary list, conjugation table, synonym/antonym list, word list, or similar). Find ALL content for this section in the source and copy it completely.
+
+Create 1–3 natural groupings as subtopics (e.g. alphabetical ranges, grammatical groupings, or thematic clusters) and copy the COMPLETE content from the source into them — every entry, every table row, every word, every item. Do NOT omit or summarise anything.
+
+Also:
+- "keyTerms": 2–3 key terms.
+- "whyItMatters": one sentence on why this section helps students.
+
+Return ONLY valid JSON — no markdown fences:
+{
+  "topicId": "${t.id}",
+  "title": "${t.title}",
+  "subtopics": [
+    {
+      "title": "Natural grouping name",
+      "content": "Complete content from the source for this group — every entry, every item."
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
