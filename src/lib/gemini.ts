@@ -389,7 +389,7 @@ export interface SubtopicQuiz {
 export interface TopicReading {
   topicId:       string;
   title:         string;
-  subtopics:     { title: string; content: string; quiz?: SubtopicQuiz }[];
+  subtopics:     { title: string; content: string; bullets?: string[]; quiz?: SubtopicQuiz }[];
   keyTerms:      TopicKeyTerm[];
   whyItMatters?: string;
 }
@@ -2168,12 +2168,15 @@ Return ONLY valid JSON — no markdown fences:
   "subtopics": [
     {
       "title": "Subtopic name (must match outline exactly)",
+      "bullets": ["Key point 1 (max 15 words)", "Key point 2 (max 15 words)", "Key point 3 (max 15 words)"],
       "content": "..."
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
   "whyItMatters": "..."
-}`
+}
+
+bullets = exactly 2–3 short key points (max 15 words each) that summarise this subtopic for a student who needs a quick overview. content = the full verbatim detail used for testing.`
       : `You are an expert educational content organiser. EXTRACT the complete content for this reference section from the original document.
 ${docCtx ? `\n${docCtx}` : ''}
 SUBJECT: "${topic}"
@@ -2204,12 +2207,15 @@ Return ONLY valid JSON — no markdown fences:
   "subtopics": [
     {
       "title": "Natural grouping name",
+      "bullets": ["Key point 1 (max 15 words)", "Key point 2 (max 15 words)"],
       "content": "Complete content from the source for this group — every entry, every item."
     }
   ],
   "keyTerms": [{ "term": "...", "definition": "..." }],
   "whyItMatters": "..."
-}`;
+}
+
+bullets = 2–3 short key points (max 15 words each) summarising this group. content = full verbatim detail.`;
 
     try {
       const client = getClient();

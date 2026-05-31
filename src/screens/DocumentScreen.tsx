@@ -780,6 +780,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onFocusChatMessagesChange={setFocusChatMessages}
         onBack={() => { if (!courseStreaming) setPhase('map'); }}
         onPractice={() => setPhase('practice')}
+        onStudy={() => { void generate(false, 'activities'); }}
         onRegenerate={async () => {
           if (courseStreaming) return; // don't allow while streaming
           Store.del(`course:${sourceKey}`);
@@ -2880,7 +2881,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, enhancementSummary, contentAudit, isCourse, hasCourseMaterial, courseStreaming, diagnostic, diagnosticLoading, onRunDiagnostic, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onStudy, onRegenerate }: {
   documentReading:           DocumentReading;
   topic:                     string;
   hasCache:                  boolean;
@@ -2899,6 +2900,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
   onFocusChatMessagesChange: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   onBack:                    () => void;
   onPractice:                (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onStudy?:                  () => void;
   onRegenerate:              () => void;
 }) {
   const [statsOpen,         setStatsOpen]         = useState(false);
@@ -2926,8 +2928,9 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
 
   const [viewMode,       setViewMode]       = useState<'list' | 'cards' | 'ask'>('list');
   const [cardIdx,        setCardIdx]        = useState(0);
-  const [notesMode,      setNotesMode]      = useState<'study' | 'understand'>('study');
-  const [understandTexts, setUnderstandTexts] = useState<Record<string, string>>({});
+  // notesMode: 'notes' = summary bullets view (default), 'understand' = AI explanation view
+  const [notesMode,         setNotesMode]         = useState<'notes' | 'understand'>('notes');
+  const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
   const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
 
   const isMobile    = useIsMobile();
@@ -3164,8 +3167,8 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
     <div style={{ marginBottom: 20 }}>
       {/* Row 1: View mode + break chip */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        {/* View toggle — only shown in Study mode */}
-        {notesMode === 'study' ? (
+        {/* View toggle — only shown in Notes mode */}
+        {notesMode === 'notes' ? (
           <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
             {([
               { id: 'list',  label: '≡ List'  },
@@ -3197,29 +3200,32 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
         )}
       </div>
 
-      {/* Row 2: Study / Understand toggle */}
-      <div style={{ display: 'flex', gap: 4, padding: 3, borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)', width: 'fit-content' }}>
+      {/* Row 2: 4-tab navigation — Study | Notes | Understand | Practice */}
+      <div style={{ display: 'flex', gap: 2, padding: 3, borderRadius: 12, background: 'var(--bg-tint)', border: '1px solid var(--line)', width: '100%' }}>
         {([
-          { id: 'study',      label: '📚 Study'      },
-          { id: 'understand', label: '💡 Understand'  },
-        ] as const).map(m => (
-          <button
-            key={m.id}
-            onClick={() => {
-              setNotesMode(m.id);
-              if (m.id === 'understand') startUnderstandMode();
-            }}
-            style={{
-              padding: '5px 16px', borderRadius: 7, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: 'none',
-              background: notesMode === m.id ? 'var(--card)' : 'transparent',
-              color: notesMode === m.id ? 'var(--ink)' : 'var(--ink-4)',
-              boxShadow: notesMode === m.id ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
-              transition: 'all 0.18s',
-            }}
-          >
-            {m.label}
-          </button>
-        ))}
+          { id: 'study',      label: '📚 Study',      action: () => { onStudy?.(); } },
+          { id: 'notes',      label: '📝 Notes',      action: () => setNotesMode('notes') },
+          { id: 'understand', label: '💡 Understand',  action: () => { setNotesMode('understand'); startUnderstandMode(); } },
+          { id: 'practice',   label: '✏️ Practice',    action: () => onPractice('quiz') },
+        ] as const).map(m => {
+          const isActive = m.id === 'notes' ? notesMode === 'notes' : m.id === 'understand' ? notesMode === 'understand' : false;
+          return (
+            <button
+              key={m.id}
+              onClick={m.action}
+              style={{
+                flex: 1, padding: '6px 4px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+                cursor: 'pointer', border: 'none', whiteSpace: 'nowrap',
+                background: isActive ? 'var(--card)' : 'transparent',
+                color: isActive ? 'var(--ink)' : 'var(--ink-4)',
+                boxShadow: isActive ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
+                transition: 'all 0.18s',
+              }}
+            >
+              {m.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -3404,7 +3410,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
         {subActionBar}
 
         {/* ── Understand mode: one conceptual card per topic ── */}
-        {notesMode === 'understand' ? (
+        {notesMode === 'understand' ? ( // ── Understand tab ──
           <div>
             {documentReading.topics.map((t, i) => {
               const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
@@ -3440,8 +3446,8 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                     <div style={{ borderTop: `1px solid ${color}22`, padding: '10px 18px' }}>
                       <button
                         onClick={() => {
-                          setNotesMode('study');
-                          // Scroll after one frame so study-mode DOM is mounted
+                          setNotesMode('notes');
+                          // Scroll after one frame so notes-mode DOM is mounted
                           requestAnimationFrame(() => scrollTo(t.topicId));
                         }}
                         style={{
@@ -3451,7 +3457,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                           transition: 'all 0.2s',
                         }}
                       >
-                        📖 View notes for topic {i + 1}
+                        📝 View notes for topic {i + 1}
                       </button>
                     </div>
                   </div>
@@ -3459,7 +3465,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
               );
             })}
           </div>
-        ) : (viewMode === 'cards' || viewMode === 'ask') ? cardView : (<>
+        ) : (viewMode === 'cards' || viewMode === 'ask') ? cardView : (<> {/* ── Notes tab (list view) ── */}
 
         {/* Topic pills nav */}
         <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
@@ -3530,9 +3536,25 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
                       {/* Expanded content */}
                       {isOpen && (
                         <div style={{ borderTop: `1px solid ${color}22` }}>
-                          {/* Reading content */}
+                          {/* Summary bullets — derive from sub.bullets if available,
+                              otherwise split first 3 sentences of content as fallback */}
                           <div style={{ padding: '12px 16px 12px 46px' }}>
-                            <NoteMarkdown content={sub.content} />
+                            {(() => {
+                              const bullets: string[] = Array.isArray(sub.bullets) && sub.bullets.length > 0
+                                ? sub.bullets
+                                : sub.content
+                                    .split(/(?<=[.!?])\s+/)
+                                    .filter(s => s.trim().length > 10)
+                                    .slice(0, 3)
+                                    .map(s => s.trim());
+                              return (
+                                <ul style={{ margin: 0, paddingLeft: 18, display: 'flex', flexDirection: 'column', gap: 7 }}>
+                                  {bullets.map((b, bi) => (
+                                    <li key={bi} style={{ fontSize: 14, lineHeight: 1.55, color: 'var(--ink-2)' }}>{b}</li>
+                                  ))}
+                                </ul>
+                              );
+                            })()}
                           </div>
 
                           {/* Key terms for this subtopic */}
@@ -3650,7 +3672,7 @@ function ReadView({ documentReading, topic, hasCache, profile, enhancementSummar
         )}
 
         </>)}
-        {/* end notesMode === 'study' branch */}
+        {/* end notes list view */}
       </div>
     </div>
   );
