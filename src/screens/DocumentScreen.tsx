@@ -566,8 +566,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         hasCache={!!Store.get<DocumentReading | null>(`course:${sourceKey}`, null)}
         profile={profile}
         extractedText={extractedText ?? ''}
-        isCourse={true}
-        hasCourseMaterial={true}
         courseStreaming={false}
         subStatuses={subStatuses}
         onSubStatusChange={setSubStatuses}
@@ -575,7 +573,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onFocusChatMessagesChange={setFocusChatMessages}
         onBack={() => setPhase('map')}
         onPractice={() => setPhase('practice')}
-        onStudy={() => { void generate(false, 'activities'); }}
         onRegenerate={async () => {
           Store.del(`course:${sourceKey}`);
           setCourseMaterial(null);
@@ -2326,14 +2323,12 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, isCourse, hasCourseMaterial, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onStudy, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate }: {
   documentReading:           DocumentReading;
   topic:                     string;
   hasCache:                  boolean;
   profile:                   LearnerProfile | null;
   extractedText:             string;
-  isCourse?:                 boolean;
-  hasCourseMaterial?:        boolean;
   courseStreaming?:           boolean;
   subStatuses:               Record<string, SubStatus>;
   onSubStatusChange:         React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
@@ -2341,7 +2336,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, is
   onFocusChatMessagesChange: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
   onBack:                    () => void;
   onPractice:                (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onStudy?:                  () => void;
   onRegenerate:              () => void;
 }) {
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
@@ -2639,33 +2633,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, is
         )}
       </div>
 
-      {/* Row 2: 4-tab navigation — Study | Notes | Understand | Practice */}
-      <div style={{ display: 'flex', gap: 2, padding: 3, borderRadius: 12, background: 'var(--bg-tint)', border: '1px solid var(--line)', width: '100%' }}>
-        {([
-          { id: 'study',      label: '📚 Study',      action: () => { onStudy?.(); } },
-          { id: 'notes',      label: '📝 Notes',      action: () => setNotesMode('notes') },
-          { id: 'understand', label: '💡 Understand',  action: () => { setNotesMode('understand'); startUnderstandMode(); } },
-          { id: 'practice',   label: '✏️ Practice',    action: () => onPractice('quiz') },
-        ] as const).map(m => {
-          const isActive = m.id === 'notes' ? notesMode === 'notes' : m.id === 'understand' ? notesMode === 'understand' : false;
-          return (
-            <button
-              key={m.id}
-              onClick={m.action}
-              style={{
-                flex: 1, padding: '6px 4px', borderRadius: 8, fontSize: 11, fontWeight: 700,
-                cursor: 'pointer', border: 'none', whiteSpace: 'nowrap',
-                background: isActive ? 'var(--card)' : 'transparent',
-                color: isActive ? 'var(--ink)' : 'var(--ink-4)',
-                boxShadow: isActive ? '0 1px 4px rgba(0,0,0,0.08)' : 'none',
-                transition: 'all 0.18s',
-              }}
-            >
-              {m.label}
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 
@@ -3299,7 +3266,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, is
           <Icon name="arrow-left" size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="label-eyebrow" style={{ marginBottom: 1 }}>{isCourse ? 'Step 2 · Course Material' : 'Notes'}</div>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Notes</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
@@ -3322,40 +3289,47 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, is
         {showSidebar && sidebar}
       </div>
 
-      {/* Step nav bar */}
-      <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
-        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 420, width: '100%' }}>
-          {/* Step 1 — Map (done, clickable) */}
-          <button onClick={onBack} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', display: 'grid', placeItems: 'center', fontSize: 14, color: 'white', fontWeight: 800, boxShadow: '0 2px 8px rgba(47,158,94,0.3)' }}>✓</div>
-            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)', letterSpacing: '0.02em' }}>Map</span>
-          </button>
-
-          {/* Line 1→2 */}
-          <div style={{ flex: 1, height: 2.5, background: 'var(--brand)', borderRadius: 2, marginBottom: 18 }} />
-
-          {/* Step 2 — Notes (active if isCourse, done/clickable if hasCourseMaterial) */}
-          {isCourse ? (
-            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
-              <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>2</div>
-              <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>Notes</span>
+      {/* ── Bottom navigation: Notes | AI Summary | Practice ── */}
+      <div style={{
+        flexShrink: 0, borderTop: '1px solid var(--line)', background: 'var(--card)',
+        display: 'flex', alignItems: 'stretch',
+      }}>
+        {([
+          { id: 'notes',      num: '1', label: 'NOTES',      emoji: '📝', action: () => setNotesMode('notes'),                                             active: notesMode === 'notes' },
+          { id: 'understand', num: '2', label: 'AI SUMMARY',  emoji: '💡', action: () => { setNotesMode('understand'); startUnderstandMode(); },             active: notesMode === 'understand' },
+          { id: 'practice',   num: '3', label: 'PRACTICE',    emoji: '✏️', action: () => onPractice('quiz'),                                                active: false },
+        ] as const).map((item, i, arr) => (
+          <button
+            key={item.id}
+            onClick={item.action}
+            style={{
+              flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+              justifyContent: 'center', gap: 4, padding: '10px 4px 14px',
+              background: 'none', border: 'none', cursor: 'pointer',
+              borderRight: i < arr.length - 1 ? '1px solid var(--line)' : 'none',
+              borderTop: item.active ? '2.5px solid var(--brand)' : '2.5px solid transparent',
+              transition: 'all 0.15s',
+            }}
+          >
+            <div style={{
+              width: 28, height: 28, borderRadius: '50%', display: 'grid', placeItems: 'center',
+              fontSize: 12, fontWeight: 800,
+              background: item.active ? 'var(--brand)' : 'var(--bg-tint)',
+              color: item.active ? 'white' : 'var(--ink-4)',
+              border: `2px solid ${item.active ? 'var(--brand)' : 'var(--line)'}`,
+              transition: 'all 0.15s',
+            }}>
+              {item.num}
             </div>
-          ) : (
-            <button onClick={onBack} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: hasCourseMaterial ? 'pointer' : 'default', padding: '0 4px' }}>
-              <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasCourseMaterial ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasCourseMaterial ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 14, color: hasCourseMaterial ? 'white' : 'var(--ink-4)', fontWeight: 800, boxShadow: hasCourseMaterial ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>{hasCourseMaterial ? '✓' : '2'}</div>
-              <span style={{ fontSize: 11, fontWeight: 700, color: hasCourseMaterial ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em' }}>Notes</span>
-            </button>
-          )}
-
-          {/* Line 2→3 */}
-          <div style={{ flex: 1, height: 2.5, background: progressPct >= 100 ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
-
-          {/* Step 3 — Practice */}
-          <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
-            <div style={{ width: 34, height: 34, borderRadius: '50%', background: progressPct >= 100 ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${progressPct >= 100 ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: progressPct >= 100 ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: progressPct >= 100 ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>3</div>
-            <span style={{ fontSize: 11, fontWeight: 700, color: progressPct >= 100 ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Practice</span>
+            <span style={{
+              fontSize: 9, fontWeight: 800, letterSpacing: '0.08em',
+              color: item.active ? 'var(--brand)' : 'var(--ink-4)',
+              transition: 'color 0.15s',
+            }}>
+              {item.label}
+            </span>
           </button>
-        </div>
+        ))}
       </div>
     </div>
   );
