@@ -118,6 +118,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
   // Deferred practice — set when user clicks Practice before Notes are loaded
   const [pendingPractice,   setPendingPractice]   = useState(false);
+  // weakSpots: topicId → last practice percentage (0-100); < 60 = needs review
+  const [weakSpots, setWeakSpots] = useState<Record<string, number>>({});
   const retryRef = useRef<HTMLButtonElement>(null);
 
   const topic       = source?.path?.[source.path.length - 1] ?? 'Document';
@@ -192,6 +194,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .then(data => { if (data && typeof data === 'object') { Store.set(`progress:${sourceKey}`, data); setSubStatuses(data); } })
         .catch(() => {});
     }
+
+    // Preload per-topic practice scores (weak spot tracker)
+    const cachedWeak = Store.get<Record<string, number> | null>(`weakspots:${sourceKey}`, null);
+    if (cachedWeak && typeof cachedWeak === 'object') setWeakSpots(cachedWeak);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
@@ -578,6 +584,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onSubStatusChange={setSubStatuses}
         focusChatMessages={focusChatMessages}
         onFocusChatMessagesChange={setFocusChatMessages}
+        weakSpots={weakSpots}
         onBack={() => setPhase('map')}
         onPractice={(mode) => {
           if (mode === 'activities' || mode === 'flashcards') { void generate(false, mode); return; }
@@ -645,6 +652,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       topic={topic}
       profile={profile}
       onBack={() => courseMaterial ? setPhase('course') : setPhase('map')}
+      onComplete={(breakdown) => {
+        const updated = { ...weakSpots };
+        breakdown.forEach(t => { updated[t.topicId] = t.percentage; });
+        setWeakSpots(updated);
+        Store.set(`weakspots:${sourceKey}`, updated);
+      }}
     />
   );
 
@@ -1930,12 +1943,13 @@ const BAND_COLOR = {
 } as const;
 
 function PracticeView({
-  documentReading, topic, profile: _profile, onBack,
+  documentReading, topic, profile: _profile, onBack, onComplete,
 }: {
   documentReading: DocumentReading;
   topic:           string;
   profile:         LearnerProfile | null;
   onBack:          () => void;
+  onComplete?:     (breakdown: { topicId: string; topicTitle: string; percentage: number }[]) => void;
 }) {
   const isMobile = useIsMobile();
   type Phase = 'generating' | 'quiz' | 'done';
@@ -2079,7 +2093,7 @@ function PracticeView({
       <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
         {/* Header */}
         <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--line)', background: 'var(--card)', display: 'flex', alignItems: 'center', gap: 12, flexShrink: 0 }}>
-          <button onClick={onBack} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
+          <button onClick={() => { if (report) onComplete?.(report.topicBreakdown); onBack(); }} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>Practice Results</div>
             <div style={{ fontSize: 11, color: 'var(--ink-3)' }}>{topic}</div>
@@ -2142,7 +2156,7 @@ function PracticeView({
 
             {/* Actions */}
             <div style={{ display: 'flex', gap: 10 }}>
-              <button onClick={onBack}
+              <button onClick={() => { if (report) onComplete?.(report.topicBreakdown); onBack(); }}
                 style={{ flex: 1, padding: '12px 0', borderRadius: 12, border: '1.5px solid var(--line)', background: 'var(--card)', color: 'var(--ink-2)', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
                 ← Back to Reading
               </button>
@@ -2520,7 +2534,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate, weakSpots = {} }: {
   documentReading:           DocumentReading;
   topic:                     string;
   hasCache:                  boolean;
@@ -2534,6 +2548,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   onBack:                    () => void;
   onPractice:                (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:              () => void;
+  weakSpots?:                Record<string, number>;
 }) {
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
@@ -2802,6 +2817,43 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     }
   };
 
+  // ── Export notes ─────────────────────────────────────────────
+  const [exportCopied, setExportCopied] = useState(false);
+
+  const exportNotes = () => {
+    const lines: string[] = [`# ${topic}\n`];
+    documentReading.topics.forEach((t, i) => {
+      lines.push(`## ${i + 1}. ${t.title}\n`);
+      (t.subtopics ?? []).forEach((sub) => {
+        lines.push(`### ${sub.title}\n`);
+        const bullets: string[] = Array.isArray(sub.bullets) && sub.bullets.length > 0
+          ? sub.bullets
+          : (sub.content ?? '').split(/(?<=[.!?])\s+/).filter(s => s.trim().length > 10).slice(0, 3).map(s => s.trim());
+        bullets.forEach(b => lines.push(`- ${b}`));
+        lines.push('');
+      });
+      if (t.keyTerms.length > 0) {
+        lines.push(`**Key Terms:** ${t.keyTerms.join(', ')}\n`);
+      }
+    });
+    const md = lines.join('\n');
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(md).then(() => {
+        setExportCopied(true);
+        setTimeout(() => setExportCopied(false), 2200);
+      }).catch(() => {
+        // Fallback: download
+        const blob = new Blob([md], { type: 'text/markdown' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `${topic.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 60)}_notes.md`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
+    }
+  };
+
   // ── Sub-action bar shared by both views ──────────────────────
   const subActionBar = (
     <div style={{ marginBottom: 20 }}>
@@ -2839,6 +2891,24 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
           </div>
         )}
       </div>
+
+      {/* Row 2: Export Notes button — only visible in Notes list view */}
+      {notesMode === 'notes' && viewMode === 'list' && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <button
+            onClick={exportNotes}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '5px 13px', borderRadius: 8,
+              border: '1.5px solid var(--line)', background: exportCopied ? '#DCFCE7' : 'var(--card)',
+              color: exportCopied ? '#16A34A' : 'var(--ink-3)',
+              fontSize: 12, fontWeight: 700, cursor: 'pointer',
+              transition: 'all 0.2s',
+            }}>
+            {exportCopied ? '✓ Copied!' : '↑ Export Notes'}
+          </button>
+        </div>
+      )}
 
     </div>
   );
@@ -3080,6 +3150,26 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
           </div>
         ) : (viewMode === 'cards' || viewMode === 'ask') ? cardView : (<> {/* ── Notes tab (list view) ── */}
 
+        {/* Needs Review banner — shown when any topic scored < 60% in practice */}
+        {(() => {
+          const needsReview = documentReading.topics.filter(t => {
+            const pct = weakSpots[t.topicId];
+            return pct !== undefined && pct < 60;
+          });
+          if (needsReview.length === 0) return null;
+          return (
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, padding: '12px 16px', borderRadius: 14, background: '#FFF7ED', border: '1.5px solid #FED7AA', marginBottom: 20 }}>
+              <span style={{ fontSize: 18, flexShrink: 0, marginTop: 1 }}>🎯</span>
+              <div>
+                <div style={{ fontSize: 13, fontWeight: 800, color: '#92400E', marginBottom: 4 }}>Needs Review</div>
+                <div style={{ fontSize: 12, color: '#B45309', lineHeight: 1.5 }}>
+                  {needsReview.map(t => `${t.title} (${weakSpots[t.topicId]}%)`).join(' · ')}
+                </div>
+              </div>
+            </div>
+          );
+        })()}
+
         {/* Topic pills nav */}
         <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
           {documentReading.topics.map((t, i) => {
@@ -3104,14 +3194,26 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
 
         {/* Topic sections */}
         {documentReading.topics.map((t, i) => {
-          const color = TOPIC_COLORS[i % TOPIC_COLORS.length];
-          const subs  = t.subtopics ?? [];
+          const color       = TOPIC_COLORS[i % TOPIC_COLORS.length];
+          const subs        = t.subtopics ?? [];
+          const weakPct     = weakSpots[t.topicId];
+          const isWeak      = weakPct !== undefined && weakPct < 60;
           return (
             <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12 }}>
               {/* Topic heading */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
                 <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>{i + 1}</div>
                 <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
+                {weakPct !== undefined && (
+                  <div style={{
+                    fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 999, flexShrink: 0,
+                    background: isWeak ? '#FEF3C7' : '#DCFCE7',
+                    color: isWeak ? '#B45309' : '#16A34A',
+                    border: `1px solid ${isWeak ? '#FDE68A' : '#BBF7D0'}`,
+                  }}>
+                    {isWeak ? `⚠ ${weakPct}%` : `✓ ${weakPct}%`}
+                  </div>
+                )}
               </div>
               <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
 
