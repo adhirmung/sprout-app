@@ -1,17 +1,11 @@
 /**
- * ActivityMemoryMatch — flip-card pairs game.
- * Terms and definitions are shuffled into a single grid.
- * Tap two matching cards to pair them; all pairs → complete.
+ * ActivityMemoryMatch — connect terms to definitions.
+ * Terms column on the left, shuffled definitions on the right.
+ * Tap a term to select it, then tap the matching definition.
+ * Matched pairs lock green; wrong pairs shake red then reset.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MemoryMatchActivity } from '../lib/gemini';
-
-interface Card {
-  id:     number;
-  pairId: number;
-  text:   string;
-  kind:   'term' | 'def';
-}
 
 interface Props {
   activity:   MemoryMatchActivity;
@@ -19,71 +13,52 @@ interface Props {
 }
 
 export function ActivityMemoryMatch({ activity, onComplete }: Props) {
-  const cards = useMemo<Card[]>(() => {
-    const raw: Card[] = activity.pairs.flatMap((p, i) => [
-      { id: i * 2,     pairId: i, text: p.term,       kind: 'term' as const },
-      { id: i * 2 + 1, pairId: i, text: p.definition, kind: 'def'  as const },
-    ]);
-    // Fisher-Yates shuffle
-    for (let i = raw.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [raw[i], raw[j]] = [raw[j], raw[i]];
-    }
-    return raw;
-  }, [activity]);
-
-  const [revealed,  setRevealed]  = useState<Set<number>>(new Set());
-  const [matched,   setMatched]   = useState<Set<number>>(new Set());
-  const [selected,  setSelected]  = useState<number | null>(null);
-  const [shake,     setShake]     = useState<Set<number>>(new Set());
-  const [moves,     setMoves]     = useState(0);
-  const [done,      setDone]      = useState(false);
-  const lockRef = useRef(false);
-
   const total = activity.pairs.length;
 
-  const flip = (id: number) => {
-    if (lockRef.current)      return;
-    if (matched.has(id))      return;
-    if (revealed.has(id))     return;
-    if (selected === id)      return;
-
-    setRevealed(prev => new Set([...prev, id]));
-
-    if (selected === null) {
-      setSelected(id);
-      return;
+  // Shuffled definition indices (index into activity.pairs)
+  const defOrder = useMemo(() => {
+    const arr = activity.pairs.map((_, i) => i);
+    for (let i = arr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
     }
+    return arr;
+  }, [activity]);
 
-    // Second card flipped
-    lockRef.current = true;
+  const [selectedTerm, setSelectedTerm] = useState<number | null>(null); // pair index
+  const [matched,      setMatched]      = useState<Set<number>>(new Set()); // pair indices
+  const [wrong,        setWrong]        = useState<{ term: number; def: number } | null>(null);
+  const [moves,        setMoves]        = useState(0);
+  const [done,         setDone]         = useState(false);
+  const lockRef = useRef(false);
+
+  const tapTerm = (pairIdx: number) => {
+    if (lockRef.current || matched.has(pairIdx)) return;
+    setSelectedTerm(prev => prev === pairIdx ? null : pairIdx);
+    setWrong(null);
+  };
+
+  const tapDef = (pairIdx: number) => {
+    if (lockRef.current || matched.has(pairIdx)) return;
+    if (selectedTerm === null) return; // must pick a term first
+
     setMoves(m => m + 1);
-    const firstCard  = cards.find(c => c.id === selected)!;
-    const secondCard = cards.find(c => c.id === id)!;
 
-    if (firstCard.pairId === secondCard.pairId) {
-      // ✅ Match
-      const newMatched = new Set([...matched, selected, id]);
+    if (selectedTerm === pairIdx) {
+      // ✅ Correct
+      const newMatched = new Set([...matched, pairIdx]);
       setMatched(newMatched);
-      setSelected(null);
-      lockRef.current = false;
-      if (newMatched.size === cards.length) {
-        setTimeout(() => setDone(true), 400);
-      }
+      setSelectedTerm(null);
+      if (newMatched.size === total) setTimeout(() => setDone(true), 400);
     } else {
-      // ❌ No match — shake then flip back
-      setShake(new Set([selected, id]));
+      // ❌ Wrong
+      lockRef.current = true;
+      setWrong({ term: selectedTerm, def: pairIdx });
       setTimeout(() => {
-        setRevealed(prev => {
-          const n = new Set(prev);
-          n.delete(selected);
-          n.delete(id);
-          return n;
-        });
-        setShake(new Set());
-        setSelected(null);
+        setWrong(null);
+        setSelectedTerm(null);
         lockRef.current = false;
-      }, 900);
+      }, 800);
     }
   };
 
@@ -91,7 +66,7 @@ export function ActivityMemoryMatch({ activity, onComplete }: Props) {
     if (done) onComplete(total, total);
   }, [done]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const matchedPairs = matched.size / 2;
+  const matchedCount = matched.size;
 
   if (done) return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 16, padding: 32, textAlign: 'center' }}>
@@ -102,87 +77,101 @@ export function ActivityMemoryMatch({ activity, onComplete }: Props) {
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-      {/* Progress */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 2px' }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink-2)' }}>
-          {matchedPairs} / {total} matched
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+
+      {/* Instructions + progress */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span style={{ fontSize: 12, color: 'var(--ink-3)', fontStyle: 'italic' }}>
+          {selectedTerm === null ? 'Tap a term on the left to select it' : 'Now tap the matching definition →'}
         </span>
-        <span style={{ fontSize: 12, color: 'var(--ink-4)' }}>{moves} moves</span>
+        <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)' }}>{matchedCount}/{total}</span>
       </div>
 
       {/* Progress bar */}
-      <div style={{ height: 5, background: 'var(--line)', borderRadius: 99, overflow: 'hidden' }}>
-        <div style={{ height: '100%', width: `${(matchedPairs / total) * 100}%`, background: 'var(--brand)', borderRadius: 99, transition: 'width 0.3s' }} />
+      <div style={{ height: 4, background: 'var(--line)', borderRadius: 99, overflow: 'hidden' }}>
+        <div style={{ height: '100%', width: `${(matchedCount / total) * 100}%`, background: 'var(--brand)', borderRadius: 99, transition: 'width 0.3s' }} />
       </div>
 
-      {/* Card grid — 4 cols, constrained by parent 600px wrapper */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-        {cards.map(card => {
-          const isRevealed = revealed.has(card.id);
-          const isMatched  = matched.has(card.id);
-          const isShaking  = shake.has(card.id);
-          const isSelected = selected === card.id;
+      {/* Two-column grid */}
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
 
-          const bg = isMatched
-            ? '#DCFCE7'
-            : isRevealed
-              ? (isShaking ? '#FEE2E2' : '#EEF6FF')
-              : 'var(--bg-tint)';
-          const border = isMatched
-            ? '2px solid #16A34A'
-            : isSelected
-              ? '2px solid var(--brand)'
-              : isShaking
-                ? '2px solid #EF4444'
-                : '2px solid var(--line)';
-
-          return (
-            <button
-              key={card.id}
-              onClick={() => flip(card.id)}
-              style={{
-                aspectRatio: '3 / 4',
-              minHeight: 72,
-              maxHeight: 120,
-                borderRadius: 10,
-                border,
-                background: bg,
-                cursor: isMatched ? 'default' : 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                padding: 6,
-                transition: 'all 0.2s',
-                animation: isShaking ? 'shake 0.4s' : undefined,
-                overflow: 'hidden',
-              }}>
-              {isRevealed || isMatched ? (
-                <span style={{
-                  fontSize: 10,
-                  fontWeight: 700,
-                  color: isMatched ? '#16A34A' : 'var(--ink)',
-                  textAlign: 'center',
-                  lineHeight: 1.35,
-                  wordBreak: 'break-word',
+        {/* Terms column */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-4)', textAlign: 'center', marginBottom: 2 }}>
+            Terms
+          </div>
+          {activity.pairs.map((pair, i) => {
+            const isMatched  = matched.has(i);
+            const isSelected = selectedTerm === i;
+            const isWrongTerm = wrong?.term === i;
+            return (
+              <button
+                key={i}
+                onClick={() => tapTerm(i)}
+                disabled={isMatched}
+                style={{
+                  padding: '10px 10px',
+                  borderRadius: 10,
+                  border: `2px solid ${isMatched ? '#16A34A' : isSelected ? 'var(--brand)' : isWrongTerm ? '#EF4444' : 'var(--line)'}`,
+                  background: isMatched ? '#DCFCE7' : isSelected ? 'var(--brand-tint)' : isWrongTerm ? '#FEE2E2' : 'var(--card)',
+                  cursor: isMatched ? 'default' : 'pointer',
+                  fontSize: 12, fontWeight: 700,
+                  color: isMatched ? '#16A34A' : isSelected ? 'var(--brand)' : 'var(--ink)',
+                  textAlign: 'left', lineHeight: 1.4,
+                  transition: 'all 0.15s',
+                  animation: isWrongTerm ? 'shake 0.4s' : undefined,
+                  minHeight: 52,
+                  display: 'flex', alignItems: 'center',
                 }}>
-                  {card.text}
-                </span>
-              ) : (
-                <span style={{ fontSize: 18, opacity: 0.3 }}>?</span>
-              )}
-            </button>
-          );
-        })}
+                {isMatched && <span style={{ marginRight: 5, fontSize: 13 }}>✓</span>}
+                {pair.term}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Definitions column (shuffled) */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-4)', textAlign: 'center', marginBottom: 2 }}>
+            Definitions
+          </div>
+          {defOrder.map((pairIdx) => {
+            const isMatched  = matched.has(pairIdx);
+            const isWrongDef = wrong?.def === pairIdx;
+            const isActive   = selectedTerm !== null && !isMatched;
+            return (
+              <button
+                key={pairIdx}
+                onClick={() => tapDef(pairIdx)}
+                disabled={isMatched || selectedTerm === null}
+                style={{
+                  padding: '10px 10px',
+                  borderRadius: 10,
+                  border: `2px solid ${isMatched ? '#16A34A' : isWrongDef ? '#EF4444' : isActive ? 'var(--line-2)' : 'var(--line)'}`,
+                  background: isMatched ? '#DCFCE7' : isWrongDef ? '#FEE2E2' : isActive ? 'var(--card)' : 'var(--bg-tint)',
+                  cursor: isMatched || selectedTerm === null ? 'default' : 'pointer',
+                  fontSize: 11, fontWeight: 500,
+                  color: isMatched ? '#16A34A' : 'var(--ink-2)',
+                  textAlign: 'left', lineHeight: 1.45,
+                  transition: 'all 0.15s',
+                  animation: isWrongDef ? 'shake 0.4s' : undefined,
+                  minHeight: 52,
+                  display: 'flex', alignItems: 'center',
+                  opacity: !isMatched && selectedTerm === null ? 0.55 : 1,
+                }}>
+                {isMatched && <span style={{ marginRight: 5, fontSize: 13, flexShrink: 0 }}>✓</span>}
+                {activity.pairs[pairIdx].definition}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <style>{`
         @keyframes shake {
           0%, 100% { transform: translateX(0); }
-          20%       { transform: translateX(-4px); }
-          40%       { transform: translateX(4px); }
-          60%       { transform: translateX(-4px); }
-          80%       { transform: translateX(4px); }
+          25%       { transform: translateX(-5px); }
+          75%       { transform: translateX(5px); }
         }
       `}</style>
     </div>
