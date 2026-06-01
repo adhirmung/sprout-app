@@ -3380,7 +3380,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                   <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
 
                   {/* Explanation card */}
-                  <div style={{ borderRadius: 16, border: `1.5px solid ${isActive ? color + '88' : color + '33'}`, background: 'var(--card)', boxShadow: isActive ? `0 4px 24px ${color}22` : '0 2px 14px rgba(0,0,0,0.05)', overflow: 'hidden', minHeight: 80, transition: 'border-color 0.3s, box-shadow 0.3s' }}>
+                  <div style={{ borderRadius: 16, border: `1.5px solid ${isActive ? color + '88' : color + '33'}`, background: 'var(--card)', boxShadow: isActive ? `0 4px 24px ${color}22` : '0 2px 14px rgba(0,0,0,0.05)', transition: 'border-color 0.3s, box-shadow 0.3s' }}>
                     {/* Card body */}
                     <div style={{ padding: isMobile ? '16px 18px' : '20px 24px' }}>
                       {loading && !text ? (
@@ -3872,6 +3872,65 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         ) : mainContent}
         {showSidebar && sidebar}
       </div>
+
+      {/* ── Floating playback bar (visible while reading) ── */}
+      {(raPhase === 'playing' || raPhase === 'paused' || raPhase === 'loading') && (
+        <div style={{
+          position: 'fixed', bottom: 80, left: '50%', transform: 'translateX(-50%)',
+          display: 'flex', alignItems: 'center', gap: 10,
+          background: 'var(--card)', border: '1.5px solid var(--line)',
+          borderRadius: 999, padding: '10px 18px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+          zIndex: 200,
+          backdropFilter: 'blur(12px)',
+          animation: 'slideUp 0.22s ease',
+        }}>
+          {/* Soundbar icon */}
+          {raPhase === 'playing' && (
+            <div style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 16, marginRight: 2 }}>
+              {[0,1,2].map(b => (
+                <div key={b} style={{ width: 3, borderRadius: 2, background: 'var(--brand)', animation: `soundbar 0.8s ease-in-out ${b * 0.2}s infinite alternate`, height: 6 + b * 4 }} />
+              ))}
+            </div>
+          )}
+          {raPhase === 'loading' && (
+            <div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--brand)', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite', flexShrink: 0 }} />
+          )}
+
+          {/* Topic counter */}
+          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--ink-3)', minWidth: 60 }}>
+            {raPhase === 'loading' ? 'Loading…' : `Topic ${raTopicIdx + 1} / ${documentReading.topics.length}`}
+          </span>
+
+          {/* Pause / Resume */}
+          {raPhase === 'playing' && (
+            <button onClick={raPause} style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '6px 14px', borderRadius: 999, border: '1.5px solid var(--brand)',
+              background: 'var(--brand-tint)', color: 'var(--brand)',
+              fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            }}>⏸ Pause</button>
+          )}
+          {raPhase === 'paused' && (
+            <button onClick={raResume} style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '6px 14px', borderRadius: 999, border: 'none',
+              background: 'var(--brand)', color: 'white',
+              fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            }}>▶ Resume</button>
+          )}
+
+          {/* Stop */}
+          {(raPhase === 'playing' || raPhase === 'paused') && (
+            <button onClick={raStop} style={{
+              display: 'flex', alignItems: 'center', gap: 5,
+              padding: '6px 14px', borderRadius: 999, border: '1.5px solid var(--line)',
+              background: 'transparent', color: 'var(--ink-3)',
+              fontSize: 13, fontWeight: 700, cursor: 'pointer',
+            }}>⏹ Stop</button>
+          )}
+        </div>
+      )}
 
       {/* ── Bottom navigation: Notes | AI Summary | Practice ── */}
       <div style={{
