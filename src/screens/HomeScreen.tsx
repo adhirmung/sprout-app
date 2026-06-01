@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { SproutCharacter } from '../components/Brand';
 import { Icon } from '../components/Icon';
+import { StudyTracker } from '../lib/store';
 import { levelLabel } from './AssessmentFlow';
 import type { FeedSource, LearnerProfile, LibraryFile, LibraryTree, User } from '../lib/types';
 
@@ -38,6 +39,46 @@ export function HomeScreen({ user, profile, library, onStartFromLibrary, onGotoL
 
   const recent = useMemo(() => collectRecent(library).slice(0, 4), [library]);
 
+  // ── Real study stats ──
+  const studyStats = useMemo(() => StudyTracker.get(), []);
+
+  // Count topics mastered (SubStatus === 'learnt') across all progress keys
+  const masteredCount = useMemo(() => {
+    let total = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith('sprout:progress:')) continue;
+      try {
+        const data = JSON.parse(localStorage.getItem(k)!) as Record<string, string>;
+        total += Object.values(data).filter(v => v === 'learnt').length;
+      } catch { /* skip corrupted entries */ }
+    }
+    return total;
+  }, []);
+
+  // Today's study time label
+  const today = new Date().toISOString().slice(0, 10);
+  const todayMin = studyStats.todayDate === today ? studyStats.todayMinutes : 0;
+  const todayLabel = todayMin < 1
+    ? '0m'
+    : todayMin < 60
+      ? `${todayMin}m`
+      : `${Math.floor(todayMin / 60)}h ${todayMin % 60}m`;
+
+  // Count weak topics across all weakspots keys
+  const weakTopicCount = useMemo(() => {
+    let count = 0;
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k?.startsWith('sprout:weakspots:')) continue;
+      try {
+        const data = JSON.parse(localStorage.getItem(k)!) as Record<string, number>;
+        count += Object.values(data).filter(v => v < 60).length;
+      } catch { /* skip */ }
+    }
+    return count;
+  }, []);
+
   return (
     <div style={{ overflow: 'auto', height: '100%', padding: '32px clamp(20px, 4vw, 48px)' }}>
       <div style={{ maxWidth: 1080, margin: '0 auto' }}>
@@ -70,19 +111,22 @@ export function HomeScreen({ user, profile, library, onStartFromLibrary, onGotoL
           <div className="card" style={{ padding: 22 }}>
             <div className="label-eyebrow" style={{ marginBottom: 14 }}>Today</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 14 }}>
-              <MiniStat icon="flame" color="coral" value="7" label="Day streak" />
-              <MiniStat icon="trophy" color="gold" value="1,240" label="Points" />
-              <MiniStat icon="sparkle" color="brand" value="12" label="Cards reviewed" />
-              <MiniStat icon="clock" color="sky" value="18m" label="Studied" />
+              <MiniStat icon="flame"   color="coral" value={studyStats.streak > 0 ? String(studyStats.streak) : '—'} label="Day streak" />
+              <MiniStat icon="clock"   color="sky"   value={todayLabel}                                               label="Studied" />
+              <MiniStat icon="sparkle" color="brand" value={masteredCount > 0 ? String(masteredCount) : '—'}          label="Topics mastered" />
+              <MiniStat icon="alert"   color="coral" value={weakTopicCount > 0 ? String(weakTopicCount) : '—'}        label="To review" />
             </div>
-            <div style={{ paddingTop: 14, borderTop: '1px solid var(--line)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 12, color: 'var(--ink-2)', fontWeight: 600 }}>
-                <span>Daily goal</span><span>14 / 20 cards</span>
+            {studyStats.streak > 0 && (
+              <div style={{ paddingTop: 14, borderTop: '1px solid var(--line)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, fontSize: 12, color: 'var(--ink-2)', fontWeight: 600 }}>
+                  <span>🔥 {studyStats.streak}-day streak</span>
+                  <span>{studyStats.totalMinutes}m total</span>
+                </div>
+                <div style={{ height: 8, background: 'var(--line)', borderRadius: 999, overflow: 'hidden' }}>
+                  <div style={{ height: '100%', background: 'linear-gradient(90deg, var(--brand), var(--gold))', width: `${Math.min(100, (studyStats.streak / 30) * 100)}%`, borderRadius: 999, transition: 'width 0.6s' }} />
+                </div>
               </div>
-              <div style={{ height: 8, background: 'var(--line)', borderRadius: 999, overflow: 'hidden' }}>
-                <div style={{ height: '100%', background: 'linear-gradient(90deg, var(--brand), var(--gold))', width: '70%', borderRadius: 999, transition: 'width 0.6s' }} />
-              </div>
-            </div>
+            )}
           </div>
         </div>
 

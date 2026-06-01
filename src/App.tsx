@@ -7,6 +7,7 @@ import { AssessmentFlow } from './screens/AssessmentFlow';
 import { LoginScreen, RegisterScreen } from './screens/AuthScreens';
 import { DocumentScreen } from './screens/DocumentScreen';
 import { HomeScreen, collectRecent } from './screens/HomeScreen';
+import { StudyScreen } from './screens/StudyScreen';
 import { LibraryScreen } from './screens/LibraryScreen';
 import { ProfileScreen } from './screens/ProfileScreen';
 import { Store } from './lib/store';
@@ -206,6 +207,9 @@ function AppCore() {
           onGotoLibrary={() => setRoute('library')}
           onQuickStudy={quickStudy} />
       )}
+      {route === 'study' && (
+        <StudyScreen library={library} onOpenFile={startFeed} />
+      )}
       {route === 'library' && <LibraryScreen onOpenFile={startFeed} userId={user.id} />}
       {route === 'profile' && (
         <ProfileScreen user={user} profile={profile}
@@ -218,9 +222,10 @@ function AppCore() {
 
 // ── App Shell ─────────────────────────────────────────────────
 const NAV_ITEMS = [
-  { id: 'home',    label: 'Home',    icon: 'home'   },
-  { id: 'library', label: 'Library', icon: 'folder' },
-  { id: 'profile', label: 'Profile', icon: 'user'   },
+  { id: 'home',    label: 'Home',    icon: 'home'      },
+  { id: 'study',   label: 'Study',   icon: 'sparkle'   },
+  { id: 'library', label: 'Library', icon: 'folder'    },
+  { id: 'profile', label: 'Profile', icon: 'user'      },
 ] as const;
 
 interface AppShellProps {

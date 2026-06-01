@@ -15,6 +15,50 @@ export const Store = {
   },
 };
 
+// ── Study tracker ─────────────────────────────────────────────
+
+export interface StudyStats {
+  streak:       number;   // consecutive days with any study activity
+  lastDate:     string;   // YYYY-MM-DD of most recent activity
+  todayMinutes: number;   // minutes studied today
+  todayDate:    string;   // YYYY-MM-DD for todayMinutes (reset when date changes)
+  totalMinutes: number;   // all-time total
+  activeDays:   string[]; // up to 56 recent YYYY-MM-DD strings (for future heatmap)
+}
+
+function todayStr(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+export const StudyTracker = {
+  get(): StudyStats {
+    return Store.get<StudyStats>('study:stats', {
+      streak: 0, lastDate: '', todayMinutes: 0, todayDate: '', totalMinutes: 0, activeDays: [],
+    });
+  },
+
+  /** Call when leaving a study session. minutes < 1 are ignored. */
+  log(minutes: number): void {
+    if (minutes < 1) return;
+    const today     = todayStr();
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+    const s         = StudyTracker.get();
+    const newStreak = s.lastDate === today
+      ? s.streak
+      : s.lastDate === yesterday
+        ? s.streak + 1
+        : 1;
+    Store.set('study:stats', {
+      streak:       newStreak,
+      lastDate:     today,
+      todayMinutes: s.todayDate === today ? s.todayMinutes + minutes : minutes,
+      todayDate:    today,
+      totalMinutes: s.totalMinutes + minutes,
+      activeDays:   [...new Set([...(s.activeDays ?? []).slice(-55), today])],
+    } satisfies StudyStats);
+  },
+};
+
 export function celebrate() {
   const el = document.createElement('div');
   el.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:5000;';

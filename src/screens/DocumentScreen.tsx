@@ -35,7 +35,7 @@ import { ActivitySortClassify } from '../components/ActivitySortClassify';
 import { ActivitySequence }     from '../components/ActivitySequence';
 import { ActivityTrueFalse }    from '../components/ActivityTrueFalse';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
-import { Store, celebrate } from '../lib/store';
+import { Store, StudyTracker, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -140,6 +140,17 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   );
 
   useEffect(() => { if (error) retryRef.current?.focus(); }, [error]);
+
+  // ── Study session time tracker ────────────────────────────────
+  // Record how long the user spent in this document and log it on unmount.
+  const sessionStartRef = useRef(Date.now());
+  useEffect(() => {
+    sessionStartRef.current = Date.now();
+    return () => {
+      const minutes = Math.round((Date.now() - sessionStartRef.current) / 60_000);
+      StudyTracker.log(minutes);
+    };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Preload cached content map and reading on mount (localStorage first, then Supabase)
   useEffect(() => {

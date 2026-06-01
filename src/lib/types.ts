@@ -70,4 +70,4 @@ export interface FeedSource {
   item: LibraryFile;
 }
 
-export type Route = 'login' | 'register' | 'assess' | 'home' | 'library' | 'feed' | 'document' | 'profile';
+export type Route = 'login' | 'register' | 'assess' | 'home' | 'study' | 'library' | 'feed' | 'document' | 'profile';
