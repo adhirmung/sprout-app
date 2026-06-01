@@ -2417,7 +2417,13 @@ function pcmToWavUrl(base64pcm: string): string {
 /** Karaoke word-highlight renderer used during Read Aloud. */
 function ReadAloudKaraoke({ words, currentWordIdx }: { words: string[]; currentWordIdx: number }) {
   return (
-    <p style={{ margin: 0, fontSize: 15, lineHeight: 1.8, letterSpacing: '0.01em' }}>
+    <p style={{
+      margin: 0, fontSize: 15, lineHeight: 1.9, letterSpacing: '0.01em',
+      /* force text to stay inside its container */
+      width: '100%', maxWidth: '100%',
+      wordBreak: 'break-word', overflowWrap: 'break-word',
+      display: 'block',
+    }}>
       {words.map((word, i) => {
         const isActive = i === currentWordIdx;
         const isPast   = i < currentWordIdx;
@@ -2425,14 +2431,13 @@ function ReadAloudKaraoke({ words, currentWordIdx }: { words: string[]; currentW
           <span
             key={i}
             style={{
-              display:    'inline',
               background: isActive ? 'rgba(34,197,94,0.25)' : 'transparent',
               color:      isActive ? 'var(--ink)'
                         : isPast   ? 'var(--ink-2)'
                         :            'var(--ink-4)',
               borderRadius: isActive ? 4 : 0,
               padding:    isActive ? '1px 3px' : '0',
-              margin:     '0 1.5px',
+              marginRight: '3px',
               fontWeight: isActive ? 700 : 400,
               transition: 'color 0.06s',
               boxShadow:  isActive ? '0 0 0 2px rgba(34,197,94,0.2)' : 'none',
@@ -3383,7 +3388,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                   {/* Explanation card */}
                   <div style={{ borderRadius: 16, border: `1.5px solid ${isActive ? color + '88' : color + '33'}`, background: 'var(--card)', boxShadow: isActive ? `0 4px 24px ${color}22` : '0 2px 14px rgba(0,0,0,0.05)', transition: 'border-color 0.3s, box-shadow 0.3s' }}>
                     {/* Card body */}
-                    <div style={{ padding: isMobile ? '16px 18px' : '20px 24px', position: 'relative' }}>
+                    <div style={{ padding: isMobile ? '16px 18px' : '20px 24px' }}>
                       {loading && !text ? (
                         /* Streaming skeleton */
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
@@ -3391,23 +3396,11 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                           <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
                         </div>
                       ) : text ? (
-                        <>
-                          {/* Notes always visible — defines card height; dimmed while reading */}
-                          <div style={{ opacity: isActive ? 0.06 : 1, transition: 'opacity 0.35s', pointerEvents: 'none', userSelect: 'none' }}>
-                            <NoteMarkdown content={text} />
-                          </div>
-                          {/* Karaoke overlay — floats over dimmed text when this topic is active */}
-                          {isActive && (
-                            <div style={{
-                              position: 'absolute', inset: 0,
-                              padding: isMobile ? '16px 18px' : '20px 24px',
-                              overflowY: 'auto',
-                              display: 'flex', alignItems: 'flex-start',
-                            }}>
-                              <ReadAloudKaraoke words={raWords} currentWordIdx={raWordIdx} />
-                            </div>
-                          )}
-                        </>
+                        /* Karaoke when this topic is being read; normal markdown otherwise.
+                           Card height is driven by whichever is rendered — no overflow clipping. */
+                        isActive
+                          ? <ReadAloudKaraoke words={raWords} currentWordIdx={raWordIdx} />
+                          : <NoteMarkdown content={text} />
                       ) : (
                         <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
                       )}
