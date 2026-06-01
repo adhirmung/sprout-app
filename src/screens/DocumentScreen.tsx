@@ -2693,8 +2693,9 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   const raStop = useCallback(() => {
     cancelAnimationFrame(raRafRef.current);
     if (raAudioRef.current) { raAudioRef.current.pause(); raAudioRef.current.src = ''; raAudioRef.current = null; }
-    if (raUrlRef.current)   { URL.revokeObjectURL(raUrlRef.current); raUrlRef.current = ''; }
-    setRaPhase('idle'); setRaWordIdx(-1);
+    // Don't revoke raUrlRef — the URL is kept in raCacheRef and cleaned up on unmount
+    raUrlRef.current = '';
+    setRaPhase('idle'); setRaTopicIdx(0); setRaWordIdx(-1);
   }, []);
 
   // Stop reading when leaving AI Summary tab or component unmounts
@@ -2714,14 +2715,14 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     setRaTopicIdx(idx);
     setRaWordIdx(-1);
 
-    // Resolve audio — either from cache or a fresh TTS call
+    // Resolve audio — from persistent cache (instant) or a fresh TTS call
     let url: string;
     let words: string[];
     if (raCacheRef.current.has(idx)) {
       const cached = raCacheRef.current.get(idx)!;
       url   = cached.url;
       words = cached.words;
-      raCacheRef.current.delete(idx);
+      // Keep the entry in cache — don't delete, so replay is always instant
     } else {
       const raw = texts[topics[idx].topicId];
       if (!raw) { void raPlayRef.current!(idx + 1); return; } // skip empty
@@ -2731,10 +2732,10 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
       const base64 = await generateSpeech(plain).catch(() => null);
       if (!base64) { setRaPhase('idle'); return; }
       url = pcmToWavUrl(base64);
+      // Store in persistent cache so subsequent plays of this topic are instant
+      raCacheRef.current.set(idx, { url, words });
     }
 
-    // Clean up previous URL
-    if (raUrlRef.current) URL.revokeObjectURL(raUrlRef.current);
     raUrlRef.current = url;
     setRaWords(words);
 
@@ -3382,7 +3383,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                   {/* Explanation card */}
                   <div style={{ borderRadius: 16, border: `1.5px solid ${isActive ? color + '88' : color + '33'}`, background: 'var(--card)', boxShadow: isActive ? `0 4px 24px ${color}22` : '0 2px 14px rgba(0,0,0,0.05)', transition: 'border-color 0.3s, box-shadow 0.3s' }}>
                     {/* Card body */}
-                    <div style={{ padding: isMobile ? '16px 18px' : '20px 24px' }}>
+                    <div style={{ padding: isMobile ? '16px 18px' : '20px 24px', position: 'relative' }}>
                       {loading && !text ? (
                         /* Streaming skeleton */
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
@@ -3390,12 +3391,23 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                           <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
                         </div>
                       ) : text ? (
-                        /* Karaoke mode when this topic is active, normal markdown otherwise */
-                        isActive ? (
-                          <ReadAloudKaraoke words={raWords} currentWordIdx={raWordIdx} />
-                        ) : (
-                          <NoteMarkdown content={text} />
-                        )
+                        <>
+                          {/* Notes always visible — defines card height; dimmed while reading */}
+                          <div style={{ opacity: isActive ? 0.06 : 1, transition: 'opacity 0.35s', pointerEvents: 'none', userSelect: 'none' }}>
+                            <NoteMarkdown content={text} />
+                          </div>
+                          {/* Karaoke overlay — floats over dimmed text when this topic is active */}
+                          {isActive && (
+                            <div style={{
+                              position: 'absolute', inset: 0,
+                              padding: isMobile ? '16px 18px' : '20px 24px',
+                              overflowY: 'auto',
+                              display: 'flex', alignItems: 'flex-start',
+                            }}>
+                              <ReadAloudKaraoke words={raWords} currentWordIdx={raWordIdx} />
+                            </div>
+                          )}
+                        </>
                       ) : (
                         <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
                       )}
