@@ -2389,9 +2389,17 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   const breakMinutes = getBreakIntervalMinutes(profile);
   const cognitiveTip = getCognitiveTip(profile);
 
-  // Total words for reading time estimate
-  const totalWords = documentReading.topics.reduce((sum, t) =>
-    sum + (t.subtopics ?? []).reduce((s, sub) => s + (sub.content ?? '').split(/\s+/).length, 0), 0);
+  // Total words for reading time estimate — switches by active tab
+  // Notes tab:      count bullet text (content is '' in new architecture)
+  // AI Summary tab: count AI-generated understand texts as they load in
+  const totalWords = notesMode === 'understand'
+    ? Object.values(understandTexts).join(' ').split(/\s+/).filter(Boolean).length
+    : documentReading.topics.reduce((sum, t) =>
+        sum + (t.subtopics ?? []).reduce((s, sub) => {
+          const bulletWords = (sub.bullets ?? []).join(' ').split(/\s+/).filter(Boolean).length;
+          const contentWords = (sub.content ?? '').split(/\s+/).filter(Boolean).length;
+          return s + (bulletWords > 0 ? bulletWords : contentWords);
+        }, 0), 0);
   const totalReadMinutes = Math.max(1, Math.ceil(totalWords / wpm));
 
   // Progress driven by user-marked subtopics
@@ -2501,7 +2509,9 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     }}>
       {/* Total reading time */}
       <div style={{ marginBottom: 20, padding: '12px 14px', borderRadius: 12, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
-        <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-2)', marginBottom: 5 }}>Total Reading Time</div>
+        <div style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color: 'var(--ink-2)', marginBottom: 5 }}>
+          {notesMode === 'understand' ? 'Summary Read Time' : 'Total Reading Time'}
+        </div>
         <div style={{ fontSize: 22, fontWeight: 800, color: 'var(--brand)', fontFamily: 'var(--font-mono)', lineHeight: 1 }}>~{totalReadMinutes} min</div>
         {cognitiveTip && <div style={{ fontSize: 11, color: 'var(--ink-3)', marginTop: 6, lineHeight: 1.4, fontStyle: 'italic' }}>{cognitiveTip}</div>}
       </div>
