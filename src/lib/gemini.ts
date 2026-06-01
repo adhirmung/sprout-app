@@ -1275,6 +1275,93 @@ export async function generateContentMap(
 // Generates 2-3 bullet points per subtopic for ALL topics in one request.
 // Cost: ~$0.004/session vs ~$0.03 for old approach.
 
+// ── Content map coverage check ────────────────────────────────
+// Runs after generateContentMap to verify every major section of the
+// document has a corresponding topic. Missed sections are added to the
+// content map so generateTopicBullets never skips them.
+
+export async function checkContentMapCoverage(
+  extractedText: string,
+  contentMap:    ContentMap,
+): Promise<ContentMap> {
+  if (!extractedText || contentMap.topics.length === 0) return contentMap;
+
+  const TEXT_LIMIT = 100_000;
+  const textSlice  = extractedText.slice(0, TEXT_LIMIT);
+
+  const existingTopics = contentMap.topics
+    .map((t, i) => `${i + 1}. ${t.title}${t.subtopics.length ? ` (${t.subtopics.map(s => s.title).join(', ')})` : ''}`)
+    .join('\n');
+
+  const prompt = `You are auditing a content map generated from a document to ensure full coverage.
+
+DOCUMENT TEXT:
+"""
+${textSlice}
+"""
+
+CURRENT TOPIC MAP (${contentMap.topics.length} topics):
+${existingTopics}
+
+TASK: Identify any SIGNIFICANT sections or topics present in the document that are NOT already covered by the current topic map. Only flag content that represents a distinct major section — not minor details that naturally fall under existing topics.
+
+If the document is fully covered, return: { "covered": true, "missedTopics": [] }
+
+If there are gaps, return the missed topics:
+{
+  "covered": false,
+  "missedTopics": [
+    {
+      "title": "Exact section title from document",
+      "summary": "One sentence describing this section.",
+      "subtopics": [
+        { "title": "Subsection title", "summary": "One sentence." }
+      ]
+    }
+  ]
+}
+
+Rules:
+- Only include topics genuinely absent from the current map
+- Max 5 missed topics — prioritise the most significant gaps
+- Subtopics array may be empty if the section has no sub-sections
+- Return ONLY valid JSON — no markdown, no extra text`;
+
+  try {
+    const raw = await generateText(
+      FAST_MODEL,
+      'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      [textPart(prompt)],
+      2000,
+      'checkContentMapCoverage',
+    );
+
+    const parsed = parseJson<{ covered: boolean; missedTopics: { title: string; summary: string; subtopics: { title: string; summary: string }[] }[] }>(raw);
+
+    if (parsed.covered || !Array.isArray(parsed.missedTopics) || parsed.missedTopics.length === 0) {
+      return contentMap;
+    }
+
+    // Append missed topics to the content map with fresh IDs
+    const existingCount = contentMap.topics.length;
+    const addedTopics: Topic[] = parsed.missedTopics.map((mt, i) => ({
+      id:        `t${existingCount + i + 1}`,
+      title:     mt.title,
+      summary:   mt.summary,
+      subtopics: (mt.subtopics ?? []).map((s, si) => ({
+        id:      `t${existingCount + i + 1}s${si + 1}`,
+        title:   s.title,
+        summary: s.summary,
+      })),
+    }));
+
+    return { ...contentMap, topics: [...contentMap.topics, ...addedTopics] };
+  } catch {
+    // Coverage check is non-critical — return original map on any error
+    return contentMap;
+  }
+}
+
 export interface TopicBullets {
   topicId:   string;
   title:     string;

@@ -14,6 +14,7 @@ import { VisualGraph } from '../components/VisualGraph';
 import { VisualBiology } from '../components/VisualBiology';
 import {
   buildChatSystemPrompt,
+  checkContentMapCoverage,
   evaluateWrittenAnswer,
   extractPdfContent,
   generateContentMap,
@@ -468,7 +469,14 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         setCourseProgressMsg('Building notes…');
       }
 
-      const bullets = await generateTopicBullets(et, map);
+      // ── Coverage check ────────────────────────────────────────
+      // Verify the content map captures all major document sections.
+      // Non-critical: silently falls back to original map on error.
+      setCourseProgressMsg('Checking coverage…');
+      const checkedMap = await checkContentMapCoverage(et, map);
+
+      setCourseProgressMsg('Generating notes…');
+      const bullets = await generateTopicBullets(et, checkedMap);
       const reading: DocumentReading = {
         topics: bullets.map(tb => ({
           topicId:      tb.topicId,
