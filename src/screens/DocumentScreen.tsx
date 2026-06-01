@@ -17,19 +17,23 @@ import {
   checkContentMapCoverage,
   evaluateWrittenAnswer,
   extractPdfContent,
+  generateActivityPack,
   generateContentMap,
   generateFeed,
   generateStudyBrief,
   generateParagraphQuiz,
   generatePracticeQuiz,
   generateTopicBullets,
-  generateVisualComponents,
   hasApiKey,
   saveApiKey,
   streamCardChat,
   streamTopicUnderstanding,
 } from '../lib/gemini';
-import type { ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import type { ActivityPack, ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, GameActivity, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
+import { ActivityMemoryMatch } from '../components/ActivityMemoryMatch';
+import { ActivitySortClassify } from '../components/ActivitySortClassify';
+import { ActivitySequence }     from '../components/ActivitySequence';
+import { ActivityTrueFalse }    from '../components/ActivityTrueFalse';
 import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
@@ -82,8 +86,9 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'exam'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'activities' | 'exam'>('idle');
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
+  const [activityPack,    setActivityPack]    = useState<ActivityPack | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
   const [documentReading, setDocumentReading] = useState<DocumentReading | null>(null);
   const [courseMaterial,  setCourseMaterial]  = useState<DocumentReading | null>(null);
@@ -247,32 +252,25 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     setError('');
     setFromCache(false);
 
-    // ── Activities → rich HTML5 visual components ──────────────
+    // ── Activities → Memory Match · Sort & Classify · Sequence · True/False ──
     if (mode === 'activities') {
       try {
-        const cacheKey = `visuals:${sourceKey}`;
+        const cacheKey = `activities:${sourceKey}`;
         if (!force) {
-          // Check localStorage first (fast), then Supabase (authenticated users)
-          const cached = Store.get<VisualSet | null>(cacheKey, null);
-          if (cached && Array.isArray(cached.components) && cached.components.length > 0) {
-            setVisualSet(cached); setFromCache(true); setPhase('visuals'); return;
+          const cached = Store.get<ActivityPack | null>(cacheKey, null);
+          if (cached && Array.isArray(cached.activities) && cached.activities.length > 0) {
+            setActivityPack(cached); setFromCache(true); setPhase('activities'); return;
           }
           if (userId) {
-            const dbCached = await dbLoadContent<VisualSet>(userId, sourceKey, 'visuals').catch(() => null);
-            if (dbCached && Array.isArray(dbCached.components) && dbCached.components.length > 0) {
+            const dbCached = await dbLoadContent<ActivityPack>(userId, sourceKey, 'activities').catch(() => null);
+            if (dbCached && Array.isArray(dbCached.activities) && dbCached.activities.length > 0) {
               Store.set(cacheKey, dbCached);
-              setVisualSet(dbCached); setFromCache(true); setPhase('visuals'); return;
+              setActivityPack(dbCached); setFromCache(true); setPhase('activities'); return;
             }
           }
         }
-        let resolvedPdf = pdfBase64;
-        if (!resolvedPdf && storagePath) resolvedPdf = await fetchPdfBase64FromStorage(storagePath).catch(() => null);
-        if (fileType === 'PDF' && !resolvedPdf) throw new Error('Could not load PDF binary. Try re-uploading the file.');
 
-        // Prefer text over the PDF binary for visual generation — the HTML components
-        // are concept diagrams that only need the map's structured knowledge, not
-        // the raw PDF. Sending 3 parallel 2MB PDF payloads was the cause of the
-        // 500 edge-function timeouts.
+        // Build context text: prefer extracted text, then content map summary, then raw content
         const mapSummary = contentMap
           ? `${contentMap.synthesis}\n\n` +
             contentMap.topics.map(t =>
@@ -280,12 +278,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
               t.subtopics.map(s => `- ${s.title}: ${s.summary}`).join('\n'),
             ).join('\n\n')
           : null;
-        const visualContent = content ?? mapSummary;       // text always wins
-        const visualPdf     = visualContent ? null : resolvedPdf; // PDF only as last resort
-        const vs = await generateVisualComponents(topic, visualContent, visualPdf);
-        Store.set(cacheKey, vs);
-        if (userId) dbSaveContent(userId, sourceKey, 'visuals', vs).catch(console.error);
-        setVisualSet(vs); setPhase('visuals');
+        const activityText = extractedText ?? content ?? mapSummary;
+
+        const pack = await generateActivityPack(topic, activityText);
+        Store.set(cacheKey, pack);
+        if (userId) dbSaveContent(userId, sourceKey, 'activities', pack).catch(console.error);
+        setActivityPack(pack); setPhase('activities');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
         setPhase('idle');
@@ -651,6 +649,19 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       hasCache={!!Store.get<VisualSet | null>(`visuals:${sourceKey}`, null)}
       onBack={() => setPhase('idle')}
       onRegenerate={() => { Store.del(`visuals:${sourceKey}`); setVisualSet(null); void generate(true, 'activities'); }}
+    />
+  );
+
+  if (phase === 'activities' && activityPack) return (
+    <ActivitiesView
+      activityPack={activityPack}
+      topic={topic}
+      onBack={() => setPhase('idle')}
+      onRegenerate={() => {
+        Store.del(`activities:${sourceKey}`);
+        setActivityPack(null);
+        void generate(true, 'activities');
+      }}
     />
   );
 
@@ -1392,6 +1403,172 @@ function getBreakIntervalMinutes(profile: LearnerProfile | null): number {
   if (sa < 55) return 12;
   if (sa < 70) return 18;
   return 25;
+}
+
+// ── Activities view ───────────────────────────────────────────
+
+const ACTIVITY_META: Record<GameActivity['type'], { emoji: string; label: string; color: string }> = {
+  memory_match:   { emoji: '🃏', label: 'Memory Match',    color: '#6366F1' },
+  sort_classify:  { emoji: '📦', label: 'Sort & Classify', color: '#0EA5E9' },
+  sequence:       { emoji: '🔢', label: 'Sequence Order',  color: '#16A34A' },
+  true_false:     { emoji: '⚡', label: 'True / False',    color: '#F59E0B' },
+};
+
+function ActivitiesView({
+  activityPack, topic, onBack, onRegenerate,
+}: {
+  activityPack: ActivityPack;
+  topic:        string;
+  onBack:       () => void;
+  onRegenerate: () => void;
+}) {
+  const { activities } = activityPack;
+  const [step,   setStep]   = useState(0);
+  const [scores, setScores] = useState<{ score: number; total: number }[]>([]);
+  const [done,   setDone]   = useState(false);
+
+  const current = activities[step];
+
+  const handleComplete = (score: number, total: number) => {
+    const newScores = [...scores, { score, total }];
+    setScores(newScores);
+    if (step + 1 >= activities.length) {
+      setDone(true);
+    } else {
+      setTimeout(() => setStep(s => s + 1), 600);
+    }
+  };
+
+  const totalScore = scores.reduce((s, r) => s + r.score, 0);
+  const totalMax   = scores.reduce((s, r) => s + r.total, 0);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+
+      {/* Header */}
+      <div style={{ padding: '0 16px', height: 56, flexShrink: 0, background: 'var(--card)', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button onClick={onBack} style={{ background: 'none', border: 'none', cursor: 'pointer', fontSize: 20, color: 'var(--ink-3)', lineHeight: 1, padding: 4 }}>←</button>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink)' }}>Activities</div>
+          <div style={{ fontSize: 11, color: 'var(--ink-3)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
+        </div>
+        <button
+          onClick={onRegenerate}
+          style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '6px 12px', borderRadius: 10, background: 'var(--bg-tint)', border: '1px solid var(--line)', color: 'var(--ink-2)', fontSize: 12, fontWeight: 700, cursor: 'pointer', flexShrink: 0 }}>
+          🔄 New
+        </button>
+      </div>
+
+      {/* Step pills */}
+      <div style={{ display: 'flex', gap: 6, padding: '10px 14px', overflowX: 'auto', flexShrink: 0, borderBottom: '1px solid var(--line)', background: 'var(--card)', scrollbarWidth: 'none' }}>
+        {activities.map((act, i) => {
+          const m       = ACTIVITY_META[act.type];
+          const active  = i === step && !done;
+          const passed  = i < step || done;
+          return (
+            <div
+              key={i}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '6px 13px', borderRadius: 20, flexShrink: 0,
+                background: active ? m.color : passed ? '#DCFCE7' : 'transparent',
+                color:      active ? '#fff'  : passed ? '#16A34A'  : 'var(--ink-3)',
+                border:     `1.5px solid ${active ? m.color : passed ? '#16A34A' : 'var(--line)'}`,
+                fontSize: 12, fontWeight: 700,
+                transition: 'all 0.2s',
+              }}>
+              <span style={{ fontSize: 13 }}>{passed && !active ? '✓' : m.emoji}</span>
+              {m.label}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Content */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '18px 16px 32px' }}>
+        {done ? (
+          // ── Final summary ──
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20, paddingTop: 24 }}>
+            <div style={{ fontSize: 60 }}>🎓</div>
+            <div style={{ fontSize: 26, fontWeight: 800, color: 'var(--ink)', textAlign: 'center' }}>Activities complete!</div>
+            <div style={{ fontSize: 16, color: 'var(--ink-2)', textAlign: 'center' }}>
+              You scored <strong>{totalScore}</strong> / <strong>{totalMax}</strong> across all activities
+            </div>
+
+            {/* Per-activity breakdown */}
+            <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {activities.map((act, i) => {
+                const m   = ACTIVITY_META[act.type];
+                const res = scores[i];
+                const pct = res ? Math.round((res.score / res.total) * 100) : 0;
+                return (
+                  <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 14px', borderRadius: 12, background: 'var(--card)', border: '1px solid var(--line)' }}>
+                    <span style={{ fontSize: 20 }}>{m.emoji}</span>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--ink)' }}>{m.label}</div>
+                      <div style={{ height: 4, background: 'var(--line)', borderRadius: 99, marginTop: 5, overflow: 'hidden' }}>
+                        <div style={{ height: '100%', width: `${pct}%`, background: pct >= 70 ? '#16A34A' : pct >= 40 ? '#F59E0B' : '#EF4444', borderRadius: 99 }} />
+                      </div>
+                    </div>
+                    <span style={{ fontSize: 13, fontWeight: 800, color: pct >= 70 ? '#16A34A' : pct >= 40 ? '#D97706' : '#DC2626', flexShrink: 0 }}>
+                      {res?.score ?? 0}/{res?.total ?? 0}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+
+            <button
+              onClick={onBack}
+              style={{ padding: '14px 32px', borderRadius: 14, background: 'var(--brand)', color: 'white', border: 'none', fontSize: 16, fontWeight: 800, cursor: 'pointer', marginTop: 8 }}>
+              Back to document
+            </button>
+          </div>
+        ) : current ? (
+          // ── Active activity ──
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            {/* Activity title */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+              <span style={{ fontSize: 22 }}>{ACTIVITY_META[current.type].emoji}</span>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: 'var(--ink)' }}>{ACTIVITY_META[current.type].label}</div>
+                <div style={{ fontSize: 12, color: 'var(--ink-3)' }}>{step + 1} of {activities.length}</div>
+              </div>
+            </div>
+
+            {current.type === 'memory_match' && (
+              <ActivityMemoryMatch
+                key={step}
+                activity={current}
+                onComplete={handleComplete}
+              />
+            )}
+            {current.type === 'sort_classify' && (
+              <ActivitySortClassify
+                key={step}
+                activity={current}
+                onComplete={handleComplete}
+              />
+            )}
+            {current.type === 'sequence' && (
+              <ActivitySequence
+                key={step}
+                activity={current}
+                onComplete={handleComplete}
+              />
+            )}
+            {current.type === 'true_false' && (
+              <ActivityTrueFalse
+                key={step}
+                activity={current}
+                onComplete={handleComplete}
+              />
+            )}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 // ── Map view ──────────────────────────────────────────────────

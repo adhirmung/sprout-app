@@ -1736,6 +1736,139 @@ export async function generateVisualComponents(
   return { components: [dynamicVisual] };
 }
 
+// ── Activity Pack ─────────────────────────────────────────────
+
+export interface MemoryMatchActivity {
+  type: 'memory_match';
+  pairs: { term: string; definition: string }[];
+}
+
+export interface SortClassifyActivity {
+  type: 'sort_classify';
+  categories: string[];
+  items: { label: string; category: string }[];
+}
+
+export interface SequenceActivity {
+  type: 'sequence';
+  title: string;
+  steps: string[];
+}
+
+export interface TrueFalseActivity {
+  type: 'true_false';
+  statements: { text: string; answer: boolean; explanation: string }[];
+}
+
+export type GameActivity =
+  | MemoryMatchActivity
+  | SortClassifyActivity
+  | SequenceActivity
+  | TrueFalseActivity;
+
+export interface ActivityPack {
+  activities: GameActivity[];
+}
+
+export async function generateActivityPack(
+  topic:       string,
+  contentText: string | null,
+): Promise<ActivityPack> {
+  const ctx = contentText
+    ? `\n\nSOURCE MATERIAL:\n"""\n${contentText.slice(0, 8_000)}\n"""`
+    : '';
+
+  const sys = 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.';
+
+  const [mmRaw, scRaw, seqRaw, tfRaw] = await Promise.all([
+
+    // 1 — Memory Match
+    generateText(FAST_MODEL, sys, [textPart(
+      `Generate 8 term-definition pairs for a memory match game about "${topic}".${ctx}
+
+Return ONLY: {"pairs":[{"term":"...","definition":"..."}]}
+
+Rules:
+- terms: 1-4 words (concept name, person, event, structure)
+- definitions: 1 precise sentence that uniquely identifies the term
+- cover the key concepts from the source
+- no overlap between definitions`,
+    )], 1500, 'activityMemoryMatch'),
+
+    // 2 — Sort & Classify
+    generateText(FAST_MODEL, sys, [textPart(
+      `Generate a sort & classify activity for "${topic}".${ctx}
+
+Choose 2 or 3 distinct categories the content naturally divides into.
+Create exactly 12 items, each belonging to exactly one category.
+
+Return ONLY: {"categories":["Cat A","Cat B"],"items":[{"label":"...","category":"Cat A"}]}
+
+Rules:
+- at least 3 items per category
+- items should be specific, not guessable by elimination
+- category names should be concise (2-5 words)`,
+    )], 1500, 'activitySortClassify'),
+
+    // 3 — Sequence
+    generateText(FAST_MODEL, sys, [textPart(
+      `Generate a sequence ordering activity for "${topic}".${ctx}
+
+Pick a clear process, timeline, or ordered set of steps from the content.
+
+Return ONLY: {"title":"Name of the process","steps":["Step 1...","Step 2..."]}
+
+Rules:
+- 5 to 7 steps
+- unambiguous correct order (no two steps are interchangeable)
+- each step is 3-10 words`,
+    )], 800, 'activitySequence'),
+
+    // 4 — True / False
+    generateText(FAST_MODEL, sys, [textPart(
+      `Generate exactly 10 true/false statements about "${topic}".${ctx}
+
+Return ONLY: {"statements":[{"text":"...","answer":true,"explanation":"..."}]}
+
+Rules:
+- exactly 5 true and 5 false statements (shuffled order)
+- false statements must be plausible but clearly wrong based on the source
+- explanations: 1-2 sentences shown after the student answers`,
+    )], 2000, 'activityTrueFalse'),
+
+  ]);
+
+  const activities: GameActivity[] = [];
+
+  try {
+    const p = parseJson<MemoryMatchActivity>(mmRaw);
+    if (Array.isArray(p.pairs) && p.pairs.length > 0)
+      activities.push({ type: 'memory_match', pairs: p.pairs });
+  } catch { /* non-critical */ }
+
+  try {
+    const p = parseJson<SortClassifyActivity>(scRaw);
+    if (Array.isArray(p.categories) && Array.isArray(p.items) && p.items.length > 0)
+      activities.push({ type: 'sort_classify', categories: p.categories, items: p.items });
+  } catch { /* non-critical */ }
+
+  try {
+    const p = parseJson<SequenceActivity>(seqRaw);
+    if (Array.isArray(p.steps) && p.steps.length > 0)
+      activities.push({ type: 'sequence', title: p.title ?? topic, steps: p.steps });
+  } catch { /* non-critical */ }
+
+  try {
+    const p = parseJson<TrueFalseActivity>(tfRaw);
+    if (Array.isArray(p.statements) && p.statements.length > 0)
+      activities.push({ type: 'true_false', statements: p.statements });
+  } catch { /* non-critical */ }
+
+  if (activities.length === 0) throw new Error('Failed to generate activities. Please retry.');
+
+  return { activities };
+}
+
 // ── Practice quiz ─────────────────────────────────────────────
 
 export async function generatePracticeQuiz(
