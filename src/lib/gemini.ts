@@ -1,4 +1,4 @@
-import { FunctionCallingConfigMode, GoogleGenAI, Type } from '@google/genai';
+import { FunctionCallingConfigMode, GoogleGenAI, Modality, Type } from '@google/genai';
 import type { LearnerProfile } from './types';
 import { dbLogUsage } from './supabase';
 
@@ -2334,4 +2334,35 @@ profileInsights: MUST reference the learner's actual cognitive scores AND explai
     throw new Error('Invalid study brief response.');
   }
   return parsed;
+}
+
+// ── Text-to-Speech ────────────────────────────────────────────
+
+const TTS_MODEL = 'gemini-2.5-flash-preview-tts';
+const TTS_VOICE = 'Puck'; // upbeat, clear — good for study narration
+
+/**
+ * Convert plain text to speech using Gemini TTS.
+ * Returns raw base64-encoded PCM audio (24 kHz, 16-bit, mono).
+ * Wrap in a WAV header before playing — see pcmToWavUrl() in the UI layer.
+ */
+export async function generateSpeech(text: string): Promise<string> {
+  const client = getClient();
+  const response = await client.models.generateContent({
+    model: TTS_MODEL,
+    contents: [{ parts: [{ text }] }],
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        voiceConfig: {
+          prebuiltVoiceConfig: { voiceName: TTS_VOICE },
+        },
+      },
+    },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const part = response.candidates?.[0]?.content?.parts?.[0] as any;
+  const data  = part?.inlineData?.data as string | undefined;
+  if (!data) throw new Error('TTS returned no audio data. Check that the model name is correct and the API key has TTS access.');
+  return data;
 }

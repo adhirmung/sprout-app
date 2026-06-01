@@ -1,4 +1,4 @@
-import { Component, useEffect, useMemo, useRef, useState } from 'react';
+import { Component, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { Icon } from '../components/Icon';
 import { ExamScreen } from './ExamScreen';
@@ -20,6 +20,7 @@ import {
   generateActivityPack,
   generateContentMap,
   generateFeed,
+  generateSpeech,
   generateStudyBrief,
   generateParagraphQuiz,
   generatePracticeQuiz,
@@ -2365,6 +2366,88 @@ function inlineMd(text: string): React.ReactNode {
   return <>{parts}</>;
 }
 
+// ── Read Aloud helpers ────────────────────────────────────────
+
+/** Strip markdown syntax so the TTS only hears plain prose. */
+function stripMd(md: string): string {
+  return md
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/\*\*(.*?)\*\*/gs, '$1')
+    .replace(/\*(.*?)\*/gs, '$1')
+    .replace(/`{1,3}([\s\S]*?)`{1,3}/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/^\s*>\s*/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * Wrap raw PCM bytes (24 kHz, 16-bit, mono LE) from Gemini TTS in a
+ * WAV container and return a blob: URL ready for <audio>.
+ */
+function pcmToWavUrl(base64pcm: string): string {
+  const pcm        = Uint8Array.from(atob(base64pcm), c => c.charCodeAt(0));
+  const sampleRate = 24_000, ch = 1, bits = 16;
+  const byteRate   = sampleRate * ch * bits / 8;
+  const header     = new ArrayBuffer(44);
+  const v          = new DataView(header);
+  // RIFF
+  [0x52,0x49,0x46,0x46].forEach((b, i) => v.setUint8(i, b));
+  v.setUint32(4, 36 + pcm.length, true);
+  [0x57,0x41,0x56,0x45].forEach((b, i) => v.setUint8(8 + i, b));
+  // fmt
+  [0x66,0x6d,0x74,0x20].forEach((b, i) => v.setUint8(12 + i, b));
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true);         // PCM
+  v.setUint16(22, ch, true);
+  v.setUint32(24, sampleRate, true);
+  v.setUint32(28, byteRate, true);
+  v.setUint16(32, ch * bits / 8, true);
+  v.setUint16(34, bits, true);
+  // data
+  [0x64,0x61,0x74,0x61].forEach((b, i) => v.setUint8(36 + i, b));
+  v.setUint32(40, pcm.length, true);
+  const wav = new Uint8Array(44 + pcm.length);
+  wav.set(new Uint8Array(header));
+  wav.set(pcm, 44);
+  return URL.createObjectURL(new Blob([wav], { type: 'audio/wav' }));
+}
+
+/** Karaoke word-highlight renderer used during Read Aloud. */
+function ReadAloudKaraoke({ words, currentWordIdx }: { words: string[]; currentWordIdx: number }) {
+  return (
+    <p style={{ margin: 0, fontSize: 15, lineHeight: 1.8, letterSpacing: '0.01em' }}>
+      {words.map((word, i) => {
+        const isActive = i === currentWordIdx;
+        const isPast   = i < currentWordIdx;
+        return (
+          <span
+            key={i}
+            style={{
+              display:    'inline',
+              background: isActive ? 'rgba(34,197,94,0.25)' : 'transparent',
+              color:      isActive ? 'var(--ink)'
+                        : isPast   ? 'var(--ink-2)'
+                        :            'var(--ink-4)',
+              borderRadius: isActive ? 4 : 0,
+              padding:    isActive ? '1px 3px' : '0',
+              margin:     '0 1.5px',
+              fontWeight: isActive ? 700 : 400,
+              transition: 'color 0.06s',
+              boxShadow:  isActive ? '0 0 0 2px rgba(34,197,94,0.2)' : 'none',
+            }}
+          >
+            {word}
+          </span>
+        );
+      })}
+    </p>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+
 function NoteMarkdown({ content }: { content: string }) {
   const lines  = content.replace(/\r\n/g, '\n').split('\n');
   const nodes: React.ReactNode[] = [];
@@ -2588,6 +2671,128 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   const [notesMode,         setNotesMode]         = useState<'notes' | 'understand'>('notes');
   const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
   const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
+
+  // ── Read Aloud state ─────────────────────────────────────────
+  type RaPhase = 'idle' | 'loading' | 'playing' | 'paused';
+  const [raPhase,    setRaPhase]    = useState<RaPhase>('idle');
+  const [raTopicIdx, setRaTopicIdx] = useState(0);
+  const [raWords,    setRaWords]    = useState<string[]>([]);
+  const [raWordIdx,  setRaWordIdx]  = useState(-1);
+  const raAudioRef   = useRef<HTMLAudioElement | null>(null);
+  const raUrlRef     = useRef('');
+  const raRafRef     = useRef(0);
+  // Pre-fetched audio for the next topic: Map<topicIdx, { url, words }>
+  const raCacheRef   = useRef<Map<number, { url: string; words: string[] }>>(new Map());
+  // Stable refs so audio callbacks always see the latest state
+  const raTopicsRef  = useRef(documentReading.topics);
+  const raTextsRef   = useRef(understandTexts);
+  raTopicsRef.current = documentReading.topics;
+  raTextsRef.current  = understandTexts;
+
+  /** Tear down the current audio and reset word tracking. */
+  const raStop = useCallback(() => {
+    cancelAnimationFrame(raRafRef.current);
+    if (raAudioRef.current) { raAudioRef.current.pause(); raAudioRef.current.src = ''; raAudioRef.current = null; }
+    if (raUrlRef.current)   { URL.revokeObjectURL(raUrlRef.current); raUrlRef.current = ''; }
+    setRaPhase('idle'); setRaWordIdx(-1);
+  }, []);
+
+  // Stop reading when leaving AI Summary tab or component unmounts
+  useEffect(() => { if (notesMode !== 'understand') raStop(); }, [notesMode]); // eslint-disable-line
+  useEffect(() => () => { raStop(); raCacheRef.current.forEach(e => URL.revokeObjectURL(e.url)); }, []); // eslint-disable-line
+
+  /** Core recursive play function — stored in a ref so onended always calls the latest version. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const raPlayRef = useRef<(idx: number) => Promise<void>>(null as any);
+  raPlayRef.current = async (idx: number) => {
+    const topics = raTopicsRef.current;
+    const texts  = raTextsRef.current;
+
+    // All done?
+    if (idx >= topics.length) { setRaPhase('idle'); return; }
+
+    setRaTopicIdx(idx);
+    setRaWordIdx(-1);
+
+    // Resolve audio — either from cache or a fresh TTS call
+    let url: string;
+    let words: string[];
+    if (raCacheRef.current.has(idx)) {
+      const cached = raCacheRef.current.get(idx)!;
+      url   = cached.url;
+      words = cached.words;
+      raCacheRef.current.delete(idx);
+    } else {
+      const raw = texts[topics[idx].topicId];
+      if (!raw) { void raPlayRef.current!(idx + 1); return; } // skip empty
+      setRaPhase('loading');
+      const plain = stripMd(raw);
+      words = plain.split(/\s+/).filter(Boolean);
+      const base64 = await generateSpeech(plain).catch(() => null);
+      if (!base64) { setRaPhase('idle'); return; }
+      url = pcmToWavUrl(base64);
+    }
+
+    // Clean up previous URL
+    if (raUrlRef.current) URL.revokeObjectURL(raUrlRef.current);
+    raUrlRef.current = url;
+    setRaWords(words);
+
+    const audio = new Audio(url);
+    raAudioRef.current = audio;
+
+    // Pre-fetch NEXT topic in the background
+    const nextIdx = idx + 1;
+    if (nextIdx < topics.length && !raCacheRef.current.has(nextIdx)) {
+      const nextRaw = texts[topics[nextIdx].topicId];
+      if (nextRaw) {
+        const nextPlain = stripMd(nextRaw);
+        const nextWords = nextPlain.split(/\s+/).filter(Boolean);
+        generateSpeech(nextPlain)
+          .then(b64 => raCacheRef.current.set(nextIdx, { url: pcmToWavUrl(b64), words: nextWords }))
+          .catch(() => {});
+      }
+    }
+
+    audio.onloadedmetadata = () => {
+      setRaPhase('playing');
+      const dur = audio.duration || 1;
+      const n   = words.length;
+      const tick = () => {
+        if (raAudioRef.current && !raAudioRef.current.paused) {
+          const progress = raAudioRef.current.currentTime / dur;
+          setRaWordIdx(Math.min(Math.floor(progress * n), n - 1));
+          raRafRef.current = requestAnimationFrame(tick);
+        }
+      };
+      cancelAnimationFrame(raRafRef.current);
+      raRafRef.current = requestAnimationFrame(tick);
+    };
+    audio.onended = () => {
+      cancelAnimationFrame(raRafRef.current);
+      void raPlayRef.current!(idx + 1);
+    };
+    audio.onerror = () => { setRaPhase('idle'); };
+    audio.play().catch(() => setRaPhase('idle'));
+  };
+
+  const raStart   = () => void raPlayRef.current!(0);
+  const raPause   = () => { raAudioRef.current?.pause();  cancelAnimationFrame(raRafRef.current); setRaPhase('paused'); };
+  const raResume  = () => {
+    if (!raAudioRef.current) return;
+    const dur = raAudioRef.current.duration || 1;
+    const n   = raWords.length;
+    const tick = () => {
+      if (raAudioRef.current && !raAudioRef.current.paused) {
+        const progress = raAudioRef.current.currentTime / dur;
+        setRaWordIdx(Math.min(Math.floor(progress * n), n - 1));
+        raRafRef.current = requestAnimationFrame(tick);
+      }
+    };
+    raAudioRef.current.play().catch(() => {});
+    setRaPhase('playing');
+    raRafRef.current = requestAnimationFrame(tick);
+  };
 
   const isMobile    = useIsMobile();
   const [showSidebar, setShowSidebar] = useState(() => window.innerWidth >= 820);
@@ -2889,8 +3094,43 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
             ))}
           </div>
         ) : (
-          /* Placeholder so break chip stays right-aligned */
-          <div />
+          /* ── Read Aloud controls (AI Summary tab) ── */
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {raPhase === 'idle' && (
+              <button onClick={raStart}
+                style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '7px 16px', borderRadius: 10, border: 'none', background: 'var(--brand)', color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                🔊 Start Reading
+              </button>
+            )}
+            {raPhase === 'loading' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 16px', borderRadius: 10, background: 'var(--bg-tint)', border: '1.5px solid var(--line)', fontSize: 13, fontWeight: 700, color: 'var(--ink-3)' }}>
+                <div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--brand)', borderTopColor: 'transparent', animation: 'spin 0.8s linear infinite' }} />
+                Loading voice…
+              </div>
+            )}
+            {(raPhase === 'playing' || raPhase === 'paused') && (
+              <>
+                {raPhase === 'playing' ? (
+                  <button onClick={raPause}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 10, border: '1.5px solid var(--brand)', background: 'var(--brand-tint)', color: 'var(--brand)', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                    ⏸ Pause
+                  </button>
+                ) : (
+                  <button onClick={raResume}
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 10, border: 'none', background: 'var(--brand)', color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                    ▶ Resume
+                  </button>
+                )}
+                <button onClick={raStop}
+                  style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px', borderRadius: 10, border: '1.5px solid var(--line)', background: 'var(--card)', color: 'var(--ink-3)', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                  ⏹ Stop
+                </button>
+                <span style={{ fontSize: 11, color: 'var(--ink-4)', fontWeight: 600 }}>
+                  Topic {raTopicIdx + 1}/{documentReading.topics.length}
+                </span>
+              </>
+            )}
+          </div>
         )}
 
         {/* Break reminder chip */}
@@ -3107,20 +3347,40 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         {notesMode === 'understand' ? ( // ── Understand tab ──
           <div>
             {documentReading.topics.map((t, i) => {
-              const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
-              const text    = understandTexts[t.topicId];
-              const loading = understandLoading.has(t.topicId);
+              const color      = TOPIC_COLORS[i % TOPIC_COLORS.length];
+              const text       = understandTexts[t.topicId];
+              const loading    = understandLoading.has(t.topicId);
+              const isReading  = raPhase !== 'idle';
+              const isActive   = isReading && raTopicIdx === i;
+              const isPast     = isReading && raTopicIdx > i;
+              const isFuture   = isReading && raTopicIdx < i;
+
+              // Dim non-active topics while reading
+              const topicOpacity = isActive ? 1 : isPast ? 0.35 : isFuture ? 0.25 : 1;
+
               return (
-                <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12 }}>
-                  {/* Topic heading */}
+                <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12, transition: 'opacity 0.4s', opacity: topicOpacity }}>
+                  {/* Topic heading — pulse ring on the active number badge */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                    <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>{i + 1}</div>
+                    <div style={{
+                      width: 28, height: 28, borderRadius: '50%', background: color,
+                      display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0,
+                      boxShadow: isActive ? `0 0 0 4px ${color}44` : 'none',
+                      transition: 'box-shadow 0.3s',
+                    }}>{i + 1}</div>
                     <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
+                    {isActive && raPhase === 'playing' && (
+                      <div style={{ display: 'flex', gap: 2, alignItems: 'flex-end', height: 14, flexShrink: 0 }}>
+                        {[0,1,2].map(b => (
+                          <div key={b} style={{ width: 3, borderRadius: 2, background: color, animation: `soundbar 0.8s ease-in-out ${b * 0.2}s infinite alternate`, height: 6 + b * 4 }} />
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
 
                   {/* Explanation card */}
-                  <div style={{ borderRadius: 16, border: `1.5px solid ${color}33`, background: 'var(--card)', boxShadow: '0 2px 14px rgba(0,0,0,0.05)', overflow: 'hidden', minHeight: 80 }}>
+                  <div style={{ borderRadius: 16, border: `1.5px solid ${isActive ? color + '88' : color + '33'}`, background: 'var(--card)', boxShadow: isActive ? `0 4px 24px ${color}22` : '0 2px 14px rgba(0,0,0,0.05)', overflow: 'hidden', minHeight: 80, transition: 'border-color 0.3s, box-shadow 0.3s' }}>
                     {/* Card body */}
                     <div style={{ padding: isMobile ? '16px 18px' : '20px 24px' }}>
                       {loading && !text ? (
@@ -3130,7 +3390,12 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                           <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
                         </div>
                       ) : text ? (
-                        <NoteMarkdown content={text} />
+                        /* Karaoke mode when this topic is active, normal markdown otherwise */
+                        isActive ? (
+                          <ReadAloudKaraoke words={raWords} currentWordIdx={raWordIdx} />
+                        ) : (
+                          <NoteMarkdown content={text} />
+                        )
                       ) : (
                         <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
                       )}
@@ -3141,7 +3406,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                       <button
                         onClick={() => {
                           setNotesMode('notes');
-                          // Scroll after one frame so notes-mode DOM is mounted
                           requestAnimationFrame(() => scrollTo(t.topicId));
                         }}
                         style={{

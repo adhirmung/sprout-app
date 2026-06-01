@@ -119,3 +119,8 @@ code {
   from { opacity: 0; transform: translateX(-50%) translateY(12px); }
   to   { opacity: 1; transform: translateX(-50%) translateY(0);    }
 }
+
+@keyframes soundbar {
+  from { transform: scaleY(0.4); }
+  to   { transform: scaleY(1.2); }
+}
