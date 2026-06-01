@@ -578,7 +578,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         focusChatMessages={focusChatMessages}
         onFocusChatMessagesChange={setFocusChatMessages}
         onBack={() => setPhase('map')}
-        onPractice={() => setPhase('practice')}
+        onPractice={(mode) => {
+          if (mode === 'activities' || mode === 'flashcards') { void generate(false, mode); return; }
+          setPhase('practice');
+        }}
         onRegenerate={async () => {
           Store.del(`course:${sourceKey}`);
           setCourseMaterial(null);
@@ -601,7 +604,9 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       sourceWordCount={sourceWordCount}
       onBack={() => setPhase('idle')}
       onCourseMaterial={() => startBullets(contentMap)}
-      onPractice={() => {
+      onPractice={(mode) => {
+        if (mode === 'activities' || mode === 'flashcards') { void generate(false, mode); return; }
+        // mode === 'quiz' → PracticeView
         if (courseMaterial ?? documentReading) {
           setPhase('practice');
         } else {
