@@ -286,7 +286,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         setActivityPack(pack); setPhase('activities');
       } catch (e) {
         setError(e instanceof Error ? e.message : 'Generation failed. Please retry.');
-        setPhase('idle');
+        // Return to map if available so the user doesn't lose context
+        setPhase(contentMap ? 'map' : 'idle');
       }
       return;
     }
@@ -661,7 +662,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     <ActivitiesView
       activityPack={activityPack}
       topic={topic}
-      onBack={() => setPhase('idle')}
+      onBack={() => {
+        // Return to map if available, otherwise idle
+        if (contentMap) setPhase(courseMaterial ? 'course' : 'map');
+        else setPhase('idle');
+      }}
       onRegenerate={() => {
         Store.del(`activities:${sourceKey}`);
         setActivityPack(null);

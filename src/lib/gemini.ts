@@ -1780,7 +1780,8 @@ export async function generateActivityPack(
 
   const sys = 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.';
 
-  const [mmRaw, scRaw, seqRaw, tfRaw] = await Promise.all([
+  // allSettled so a single failing request never kills the whole pack
+  const [mmResult, scResult, seqResult, tfResult] = await Promise.allSettled([
 
     // 1 — Memory Match
     generateText(FAST_MODEL, sys, [textPart(
@@ -1840,29 +1841,37 @@ Rules:
 
   const activities: GameActivity[] = [];
 
-  try {
-    const p = parseJson<MemoryMatchActivity>(mmRaw);
-    if (Array.isArray(p.pairs) && p.pairs.length > 0)
-      activities.push({ type: 'memory_match', pairs: p.pairs });
-  } catch { /* non-critical */ }
+  if (mmResult.status === 'fulfilled') {
+    try {
+      const p = parseJson<MemoryMatchActivity>(mmResult.value);
+      if (Array.isArray(p.pairs) && p.pairs.length > 0)
+        activities.push({ type: 'memory_match', pairs: p.pairs });
+    } catch { /* malformed JSON — skip */ }
+  }
 
-  try {
-    const p = parseJson<SortClassifyActivity>(scRaw);
-    if (Array.isArray(p.categories) && Array.isArray(p.items) && p.items.length > 0)
-      activities.push({ type: 'sort_classify', categories: p.categories, items: p.items });
-  } catch { /* non-critical */ }
+  if (scResult.status === 'fulfilled') {
+    try {
+      const p = parseJson<SortClassifyActivity>(scResult.value);
+      if (Array.isArray(p.categories) && Array.isArray(p.items) && p.items.length > 0)
+        activities.push({ type: 'sort_classify', categories: p.categories, items: p.items });
+    } catch { /* malformed JSON — skip */ }
+  }
 
-  try {
-    const p = parseJson<SequenceActivity>(seqRaw);
-    if (Array.isArray(p.steps) && p.steps.length > 0)
-      activities.push({ type: 'sequence', title: p.title ?? topic, steps: p.steps });
-  } catch { /* non-critical */ }
+  if (seqResult.status === 'fulfilled') {
+    try {
+      const p = parseJson<SequenceActivity>(seqResult.value);
+      if (Array.isArray(p.steps) && p.steps.length > 0)
+        activities.push({ type: 'sequence', title: p.title ?? topic, steps: p.steps });
+    } catch { /* malformed JSON — skip */ }
+  }
 
-  try {
-    const p = parseJson<TrueFalseActivity>(tfRaw);
-    if (Array.isArray(p.statements) && p.statements.length > 0)
-      activities.push({ type: 'true_false', statements: p.statements });
-  } catch { /* non-critical */ }
+  if (tfResult.status === 'fulfilled') {
+    try {
+      const p = parseJson<TrueFalseActivity>(tfResult.value);
+      if (Array.isArray(p.statements) && p.statements.length > 0)
+        activities.push({ type: 'true_false', statements: p.statements });
+    } catch { /* malformed JSON — skip */ }
+  }
 
   if (activities.length === 0) throw new Error('Failed to generate activities. Please retry.');
 
