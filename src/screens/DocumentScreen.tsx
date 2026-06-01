@@ -1494,8 +1494,9 @@ function ActivitiesView({
         })}
       </div>
 
-      {/* Content */}
+      {/* Content — centred, capped at 600px so cards stay a sensible size on desktop */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '18px 16px 32px' }}>
+        <div style={{ maxWidth: 600, margin: '0 auto' }}>
         {done ? (
           // ── Final summary ──
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20, paddingTop: 24 }}>
@@ -1576,6 +1577,7 @@ function ActivitiesView({
             )}
           </div>
         ) : null}
+        </div>{/* /maxWidth wrapper */}
       </div>
     </div>
   );

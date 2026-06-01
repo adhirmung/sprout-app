@@ -116,7 +116,7 @@ export function ActivityMemoryMatch({ activity, onComplete }: Props) {
         <div style={{ height: '100%', width: `${(matchedPairs / total) * 100}%`, background: 'var(--brand)', borderRadius: 99, transition: 'width 0.3s' }} />
       </div>
 
-      {/* Card grid */}
+      {/* Card grid — 4 cols, constrained by parent 600px wrapper */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
         {cards.map(card => {
           const isRevealed = revealed.has(card.id);
@@ -142,7 +142,9 @@ export function ActivityMemoryMatch({ activity, onComplete }: Props) {
               key={card.id}
               onClick={() => flip(card.id)}
               style={{
-                aspectRatio: '1 / 1.25',
+                aspectRatio: '3 / 4',
+              minHeight: 72,
+              maxHeight: 120,
                 borderRadius: 10,
                 border,
                 background: bg,
