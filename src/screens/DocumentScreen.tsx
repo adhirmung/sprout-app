@@ -3029,6 +3029,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         t.title,
         t.whyItMatters ?? '',
         (t.subtopics ?? []).map(s => ({ title: s.title, content: s.content ?? '' })),
+        (t.keyTerms ?? []).map(k => ({ term: k.term, definition: k.definition })),
         allTitles,
         (chunk) => {
           setUnderstandTexts(prev => ({ ...prev, [t.topicId]: (prev[t.topicId] ?? '') + chunk }));

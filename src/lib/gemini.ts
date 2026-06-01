@@ -2154,6 +2154,7 @@ export async function streamTopicUnderstanding(
   topicTitle:     string,
   topicSummary:   string,
   subtopics:      { title: string; content: string }[],
+  keyTerms:       { term: string; definition: string }[],
   allTopicTitles: string[],
   onChunk:        (text: string) => void,
 ): Promise<void> {
@@ -2164,16 +2165,17 @@ export async function streamTopicUnderstanding(
   const nextTopic = pos < allTopicTitles.length - 1 ? allTopicTitles[pos + 1] : null;
 
   const systemInstruction = `\
-You are a warm, knowledgeable teacher helping a student understand their own notes.
-You will be given the student's actual notes for a topic. Your job is to explain what
-this topic REALLY means — why it matters and how the ideas connect — using ONLY the
-information present in those notes. Do NOT add facts, examples, or concepts that are
-not in the notes.
-Write in flowing, conversational prose. You may use a brief analogy only if it directly
-illuminates something already in the notes.
-Target 150–220 words of main body text.
-End with a single key insight on its own line as a Markdown blockquote (> Your insight here).
-Do NOT use headings, bullet points, or numbered lists. Plain prose + one blockquote only.`;
+You are helping a student understand their own study notes.
+You will receive the student's actual notes — subtopic summaries and key term definitions.
+Your ONLY job is to weave those notes into clear, flowing prose that connects the ideas
+and makes the relationships between them explicit.
+Strict rules:
+- Use ONLY the facts, concepts, and terminology already present in the notes below.
+- Do NOT add outside knowledge, general background, or new examples not in the notes.
+- Make implicit links between subtopics explicit — show how the ideas build on each other.
+- Write in plain, conversational English. No headings, no bullet points, no numbered lists.
+- Target 150–220 words.
+- End with one key insight as a Markdown blockquote: > Insight here.`;
 
   // Build a grounding block from the actual subtopic notes
   const notesBlock = subtopics
@@ -2181,15 +2183,20 @@ Do NOT use headings, bullet points, or numbered lists. Plain prose + one blockqu
     .map(s => `[${s.title}]\n${s.content.trim()}`)
     .join('\n\n');
 
+  // Key terms provide extra specificity to ground the explanation
+  const termsBlock = keyTerms.length
+    ? keyTerms.map(k => `${k.term}: ${k.definition}`).join('\n')
+    : '';
+
   const prompt = [
     `Course: "${courseTopic}"`,
     `Topic: "${topicTitle}"`,
-    topicSummary ? `Overview: ${topicSummary}` : '',
-    prevTopic    ? `This topic follows: "${prevTopic}"` : '',
-    nextTopic    ? `This topic leads into: "${nextTopic}"` : '',
-    notesBlock   ? `\nSTUDENT'S NOTES (base your explanation on these):\n${notesBlock}` : '',
-    '',
-    'Now write a conceptual explanation that helps the student truly understand these notes, not just memorise them.',
+    topicSummary ? `Why it matters: ${topicSummary}` : '',
+    prevTopic    ? `Comes after: "${prevTopic}"` : '',
+    nextTopic    ? `Leads into: "${nextTopic}"` : '',
+    notesBlock   ? `\n--- STUDENT'S SUBTOPIC NOTES ---\n${notesBlock}` : '',
+    termsBlock   ? `\n--- KEY TERMS FROM THESE NOTES ---\n${termsBlock}` : '',
+    '\nUsing ONLY the above notes, write flowing prose that connects these ideas for the student.',
   ].filter(Boolean).join('\n');
 
   const stream = await client.models.generateContentStream({
