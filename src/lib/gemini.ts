@@ -2153,36 +2153,43 @@ export async function streamTopicUnderstanding(
   courseTopic:    string,
   topicTitle:     string,
   topicSummary:   string,
-  subtopics:      { title: string }[],
+  subtopics:      { title: string; content: string }[],
   allTopicTitles: string[],
   onChunk:        (text: string) => void,
 ): Promise<void> {
   const client = getClient();
 
-  const pos      = allTopicTitles.indexOf(topicTitle);
+  const pos       = allTopicTitles.indexOf(topicTitle);
   const prevTopic = pos > 0                         ? allTopicTitles[pos - 1] : null;
   const nextTopic = pos < allTopicTitles.length - 1 ? allTopicTitles[pos + 1] : null;
 
   const systemInstruction = `\
-You are a warm, knowledgeable teacher explaining ideas to a curious student.
-Your job is NOT to summarise the notes — it is to explain what this topic REALLY means,
-why it matters, and how it connects to the bigger picture.
-Write in flowing, conversational prose. Use one relatable analogy to make the idea concrete.
+You are a warm, knowledgeable teacher helping a student understand their own notes.
+You will be given the student's actual notes for a topic. Your job is to explain what
+this topic REALLY means — why it matters and how the ideas connect — using ONLY the
+information present in those notes. Do NOT add facts, examples, or concepts that are
+not in the notes.
+Write in flowing, conversational prose. You may use a brief analogy only if it directly
+illuminates something already in the notes.
 Target 150–220 words of main body text.
 End with a single key insight on its own line as a Markdown blockquote (> Your insight here).
 Do NOT use headings, bullet points, or numbered lists. Plain prose + one blockquote only.`;
 
-  const subtopicList = subtopics.map(s => `• ${s.title}`).join('\n');
+  // Build a grounding block from the actual subtopic notes
+  const notesBlock = subtopics
+    .filter(s => s.content?.trim())
+    .map(s => `[${s.title}]\n${s.content.trim()}`)
+    .join('\n\n');
 
   const prompt = [
     `Course: "${courseTopic}"`,
     `Topic: "${topicTitle}"`,
     topicSummary ? `Overview: ${topicSummary}` : '',
-    subtopicList  ? `Subtopics covered:\n${subtopicList}` : '',
-    prevTopic     ? `This topic follows: "${prevTopic}"` : '',
-    nextTopic     ? `This topic leads into: "${nextTopic}"` : '',
+    prevTopic    ? `This topic follows: "${prevTopic}"` : '',
+    nextTopic    ? `This topic leads into: "${nextTopic}"` : '',
+    notesBlock   ? `\nSTUDENT'S NOTES (base your explanation on these):\n${notesBlock}` : '',
     '',
-    'Write a conceptual explanation for a student who wants to truly understand this, not just memorise it.',
+    'Now write a conceptual explanation that helps the student truly understand these notes, not just memorise them.',
   ].filter(Boolean).join('\n');
 
   const stream = await client.models.generateContentStream({
@@ -2191,7 +2198,7 @@ Do NOT use headings, bullet points, or numbered lists. Plain prose + one blockqu
     config:   {
       systemInstruction,
       maxOutputTokens: 500,
-      temperature:     0.7,
+      temperature:     0.4,   // lower = stays closer to source notes
       thinkingConfig:  { thinkingBudget: 0 },
     },
   });
