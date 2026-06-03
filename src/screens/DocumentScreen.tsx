@@ -117,6 +117,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // ── Lifted from ReadView so they survive within-session navigation ──
   const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
+  const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
+  const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
   // Deferred practice — set when user clicks Practice before Notes are loaded
   const [pendingPractice,   setPendingPractice]   = useState(false);
   // weakSpots: topicId → last practice percentage (0-100); < 60 = needs review
@@ -596,6 +598,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onSubStatusChange={setSubStatuses}
         focusChatMessages={focusChatMessages}
         onFocusChatMessagesChange={setFocusChatMessages}
+        understandTexts={understandTexts}
+        onUnderstandTextsChange={setUnderstandTexts}
+        understandLoading={understandLoading}
+        onUnderstandLoadingChange={setUnderstandLoading}
         weakSpots={weakSpots}
         initialTab="understand"
         onBack={() => setPhase('map')}
@@ -2632,22 +2638,26 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate, weakSpots = {}, initialTab = 'understand' }: {
-  documentReading:           DocumentReading;
-  topic:                     string;
-  hasCache:                  boolean;
-  profile:                   LearnerProfile | null;
-  extractedText:             string;
-  courseStreaming?:           boolean;
-  subStatuses:               Record<string, SubStatus>;
-  onSubStatusChange:         React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
-  focusChatMessages:         ChatMessage[];
-  onFocusChatMessagesChange: React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  onBack:                    () => void;
-  onPractice:                (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate:              () => void;
-  weakSpots?:                Record<string, number>;
-  initialTab?:               'notes' | 'understand';
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, onBack, onPractice, onRegenerate, weakSpots = {}, initialTab = 'understand' }: {
+  documentReading:              DocumentReading;
+  topic:                        string;
+  hasCache:                     boolean;
+  profile:                      LearnerProfile | null;
+  extractedText:                string;
+  courseStreaming?:              boolean;
+  subStatuses:                  Record<string, SubStatus>;
+  onSubStatusChange:            React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
+  focusChatMessages:            ChatMessage[];
+  onFocusChatMessagesChange:    React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  understandTexts:              Record<string, string>;
+  onUnderstandTextsChange:      React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  understandLoading:            Set<string>;
+  onUnderstandLoadingChange:    React.Dispatch<React.SetStateAction<Set<string>>>;
+  onBack:                       () => void;
+  onPractice:                   (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:                 () => void;
+  weakSpots?:                   Record<string, number>;
+  initialTab?:                  'notes' | 'understand';
 }) {
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [expandedTopics,    setExpandedTopics]    = useState<Set<string>>(new Set([documentReading.topics[0]?.topicId ?? '']));
@@ -2675,9 +2685,11 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   const [viewMode,       setViewMode]       = useState<'list' | 'cards' | 'ask'>('list');
   const [cardIdx,        setCardIdx]        = useState(0);
   // notesMode: 'understand' = AI Summary (default), 'notes' = background notes view
-  const [notesMode]                               = useState<'notes' | 'understand'>(initialTab);
-  const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
-  const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
+  const [notesMode]    = useState<'notes' | 'understand'>(initialTab);
+  // understandTexts and understandLoading are lifted to DocumentScreen so they
+  // survive back/forward navigation without regenerating.
+  const setUnderstandTexts   = onUnderstandTextsChange;
+  const setUnderstandLoading = onUnderstandLoadingChange;
 
   // ── Read Aloud state ─────────────────────────────────────────
   type RaPhase = 'idle' | 'loading' | 'playing' | 'paused';
