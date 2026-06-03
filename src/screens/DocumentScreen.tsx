@@ -1874,7 +1874,7 @@ function MapView({ contentMap, topic, hasCache, hasCourse, profile, studyBrief, 
           <div style={{ flex: 1, height: 2.5, background: 'var(--line)', borderRadius: 2, marginBottom: 18 }} />
 
           {/* Step 3 — Practice (clickable) */}
-          <button onClick={() => onPractice('activities')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+          <button onClick={() => onPractice('quiz')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
             <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Practice</span>
           </button>
@@ -2892,9 +2892,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     }
   };
 
-  const scrollTo = (topicId: string) =>
-    document.getElementById(`rt-${topicId}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-
   const toggleSub = (key: string) => setExpandedSubs(prev => {
     const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n;
   });
@@ -3458,18 +3455,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                             ✨ Ask AI
                           </button>
 
-                          {/* View notes */}
-                          <button
-                            onClick={() => { setNotesMode('notes'); requestAnimationFrame(() => scrollTo(t.topicId)); }}
-                            style={{
-                              marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5,
-                              padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
-                              border: `1.5px solid ${color}44`, background: 'transparent', color,
-                              transition: 'all 0.2s',
-                            }}
-                          >
-                            📝 Notes
-                          </button>
                         </div>
                       );
                     })()}
@@ -3995,8 +3980,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         display: 'flex', alignItems: 'stretch',
       }}>
         {([
-          { id: 'understand', num: '1', label: 'AI SUMMARY', emoji: '💡', action: () => { setNotesMode('understand'); startUnderstandMode(); }, active: notesMode === 'understand' || notesMode === 'notes' },
-          { id: 'practice',   num: '2', label: 'PRACTICE',   emoji: '✏️', action: () => onPractice('quiz'),                                        active: false },
+          { id: 'understand', num: '2', label: 'AI SUMMARY', emoji: '💡', action: () => { setNotesMode('understand'); startUnderstandMode(); }, active: notesMode === 'understand' || notesMode === 'notes' },
+          { id: 'practice',   num: '3', label: 'PRACTICE',   emoji: '✏️', action: () => onPractice('quiz'),                                        active: false },
         ] as const).map((item, i, arr) => (
           <button
             key={item.id}
