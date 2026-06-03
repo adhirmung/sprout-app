@@ -3386,7 +3386,18 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                       </div>
                     )}
                   </div>
-                  <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
+                  <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 10, lineHeight: 1.3 }}>{t.title}</h2>
+
+                  {/* Why it matters */}
+                  {t.whyItMatters && (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginBottom: 14, padding: '9px 13px', borderRadius: 10, background: color + '0d', border: `1px solid ${color}33` }}>
+                      <span style={{ fontSize: 14, flexShrink: 0 }}>💡</span>
+                      <div>
+                        <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color, marginBottom: 2 }}>Why it matters</div>
+                        <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{t.whyItMatters}</div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Explanation card */}
                   <div style={{ borderRadius: 16, border: `1.5px solid ${isActive ? color + '88' : color + '33'}`, background: 'var(--card)', boxShadow: isActive ? `0 4px 24px ${color}22` : '0 2px 14px rgba(0,0,0,0.05)', transition: 'border-color 0.3s, box-shadow 0.3s' }}>
@@ -3399,8 +3410,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                           <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
                         </div>
                       ) : text ? (
-                        /* Karaoke when this topic is being read; normal markdown otherwise.
-                           Card height is driven by whichever is rendered — no overflow clipping. */
                         isActive
                           ? <ReadAloudKaraoke words={raWords} currentWordIdx={raWordIdx} />
                           : <NoteMarkdown content={text} />
@@ -3409,23 +3418,57 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                       )}
                     </div>
 
-                    {/* Footer: back to notes button */}
-                    <div style={{ borderTop: `1px solid ${color}22`, padding: '10px 18px' }}>
-                      <button
-                        onClick={() => {
-                          setNotesMode('notes');
-                          requestAnimationFrame(() => scrollTo(t.topicId));
-                        }}
-                        style={{
-                          padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700,
-                          cursor: 'pointer', border: `1.5px solid ${color}55`,
-                          background: 'transparent', color,
-                          transition: 'all 0.2s',
-                        }}
-                      >
-                        📝 View notes for topic {i + 1}
-                      </button>
-                    </div>
+                    {/* Footer: Read + Ask AI + View Notes */}
+                    {(() => {
+                      const subKeys    = (t.subtopics ?? []).map((_, si) => `${t.topicId}-${si}`);
+                      const allRead    = subKeys.length > 0 && subKeys.every(k => subStatuses[k] === 'read' || subStatuses[k] === 'learnt');
+                      const firstCardIdx = allCards.findIndex(c => c.topic.topicId === t.topicId);
+                      return (
+                        <div style={{ borderTop: `1px solid ${color}22`, padding: '10px 14px', display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+                          {/* Read toggle */}
+                          <button
+                            onClick={() => subKeys.forEach(k => markStatus(k, allRead ? 'unread' as SubStatus : 'read'))}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 5,
+                              padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                              border: `1.5px solid ${allRead ? color : 'var(--line)'}`,
+                              background: allRead ? color : 'var(--bg-tint)',
+                              color: allRead ? 'white' : 'var(--ink-3)',
+                              transition: 'all 0.2s',
+                            }}
+                          >
+                            {allRead ? '✓ Read' : '○ Mark read'}
+                          </button>
+
+                          {/* Ask AI */}
+                          <button
+                            onClick={() => jumpToAskAI(firstCardIdx >= 0 ? firstCardIdx : 0)}
+                            style={{
+                              display: 'flex', alignItems: 'center', gap: 5,
+                              padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                              border: '1.5px solid var(--brand)',
+                              background: 'var(--brand-tint)', color: 'var(--brand)',
+                              transition: 'all 0.2s',
+                            }}
+                          >
+                            ✨ Ask AI
+                          </button>
+
+                          {/* View notes */}
+                          <button
+                            onClick={() => { setNotesMode('notes'); requestAnimationFrame(() => scrollTo(t.topicId)); }}
+                            style={{
+                              marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 5,
+                              padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer',
+                              border: `1.5px solid ${color}44`, background: 'transparent', color,
+                              transition: 'all 0.2s',
+                            }}
+                          >
+                            📝 Notes
+                          </button>
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               );
