@@ -597,6 +597,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         focusChatMessages={focusChatMessages}
         onFocusChatMessagesChange={setFocusChatMessages}
         weakSpots={weakSpots}
+        initialTab="understand"
         onBack={() => setPhase('map')}
         onPractice={(mode) => {
           if (mode === 'activities' || mode === 'flashcards') { void generate(false, mode); return; }
@@ -624,6 +625,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       sourceWordCount={sourceWordCount}
       onBack={() => setPhase('idle')}
       onCourseMaterial={() => startBullets(contentMap)}
+      onAISummary={() => startBullets(contentMap)}
       onPractice={(mode) => {
         if (mode === 'activities' || mode === 'flashcards') { void generate(false, mode); return; }
         // mode === 'quiz' → PracticeView
@@ -1610,7 +1612,7 @@ function ActivitiesView({
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, studyBrief, studyBriefLoading, sourceWordCount, onBack, onCourseMaterial, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, studyBrief, studyBriefLoading, sourceWordCount, onBack, onCourseMaterial, onAISummary, onPractice, onRegenerate }: {
   contentMap:          ContentMap;
   topic:               string;
   hasCache:            boolean;
@@ -1622,6 +1624,7 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, stu
   sourceWordCount:     number;
   onBack:              () => void;
   onCourseMaterial:    () => void;
+  onAISummary:         () => void;
   onPractice:          (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:        () => void;
 }) {
@@ -1641,7 +1644,7 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, stu
         transition: 'all 0.2s',
       }}>{n}</div>
       <div style={{ fontSize: 10, fontWeight: 700, color: active ? 'var(--brand)' : 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-        {n === 1 ? 'Plan' : n === 2 ? 'Notes' : 'Practice'}
+        {n === 1 ? 'Plan' : n === 2 ? 'AI Summary' : 'Practice'}
       </div>
     </div>
   );
@@ -1775,12 +1778,12 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, stu
 
             const features = [
               {
-                icon: '📝',
-                label: 'Notes',
+                icon: '💡',
+                label: 'AI Summary',
                 color: 'var(--brand)',
                 bg: 'var(--brand-tint)',
                 border: 'var(--brand-soft)',
-                desc: 'AI-structured notes split by topic with subtopic accordions, key terms, and a Study/Understand toggle. Track what you\'ve read and what you\'ve learnt.',
+                desc: 'Per-topic AI explanations grounded in your uploaded content. Includes read aloud with word-by-word karaoke, mark as read, and Ask AI — all in one place.',
               },
               {
                 icon: '✨',
@@ -1863,12 +1866,12 @@ function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, stu
           {/* Line 1→2 */}
           <div style={{ flex: 1, height: 2.5, background: hasCourse ? 'var(--brand)' : 'var(--line)', borderRadius: 2, marginBottom: 18, transition: 'background 0.5s' }} />
 
-          {/* Step 2 — Notes/Course Material (clickable) */}
-          <button onClick={hasText ? onCourseMaterial : undefined} disabled={!hasText} title={!hasText ? 'Requires text document (DOCX, TXT)' : 'View course material'} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: hasText ? 'pointer' : 'not-allowed', padding: '0 4px', opacity: hasText ? 1 : 0.45 }}>
+          {/* Step 2 — AI Summary (clickable) */}
+          <button onClick={onAISummary} title="AI Summary" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
             <div style={{ width: 34, height: 34, borderRadius: '50%', background: hasCourse ? 'var(--brand)' : 'var(--bg-tint)', border: `2.5px solid ${hasCourse ? 'var(--brand)' : 'var(--line)'}`, display: 'grid', placeItems: 'center', fontSize: 13, color: hasCourse ? 'white' : 'var(--ink-4)', fontWeight: 800, transition: 'all 0.4s', boxShadow: hasCourse ? '0 2px 8px rgba(47,158,94,0.3)' : 'none' }}>
               {hasCourse ? '✓' : '2'}
             </div>
-            <span style={{ fontSize: 11, fontWeight: 700, color: hasCourse ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>Notes</span>
+            <span style={{ fontSize: 11, fontWeight: 700, color: hasCourse ? 'var(--brand)' : 'var(--ink-3)', letterSpacing: '0.02em', transition: 'color 0.4s' }}>AI Summary</span>
           </button>
 
           {/* Line 2→3 */}
@@ -2633,7 +2636,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate, weakSpots = {} }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, onBack, onPractice, onRegenerate, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:           DocumentReading;
   topic:                     string;
   hasCache:                  boolean;
@@ -2648,6 +2651,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   onPractice:                (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:              () => void;
   weakSpots?:                Record<string, number>;
+  initialTab?:               'notes' | 'understand';
 }) {
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [expandedTopics,    setExpandedTopics]    = useState<Set<string>>(new Set([documentReading.topics[0]?.topicId ?? '']));
@@ -2674,8 +2678,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
 
   const [viewMode,       setViewMode]       = useState<'list' | 'cards' | 'ask'>('list');
   const [cardIdx,        setCardIdx]        = useState(0);
-  // notesMode: 'notes' = summary bullets view (default), 'understand' = AI explanation view
-  const [notesMode,         setNotesMode]         = useState<'notes' | 'understand'>('notes');
+  // notesMode: 'understand' = AI Summary (default), 'notes' = background notes view
+  const [notesMode,         setNotesMode]         = useState<'notes' | 'understand'>(initialTab);
   const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
   const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
 
@@ -3015,6 +3019,10 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
       )}
     </div>
   );
+
+  // Auto-start AI Summary generation when the view mounts in understand mode
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { if (initialTab === 'understand') startUnderstandMode(); }, []);
 
   // ── Understand mode: generate per-topic explanations ─────────
   const startUnderstandMode = () => {
@@ -3991,9 +3999,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         display: 'flex', alignItems: 'stretch',
       }}>
         {([
-          { id: 'notes',      num: '1', label: 'NOTES',      emoji: '📝', action: () => setNotesMode('notes'),                                             active: notesMode === 'notes' },
-          { id: 'understand', num: '2', label: 'AI SUMMARY',  emoji: '💡', action: () => { setNotesMode('understand'); startUnderstandMode(); },             active: notesMode === 'understand' },
-          { id: 'practice',   num: '3', label: 'PRACTICE',    emoji: '✏️', action: () => onPractice('quiz'),                                                active: false },
+          { id: 'understand', num: '1', label: 'AI SUMMARY', emoji: '💡', action: () => { setNotesMode('understand'); startUnderstandMode(); }, active: notesMode === 'understand' || notesMode === 'notes' },
+          { id: 'practice',   num: '2', label: 'PRACTICE',   emoji: '✏️', action: () => onPractice('quiz'),                                        active: false },
         ] as const).map((item, i, arr) => (
           <button
             key={item.id}
