@@ -2675,7 +2675,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   const [viewMode,       setViewMode]       = useState<'list' | 'cards' | 'ask'>('list');
   const [cardIdx,        setCardIdx]        = useState(0);
   // notesMode: 'understand' = AI Summary (default), 'notes' = background notes view
-  const [notesMode,         setNotesMode]         = useState<'notes' | 'understand'>(initialTab);
+  const [notesMode]                               = useState<'notes' | 'understand'>(initialTab);
   const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
   const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
 
@@ -3974,46 +3974,35 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         </div>
       )}
 
-      {/* ── Bottom navigation: Notes | AI Summary | Practice ── */}
-      <div style={{
-        flexShrink: 0, borderTop: '1px solid var(--line)', background: 'var(--card)',
-        display: 'flex', alignItems: 'stretch',
-      }}>
-        {([
-          { id: 'understand', num: '2', label: 'AI SUMMARY', emoji: '💡', action: () => { setNotesMode('understand'); startUnderstandMode(); }, active: notesMode === 'understand' || notesMode === 'notes' },
-          { id: 'practice',   num: '3', label: 'PRACTICE',   emoji: '✏️', action: () => onPractice('quiz'),                                        active: false },
-        ] as const).map((item, i, arr) => (
-          <button
-            key={item.id}
-            onClick={item.action}
-            style={{
-              flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
-              justifyContent: 'center', gap: 4, padding: '10px 4px 14px',
-              background: 'none', border: 'none', cursor: 'pointer',
-              borderRight: i < arr.length - 1 ? '1px solid var(--line)' : 'none',
-              borderTop: item.active ? '2.5px solid var(--brand)' : '2.5px solid transparent',
-              transition: 'all 0.15s',
-            }}
-          >
-            <div style={{
-              width: 28, height: 28, borderRadius: '50%', display: 'grid', placeItems: 'center',
-              fontSize: 12, fontWeight: 800,
-              background: item.active ? 'var(--brand)' : 'var(--bg-tint)',
-              color: item.active ? 'white' : 'var(--ink-4)',
-              border: `2px solid ${item.active ? 'var(--brand)' : 'var(--line)'}`,
-              transition: 'all 0.15s',
-            }}>
-              {item.num}
-            </div>
-            <span style={{
-              fontSize: 9, fontWeight: 800, letterSpacing: '0.08em',
-              color: item.active ? 'var(--brand)' : 'var(--ink-4)',
-              transition: 'color 0.15s',
-            }}>
-              {item.label}
-            </span>
+      {/* ── Bottom step navigator — mirrors MapView stepper ── */}
+      <div style={{ flexShrink: 0, padding: '10px 24px 14px', borderTop: '1px solid var(--line)', background: 'var(--card)', display: 'flex', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', maxWidth: 420, width: '100%' }}>
+
+          {/* Step 1 — Plan (clickable: goes back) */}
+          <button onClick={onBack} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--brand)', fontWeight: 800 }}>1</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--brand)', letterSpacing: '0.02em' }}>Plan</span>
           </button>
-        ))}
+
+          {/* Line 1→2 (filled — we've passed step 1) */}
+          <div style={{ flex: 1, height: 2.5, background: 'var(--brand)', borderRadius: 2, marginBottom: 18 }} />
+
+          {/* Step 2 — AI Summary (active) */}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--brand)', border: '3px solid var(--brand)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'white', fontWeight: 800, boxShadow: '0 0 0 4px rgba(47,158,94,0.15)' }}>2</div>
+            <span style={{ fontSize: 11, fontWeight: 800, color: 'var(--brand)', letterSpacing: '0.02em' }}>AI Summary</span>
+          </div>
+
+          {/* Line 2→3 (unfilled) */}
+          <div style={{ flex: 1, height: 2.5, background: 'var(--line)', borderRadius: 2, marginBottom: 18 }} />
+
+          {/* Step 3 — Practice (clickable) */}
+          <button onClick={() => onPractice('quiz')} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, background: 'none', border: 'none', cursor: 'pointer', padding: '0 4px' }}>
+            <div style={{ width: 34, height: 34, borderRadius: '50%', background: 'var(--bg-tint)', border: '2.5px solid var(--line)', display: 'grid', placeItems: 'center', fontSize: 13, color: 'var(--ink-4)', fontWeight: 800 }}>3</div>
+            <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-3)', letterSpacing: '0.02em' }}>Practice</span>
+          </button>
+
+        </div>
       </div>
     </div>
   );
