@@ -2650,6 +2650,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   weakSpots?:                Record<string, number>;
 }) {
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
+  const [expandedTopics,    setExpandedTopics]    = useState<Set<string>>(new Set([documentReading.topics[0]?.topicId ?? '']));
+  const toggleTopic = (id: string) => setExpandedTopics(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; });
   const [reachedMilestones, setReachedMilestones] = useState<Set<number>>(new Set());
   const [elapsedSec,        setElapsedSec]        = useState(0);
   const [breakDismissed,    setBreakDismissed]    = useState(false);
@@ -3451,55 +3453,54 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
           );
         })()}
 
-        {/* Topic pills nav */}
-        <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, marginBottom: 24, scrollbarWidth: 'none' }}>
-          {documentReading.topics.map((t, i) => {
-            const color   = TOPIC_COLORS[i % TOPIC_COLORS.length];
-            const topicSubKeys = (t.subtopics ?? []).map((_, si) => `${t.topicId}-${si}`);
-            const topicDone  = topicSubKeys.filter(k => subStatuses[k] && subStatuses[k] !== 'unread').length;
-            const topicTotal = topicSubKeys.length;
-            const topicComplete = topicTotal > 0 && topicDone === topicTotal;
-            return (
-              <button key={t.topicId} onClick={() => scrollTo(t.topicId)} style={{
-                whiteSpace: 'nowrap', padding: '5px 11px', borderRadius: 999,
-                background: topicComplete ? color : 'var(--bg-tint)',
-                color: topicComplete ? 'white' : 'var(--ink-3)',
-                border: `1.5px solid ${topicComplete ? color : topicDone > 0 ? color + '55' : 'var(--line)'}`,
-                cursor: 'pointer', fontSize: 12, fontWeight: 700, transition: 'all 0.2s',
-              }}>
-                {topicComplete ? '✓ ' : topicDone > 0 ? `${topicDone}/${topicTotal} ` : ''}{i + 1} · {t.title.split(' ').slice(0, 3).join(' ')}
-              </button>
-            );
-          })}
-        </div>
-
-        {/* Topic sections */}
+        {/* Topic accordion list */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         {documentReading.topics.map((t, i) => {
           const color       = TOPIC_COLORS[i % TOPIC_COLORS.length];
           const subs        = t.subtopics ?? [];
           const weakPct     = weakSpots[t.topicId];
           const isWeak      = weakPct !== undefined && weakPct < 60;
+          const isTopicOpen = expandedTopics.has(t.topicId);
+          const topicSubKeys   = subs.map((_, si) => `${t.topicId}-${si}`);
+          const topicDone      = topicSubKeys.filter(k => subStatuses[k] && subStatuses[k] !== 'unread').length;
+          const topicTotal     = topicSubKeys.length;
+          const topicComplete  = topicTotal > 0 && topicDone === topicTotal;
           return (
-            <div key={t.topicId} id={`rt-${t.topicId}`} style={{ marginBottom: 44, scrollMarginTop: 12 }}>
-              {/* Topic heading */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
-                <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 12, fontWeight: 800, color: 'white', flexShrink: 0 }}>{i + 1}</div>
-                <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
-                {weakPct !== undefined && (
-                  <div style={{
-                    fontSize: 10, fontWeight: 800, padding: '2px 8px', borderRadius: 999, flexShrink: 0,
-                    background: isWeak ? '#FEF3C7' : '#DCFCE7',
-                    color: isWeak ? '#B45309' : '#16A34A',
-                    border: `1px solid ${isWeak ? '#FDE68A' : '#BBF7D0'}`,
-                  }}>
+            <div key={t.topicId} id={`rt-${t.topicId}`} style={{ borderRadius: 16, border: `1.5px solid ${isTopicOpen ? color + '55' : 'var(--line)'}`, overflow: 'hidden', background: 'var(--card)', transition: 'border-color 0.2s' }}>
+
+              {/* ── Topic header row (always visible) ── */}
+              <button
+                onClick={() => toggleTopic(t.topicId)}
+                style={{ width: '100%', padding: '14px 16px', display: 'flex', alignItems: 'center', gap: 12, background: isTopicOpen ? color + '08' : 'transparent', border: 'none', cursor: 'pointer', textAlign: 'left', transition: 'background 0.2s' }}
+              >
+                {/* Coloured number badge */}
+                <div style={{ width: 26, height: 26, borderRadius: '50%', background: topicComplete ? color : isTopicOpen ? color : color + '20', border: `2px solid ${color}`, display: 'grid', placeItems: 'center', fontSize: 11, fontWeight: 800, color: topicComplete || isTopicOpen ? 'white' : color, flexShrink: 0, transition: 'all 0.2s' }}>
+                  {topicComplete ? '✓' : i + 1}
+                </div>
+
+                {/* Title */}
+                <span style={{ flex: 1, fontWeight: 700, fontSize: 15, color: isTopicOpen ? color : 'var(--ink)', lineHeight: 1.3 }}>{t.title}</span>
+
+                {/* Progress / weak badge */}
+                {weakPct !== undefined ? (
+                  <div style={{ fontSize: 10, fontWeight: 800, padding: '2px 7px', borderRadius: 999, flexShrink: 0, background: isWeak ? '#FEF3C7' : '#DCFCE7', color: isWeak ? '#B45309' : '#16A34A', border: `1px solid ${isWeak ? '#FDE68A' : '#BBF7D0'}` }}>
                     {isWeak ? `⚠ ${weakPct}%` : `✓ ${weakPct}%`}
                   </div>
-                )}
-              </div>
-              <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 14, lineHeight: 1.3 }}>{t.title}</h2>
+                ) : topicDone > 0 && !topicComplete ? (
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-4)', flexShrink: 0 }}>{topicDone}/{topicTotal}</span>
+                ) : null}
 
-              {/* Subtopic accordions with read/learnt ticks + key terms inside */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 16 }}>
+                {/* Chevron */}
+                <div style={{ transform: isTopicOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.2s', flexShrink: 0 }}>
+                  <Icon name="chevron-right" size={15} stroke={isTopicOpen ? color : 'var(--ink-4)'} />
+                </div>
+              </button>
+
+              {/* ── Expanded content ── */}
+              {isTopicOpen && (
+                <div style={{ borderTop: `1px solid ${color}22`, padding: '12px 12px 0' }}>
+                  {/* Subtopic accordions with read/learnt ticks + key terms inside */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginBottom: 12 }}>
                 {subs.map((sub, si) => {
                   const key    = `${t.topicId}-${si}`;
                   const isOpen = expandedSubs.has(key);
@@ -3630,17 +3631,20 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                 })}
               </div>
 
-              {/* Why it matters */}
-              <div style={{ padding: '12px 14px', borderRadius: 12, background: color + '0d', border: `1px solid ${color}33`, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                <span style={{ fontSize: 15, flexShrink: 0 }}>💡</span>
-                <div>
-                  <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color, marginBottom: 4 }}>Why it matters</div>
-                  <div style={{ fontSize: 14, color: 'var(--ink-2)', lineHeight: 1.7 }}>{t.whyItMatters}</div>
+                  {/* Why it matters */}
+                  <div style={{ margin: '0 12px 12px', padding: '10px 14px', borderRadius: 10, background: color + '0d', border: `1px solid ${color}33`, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                    <span style={{ fontSize: 14, flexShrink: 0 }}>💡</span>
+                    <div>
+                      <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.08em', color, marginBottom: 3 }}>Why it matters</div>
+                      <div style={{ fontSize: 13, color: 'var(--ink-2)', lineHeight: 1.6 }}>{t.whyItMatters}</div>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           );
         })}
+        </div>
 
         {/* Streaming indicator — visible while notes topics are still being generated */}
         {courseStreaming && (
