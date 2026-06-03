@@ -618,13 +618,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       topic={topic}
       hasCache={!!Store.get<ContentMap | null>(`map:${sourceKey}`, null)}
       hasCourse={!!courseMaterial}
-      hasText={true}
       profile={profile}
       studyBrief={studyBrief}
       studyBriefLoading={studyBriefLoading}
       sourceWordCount={sourceWordCount}
       onBack={() => setPhase('idle')}
-      onCourseMaterial={() => startBullets(contentMap)}
       onAISummary={() => startBullets(contentMap)}
       onPractice={(mode) => {
         if (mode === 'activities' || mode === 'flashcards') { void generate(false, mode); return; }
@@ -1612,18 +1610,16 @@ function ActivitiesView({
 
 // ── Map view ──────────────────────────────────────────────────
 
-function MapView({ contentMap, topic, hasCache, hasCourse, hasText, profile, studyBrief, studyBriefLoading, sourceWordCount, onBack, onCourseMaterial, onAISummary, onPractice, onRegenerate }: {
+function MapView({ contentMap, topic, hasCache, hasCourse, profile, studyBrief, studyBriefLoading, sourceWordCount, onBack, onAISummary, onPractice, onRegenerate }: {
   contentMap:          ContentMap;
   topic:               string;
   hasCache:            boolean;
   hasCourse:           boolean;
-  hasText:             boolean;
   profile:             LearnerProfile | null;
   studyBrief:          StudyBrief | null;
   studyBriefLoading:   boolean;
   sourceWordCount:     number;
   onBack:              () => void;
-  onCourseMaterial:    () => void;
   onAISummary:         () => void;
   onPractice:          (mode: 'activities' | 'flashcards' | 'quiz') => void;
   onRegenerate:        () => void;
