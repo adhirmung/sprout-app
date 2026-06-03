@@ -3892,7 +3892,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
           <Icon name="arrow-left" size={20} />
         </button>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Notes</div>
+          <div className="label-eyebrow" style={{ marginBottom: 1 }}>Learning Guide</div>
           <div style={{ fontSize: 15, fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{topic}</div>
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
