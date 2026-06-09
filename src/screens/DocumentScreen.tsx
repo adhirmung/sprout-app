@@ -199,6 +199,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
+    // Preload AI Summary texts
+    const cachedUnderstand = Store.get<Record<string, string> | null>(`understand:${sourceKey}`, null);
+    if (cachedUnderstand && typeof cachedUnderstand === 'object') setUnderstandTexts(cachedUnderstand);
+    else setUnderstandTexts({});
+    setUnderstandLoading(new Set());
+
     // Preload subtopic read/learnt statuses
     const cachedProgress = Store.get<Record<string, SubStatus> | null>(`progress:${sourceKey}`, null);
     if (cachedProgress && typeof cachedProgress === 'object') {
@@ -229,6 +235,14 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
       .finally(() => setStudyBriefLoading(false));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contentMap]);
+
+  // Persist AI Summary texts to localStorage once all topics have finished streaming
+  useEffect(() => {
+    if (understandLoading.size === 0 && Object.keys(understandTexts).length > 0) {
+      Store.set(`understand:${sourceKey}`, understandTexts);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [understandLoading, understandTexts]);
 
   // Preload cached audit on mount so the quality badge shows while idle
   useEffect(() => {
@@ -2690,6 +2704,12 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   // survive back/forward navigation without regenerating.
   const setUnderstandTexts   = onUnderstandTextsChange;
   const setUnderstandLoading = onUnderstandLoadingChange;
+  // understandErrors is local — errors are transient, cleared on retry
+  const [understandErrors, setUnderstandErrors] = useState<Set<string>>(new Set());
+
+  // True once every topic has a generated summary
+  const allSummarised = documentReading.topics.length > 0 &&
+    documentReading.topics.every(t => understandTexts[t.topicId] !== undefined);
 
   // ── Read Aloud state ─────────────────────────────────────────
   type RaPhase = 'idle' | 'loading' | 'playing' | 'paused';
@@ -3030,29 +3050,41 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   useEffect(() => { if (initialTab === 'understand') startUnderstandMode(); }, []);
 
   // ── Understand mode: generate per-topic explanations ─────────
-  const startUnderstandMode = () => {
+  const streamOneTopic = (t: typeof documentReading.topics[0]) => {
     const allTitles = documentReading.topics.map(t => t.title);
+    setUnderstandLoading(prev => { const next = new Set(prev); next.add(t.topicId); return next; });
+    setUnderstandErrors(prev => { const next = new Set(prev); next.delete(t.topicId); return next; });
+    void streamTopicUnderstanding(
+      topic,
+      t.title,
+      t.whyItMatters ?? '',
+      (t.subtopics ?? []).map(s => ({ title: s.title, content: s.content ?? '' })),
+      (t.keyTerms ?? []).map(k => ({ term: k.term, definition: k.definition })),
+      allTitles,
+      (chunk) => {
+        setUnderstandTexts(prev => ({ ...prev, [t.topicId]: (prev[t.topicId] ?? '') + chunk }));
+      },
+    ).catch(() => {
+      // Mark topic as failed so the UI can show a retry button
+      setUnderstandErrors(prev => { const next = new Set(prev); next.add(t.topicId); return next; });
+      // Clear any partial text so a retry starts clean
+      setUnderstandTexts(prev => { const next = { ...prev }; delete next[t.topicId]; return next; });
+    }).finally(() => {
+      setUnderstandLoading(prev => { const next = new Set(prev); next.delete(t.topicId); return next; });
+    });
+  };
+
+  const startUnderstandMode = () => {
     for (const t of documentReading.topics) {
-      // Skip if already cached or in-flight
-      if (understandTexts[t.topicId] !== undefined) continue;
-      if (understandLoading.has(t.topicId)) continue;
-
-      setUnderstandLoading(prev => { const next = new Set(prev); next.add(t.topicId); return next; });
-
-      void streamTopicUnderstanding(
-        topic,
-        t.title,
-        t.whyItMatters ?? '',
-        (t.subtopics ?? []).map(s => ({ title: s.title, content: s.content ?? '' })),
-        (t.keyTerms ?? []).map(k => ({ term: k.term, definition: k.definition })),
-        allTitles,
-        (chunk) => {
-          setUnderstandTexts(prev => ({ ...prev, [t.topicId]: (prev[t.topicId] ?? '') + chunk }));
-        },
-      ).finally(() => {
-        setUnderstandLoading(prev => { const next = new Set(prev); next.delete(t.topicId); return next; });
-      });
+      if (understandTexts[t.topicId] !== undefined) continue; // already generated
+      if (understandLoading.has(t.topicId)) continue;         // in-flight
+      streamOneTopic(t);
     }
+  };
+
+  const retryTopic = (topicId: string) => {
+    const t = documentReading.topics.find(t => t.topicId === topicId);
+    if (t) streamOneTopic(t);
   };
 
   // ── Export notes ─────────────────────────────────────────────
@@ -3368,10 +3400,18 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
         {/* ── Understand mode: one conceptual card per topic ── */}
         {notesMode === 'understand' ? ( // ── Understand tab ──
           <div>
+            {/* All topics complete banner */}
+            {allSummarised && understandLoading.size === 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '10px 16px', borderRadius: 12, background: 'var(--brand-tint)', border: '1px solid var(--brand-soft)', marginBottom: 20 }}>
+                <span style={{ fontSize: 16 }}>✅</span>
+                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--brand)' }}>All {documentReading.topics.length} topics summarised</span>
+              </div>
+            )}
             {documentReading.topics.map((t, i) => {
               const color      = TOPIC_COLORS[i % TOPIC_COLORS.length];
               const text       = understandTexts[t.topicId];
               const loading    = understandLoading.has(t.topicId);
+              const hasError   = understandErrors.has(t.topicId);
               const isReading  = raPhase !== 'idle';
               const isActive   = isReading && raTopicIdx === i;
               const isPast     = isReading && raTopicIdx > i;
@@ -3421,6 +3461,15 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
                           <div style={{ width: 18, height: 18, borderRadius: '50%', border: `2px solid ${color}44`, borderTopColor: color, animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
                           <span style={{ fontSize: 13, fontStyle: 'italic' }}>Thinking about this topic…</span>
+                        </div>
+                      ) : hasError ? (
+                        /* Error state with retry */
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                          <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>Failed to generate summary.</span>
+                          <button
+                            onClick={() => retryTopic(t.topicId)}
+                            style={{ display: 'flex', alignItems: 'center', gap: 5, padding: '5px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', border: `1.5px solid ${color}`, background: 'transparent', color, flexShrink: 0 }}
+                          >↺ Retry</button>
                         </div>
                       ) : text ? (
                         isActive
