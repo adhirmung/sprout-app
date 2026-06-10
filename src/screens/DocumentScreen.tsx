@@ -25,6 +25,7 @@ import {
   generateParagraphQuiz,
   generatePracticeQuiz,
   generateTopicBullets,
+  generateTopicVisual,
   hasApiKey,
   saveApiKey,
   streamCardChat,
@@ -119,6 +120,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
   const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
   const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
+  const [topicVisuals,      setTopicVisuals]      = useState<Record<string, VisualComponent>>({});
+  const [topicVisualLoading, setTopicVisualLoading] = useState<Set<string>>(new Set());
   // Deferred practice — set when user clicks Practice before Notes are loaded
   const [pendingPractice,   setPendingPractice]   = useState(false);
   // weakSpots: topicId → last practice percentage (0-100); < 60 = needs review
@@ -205,6 +208,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     else setUnderstandTexts({});
     setUnderstandLoading(new Set());
 
+    // Preload topic visuals
+    const cachedVisuals = Store.get<Record<string, VisualComponent> | null>(`topic-visuals:${sourceKey}`, null);
+    if (cachedVisuals && typeof cachedVisuals === 'object') setTopicVisuals(cachedVisuals);
+    else setTopicVisuals({});
+    setTopicVisualLoading(new Set());
+
     // Preload subtopic read/learnt statuses
     const cachedProgress = Store.get<Record<string, SubStatus> | null>(`progress:${sourceKey}`, null);
     if (cachedProgress && typeof cachedProgress === 'object') {
@@ -243,6 +252,14 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [understandLoading, understandTexts]);
+
+  // Persist topic visuals to localStorage whenever a new one is generated
+  useEffect(() => {
+    if (topicVisualLoading.size === 0 && Object.keys(topicVisuals).length > 0) {
+      Store.set(`topic-visuals:${sourceKey}`, topicVisuals);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [topicVisualLoading, topicVisuals]);
 
   // Preload cached audit on mount so the quality badge shows while idle
   useEffect(() => {
@@ -616,6 +633,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onUnderstandTextsChange={setUnderstandTexts}
         understandLoading={understandLoading}
         onUnderstandLoadingChange={setUnderstandLoading}
+        topicVisuals={topicVisuals}
+        onTopicVisualsChange={setTopicVisuals}
+        topicVisualLoading={topicVisualLoading}
+        onTopicVisualLoadingChange={setTopicVisualLoading}
         weakSpots={weakSpots}
         initialTab="understand"
         onBack={() => setPhase('map')}
@@ -2652,26 +2673,30 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, onBack, onPractice, onRegenerate, weakSpots = {}, initialTab = 'understand' }: {
-  documentReading:              DocumentReading;
-  topic:                        string;
-  hasCache:                     boolean;
-  profile:                      LearnerProfile | null;
-  extractedText:                string;
-  courseStreaming?:              boolean;
-  subStatuses:                  Record<string, SubStatus>;
-  onSubStatusChange:            React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
-  focusChatMessages:            ChatMessage[];
-  onFocusChatMessagesChange:    React.Dispatch<React.SetStateAction<ChatMessage[]>>;
-  understandTexts:              Record<string, string>;
-  onUnderstandTextsChange:      React.Dispatch<React.SetStateAction<Record<string, string>>>;
-  understandLoading:            Set<string>;
-  onUnderstandLoadingChange:    React.Dispatch<React.SetStateAction<Set<string>>>;
-  onBack:                       () => void;
-  onPractice:                   (mode: 'activities' | 'flashcards' | 'quiz') => void;
-  onRegenerate:                 () => void;
-  weakSpots?:                   Record<string, number>;
-  initialTab?:                  'notes' | 'understand';
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, weakSpots = {}, initialTab = 'understand' }: {
+  documentReading:                DocumentReading;
+  topic:                          string;
+  hasCache:                       boolean;
+  profile:                        LearnerProfile | null;
+  extractedText:                  string;
+  courseStreaming?:                boolean;
+  subStatuses:                    Record<string, SubStatus>;
+  onSubStatusChange:              React.Dispatch<React.SetStateAction<Record<string, SubStatus>>>;
+  focusChatMessages:              ChatMessage[];
+  onFocusChatMessagesChange:      React.Dispatch<React.SetStateAction<ChatMessage[]>>;
+  understandTexts:                Record<string, string>;
+  onUnderstandTextsChange:        React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  understandLoading:              Set<string>;
+  onUnderstandLoadingChange:      React.Dispatch<React.SetStateAction<Set<string>>>;
+  topicVisuals:                   Record<string, VisualComponent>;
+  onTopicVisualsChange:           React.Dispatch<React.SetStateAction<Record<string, VisualComponent>>>;
+  topicVisualLoading:             Set<string>;
+  onTopicVisualLoadingChange:     React.Dispatch<React.SetStateAction<Set<string>>>;
+  onBack:                         () => void;
+  onPractice:                     (mode: 'activities' | 'flashcards' | 'quiz') => void;
+  onRegenerate:                   () => void;
+  weakSpots?:                     Record<string, number>;
+  initialTab?:                    'notes' | 'understand';
 }) {
   const [expandedSubs,      setExpandedSubs]      = useState<Set<string>>(new Set([`${documentReading.topics[0]?.topicId}-0`]));
   const [expandedTopics,    setExpandedTopics]    = useState<Set<string>>(new Set([documentReading.topics[0]?.topicId ?? '']));
@@ -2710,6 +2735,30 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   // True once every topic has a generated summary
   const allSummarised = documentReading.topics.length > 0 &&
     documentReading.topics.every(t => understandTexts[t.topicId] !== undefined);
+
+  // ── Topic visuals ────────────────────────────────────────────
+  const setTopicVisuals   = onTopicVisualsChange;
+  const setTopicVisualLoading = onTopicVisualLoadingChange;
+  // Which cards currently have their visual panel expanded
+  const [showVisuals, setShowVisuals] = useState<Record<string, boolean>>({});
+
+  const generateVisualForTopic = (t: typeof documentReading.topics[0]) => {
+    const summaryText = understandTexts[t.topicId] ?? '';
+    if (!summaryText) return;                                       // no summary yet
+    if (topicVisualLoading.has(t.topicId)) return;                 // already in flight
+    setTopicVisualLoading(prev => { const n = new Set(prev); n.add(t.topicId); return n; });
+    void generateTopicVisual(
+      t.title,
+      summaryText,
+      (t.subtopics ?? []).map(s => ({ title: s.title, content: s.content ?? '' })),
+      (t.keyTerms  ?? []).map(k => ({ term: k.term, definition: k.definition })),
+    ).then(visual => {
+      setTopicVisuals(prev => ({ ...prev, [t.topicId]: visual }));
+      setShowVisuals(prev => ({ ...prev, [t.topicId]: true }));
+    }).finally(() => {
+      setTopicVisualLoading(prev => { const n = new Set(prev); n.delete(t.topicId); return n; });
+    });
+  };
 
   // ── Read Aloud state ─────────────────────────────────────────
   type RaPhase = 'idle' | 'loading' | 'playing' | 'paused';
@@ -3478,6 +3527,36 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                       ) : (
                         <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
                       )}
+
+                      {/* ── Topic visual panel ── */}
+                      {showVisuals[t.topicId] && (() => {
+                        const visual = topicVisuals[t.topicId];
+                        const vizLoading = topicVisualLoading.has(t.topicId);
+                        if (vizLoading) return (
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 20, padding: '14px 16px', borderRadius: 12, background: color + '0a', border: `1.5px dashed ${color}44` }}>
+                            <div style={{ width: 16, height: 16, borderRadius: '50%', border: `2px solid ${color}44`, borderTopColor: color, animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
+                            <span style={{ fontSize: 12, color: 'var(--ink-4)', fontStyle: 'italic' }}>Generating visual…</span>
+                          </div>
+                        );
+                        if (!visual) return null;
+                        return (
+                          <div style={{ marginTop: 20, borderRadius: 12, border: `1.5px solid ${color}33`, background: color + '06', overflow: 'hidden' }}>
+                            <div style={{ padding: '8px 14px', borderBottom: `1px solid ${color}22`, display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span style={{ fontSize: 12 }}>
+                                {visual.type === 'chart' ? '📊' : visual.type === 'timeline' ? '📅' : visual.type === 'process' ? '⚙️' : '🔷'}
+                              </span>
+                              <span style={{ fontSize: 11, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', color }}>{visual.title}</span>
+                            </div>
+                            <div style={{ padding: '16px 14px' }}>
+                              {visual.chartData    ? <VisualChart    data={visual.chartData}    /> :
+                               visual.diagramData  ? <VisualDiagram  data={visual.diagramData}  /> :
+                               visual.timelineData ? <VisualTimeline data={visual.timelineData} /> :
+                               visual.processData  ? <VisualProcess  data={visual.processData}  /> :
+                               <span style={{ fontSize: 12, color: 'var(--ink-4)' }}>No visual data.</span>}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     {/* Footer: Read + Ask AI + View Notes */}
@@ -3515,6 +3594,39 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                           >
                             ✨ Ask AI
                           </button>
+
+                          {/* Visual toggle — only show once summary text exists */}
+                          {understandTexts[t.topicId] && (() => {
+                            const hasVisual  = !!topicVisuals[t.topicId];
+                            const vizLoading = topicVisualLoading.has(t.topicId);
+                            const isOpen     = showVisuals[t.topicId];
+                            return (
+                              <button
+                                onClick={() => {
+                                  if (hasVisual) {
+                                    // toggle panel
+                                    setShowVisuals(prev => ({ ...prev, [t.topicId]: !isOpen }));
+                                  } else {
+                                    // generate then auto-show
+                                    generateVisualForTopic(t);
+                                    setShowVisuals(prev => ({ ...prev, [t.topicId]: true }));
+                                  }
+                                }}
+                                disabled={vizLoading}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: 5,
+                                  padding: '6px 14px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: vizLoading ? 'default' : 'pointer',
+                                  border: `1.5px solid ${isOpen ? color : 'var(--line)'}`,
+                                  background: isOpen ? color + '15' : 'var(--bg-tint)',
+                                  color: isOpen ? color : 'var(--ink-3)',
+                                  opacity: vizLoading ? 0.6 : 1,
+                                  transition: 'all 0.2s',
+                                }}
+                              >
+                                {vizLoading ? '⏳' : '📊'} {hasVisual ? (isOpen ? 'Hide visual' : 'Show visual') : 'Visualise'}
+                              </button>
+                            );
+                          })()}
 
                         </div>
                       );

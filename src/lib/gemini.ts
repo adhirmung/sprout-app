@@ -1736,6 +1736,86 @@ export async function generateVisualComponents(
   return { components: [dynamicVisual] };
 }
 
+// ── Per-topic visual (AI Summary cards) ──────────────────────
+
+/**
+ * Analyse a single topic's content and generate the most appropriate
+ * visual representation: process steps, timeline, bar/pie chart, or
+ * concept diagram.  Used by the "📊 Visual" button on each AI Summary card.
+ */
+export async function generateTopicVisual(
+  topicTitle:  string,
+  summaryText: string,
+  subtopics:   { title: string; content: string }[],
+  keyTerms:    { term: string; definition: string }[],
+): Promise<VisualComponent> {
+  const contentBlock = [
+    `Topic: ${topicTitle}`,
+    summaryText ? `\nSummary:\n${summaryText.slice(0, 1_200)}` : '',
+    subtopics.length
+      ? `\nSubtopics:\n${subtopics.map(s => `- ${s.title}: ${(s.content ?? '').slice(0, 200)}`).join('\n')}`
+      : '',
+    keyTerms.length
+      ? `\nKey terms: ${keyTerms.map(k => k.term).join(', ')}`
+      : '',
+  ].join('');
+
+  const prompt = `You are a visual learning designer. Given the topic content below, generate ONE visual that best illustrates its key concept.
+
+Choose the most appropriate type:
+- "process"  → steps, sequence, procedure, how something works
+- "timeline" → chronological, historical, events over time
+- "chart"    → comparative or numerical data (bar / pie / line)
+- "diagram"  → relationships, systems, concept maps, structures
+
+${contentBlock}
+
+Return ONLY valid JSON — no markdown, no extra text — in exactly one of these shapes:
+
+Process:
+{"type":"process","title":"...","concept":"one sentence","processData":{"steps":[{"icon":"emoji","title":"short step title","description":"one sentence"}]}}
+
+Timeline:
+{"type":"timeline","title":"...","concept":"one sentence","timelineData":{"events":[{"year":"label","title":"...","description":"one sentence"}]}}
+
+Chart:
+{"type":"chart","title":"...","concept":"one sentence","chartData":{"chartType":"bar","xLabel":"...","yLabel":"...","items":[{"name":"...","value":number}]}}
+
+Diagram:
+{"type":"diagram","title":"...","concept":"one sentence","diagramData":{"nodes":[{"id":"n1","label":"...","subtitle":"..."}],"edges":[{"from":"n1","to":"n2"}]}}
+
+Rules:
+- Max 6 steps / events / items / nodes
+- Keep labels short (≤ 5 words)
+- Use relevant emojis for process icons
+- Ground everything in the provided content — no outside facts`;
+
+  const sys = 'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.';
+
+  try {
+    const raw = await generateText(FAST_MODEL, sys, [textPart(prompt)], 1024, 'generateTopicVisual');
+    const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/, '').trim();
+    const parsed = JSON.parse(json) as VisualComponent;
+    // Validate required fields
+    if (!parsed.type || !parsed.title) throw new Error('Invalid visual shape');
+    return parsed;
+  } catch (e) {
+    console.error('[generateTopicVisual] error:', e);
+    // Fallback: a simple process visual with the subtopic titles as steps
+    const steps = subtopics.slice(0, 6).map((s, i) => ({
+      icon: ['📖', '🔍', '💡', '⚙️', '✅', '🎯'][i] ?? '📌',
+      title: s.title,
+      description: (s.content ?? '').slice(0, 120) || s.title,
+    }));
+    return {
+      type: 'process',
+      title: topicTitle,
+      concept: `Key concepts in ${topicTitle}`,
+      processData: { steps: steps.length ? steps : [{ icon: '📖', title: topicTitle, description: 'See notes above.' }] },
+    };
+  }
+}
+
 // ── Activity Pack ─────────────────────────────────────────────
 
 export interface MemoryMatchActivity {
