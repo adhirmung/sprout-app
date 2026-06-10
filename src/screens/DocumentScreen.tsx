@@ -20,6 +20,8 @@ import {
   generateActivityPack,
   generateContentMap,
   generateFeed,
+  generatePodcastAudio,
+  generatePodcastScript,
   generateSpeech,
   generateStudyBrief,
   generateParagraphQuiz,
@@ -88,7 +90,7 @@ interface DocumentScreenProps {
 }
 
 export function DocumentScreen({ source, profile, onBack, userId }: DocumentScreenProps) {
-  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'activities' | 'exam'>('idle');
+  const [phase,           setPhase]           = useState<'idle' | 'extracting' | 'mapping' | 'map' | 'course-loading' | 'course' | 'loading' | 'running' | 'done' | 'practice' | 'visuals' | 'activities' | 'exam' | 'podcast'>('idle');
   const [visualSet,       setVisualSet]       = useState<VisualSet | null>(null);
   const [activityPack,    setActivityPack]    = useState<ActivityPack | null>(null);
   const [contentMap,      setContentMap]      = useState<ContentMap | null>(null);
@@ -754,6 +756,16 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     />
   );
 
+  if (phase === 'podcast') return (
+    <PodcastView
+      sourceKey={sourceKey}
+      documentReading={documentReading ?? { topics: [] } as unknown as DocumentReading}
+      understandTexts={understandTexts}
+      topic={topic}
+      onBack={() => setPhase('idle')}
+    />
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
       {phase !== 'idle' && (
@@ -835,6 +847,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
             onRegenerate={() => generate(true, 'activities')}
             onStartLearning={startLearning}
             onStartExam={() => setPhase('exam')}
+            onStartPodcast={() => setPhase('podcast')}
           />
         )}
         {(phase === 'loading' || phase === 'mapping' || phase === 'course-loading' || phase === 'extracting') && (
@@ -1172,16 +1185,358 @@ function VisualsView({
   );
 }
 
+// ── Podcast view ──────────────────────────────────────────────
+
+function PodcastView({ sourceKey, documentReading, understandTexts, topic, onBack }: {
+  sourceKey:       string;
+  documentReading: DocumentReading;
+  understandTexts: Record<string, string>;
+  topic:           string;
+  onBack:          () => void;
+}) {
+  const isMobile = useIsMobile();
+
+  type PodPhase = 'idle' | 'scripting' | 'recording' | 'ready' | 'error';
+  const [podPhase,  setPodPhase]  = useState<PodPhase>('idle');
+  const [script,    setScript]    = useState('');
+  const [errorMsg,  setErrorMsg]  = useState('');
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration,    setDuration]    = useState(0);
+
+  const audioRef   = useRef<HTMLAudioElement | null>(null);
+  const audioUrlRef = useRef('');
+  const rafRef     = useRef(0);
+
+  // Topics that have summaries — what we can include in the podcast
+  const summaryTopics = documentReading.topics
+    .map(t => ({ title: t.title, summaryText: understandTexts[t.topicId] ?? '' }))
+    .filter(t => t.summaryText.length > 0);
+
+  const initAudio = (url: string) => {
+    const audio = new Audio(url);
+    audio.onloadedmetadata = () => setDuration(audio.duration || 0);
+    audio.ontimeupdate = () => setCurrentTime(audio.currentTime);
+    audio.onended = () => {
+      setIsPlaying(false);
+      setCurrentTime(0);
+      if (audioRef.current) audioRef.current.currentTime = 0;
+      cancelAnimationFrame(rafRef.current);
+    };
+    audio.onerror = () => setIsPlaying(false);
+    audioRef.current = audio;
+  };
+
+  // Load cached podcast on mount
+  useEffect(() => {
+    const cachedScript = Store.get<string | null>(`podcast-script:${sourceKey}`, null);
+    const cachedAudio  = Store.get<string | null>(`podcast-audio:${sourceKey}`,  null);
+    if (cachedScript && cachedAudio) {
+      setScript(cachedScript);
+      const url = pcmToWavUrl(cachedAudio);
+      audioUrlRef.current = url;
+      initAudio(url);
+      setPodPhase('ready');
+    }
+  }, [sourceKey]); // eslint-disable-line
+
+  // Cleanup on unmount
+  useEffect(() => () => {
+    audioRef.current?.pause();
+    cancelAnimationFrame(rafRef.current);
+    if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+  }, []);
+
+  const generate = async () => {
+    if (summaryTopics.length === 0) return;
+    setErrorMsg('');
+    setPodPhase('scripting');
+    try {
+      const newScript = await generatePodcastScript(topic, summaryTopics);
+      setScript(newScript);
+      Store.set(`podcast-script:${sourceKey}`, newScript);
+
+      setPodPhase('recording');
+      const base64 = await generatePodcastAudio(newScript);
+      Store.set(`podcast-audio:${sourceKey}`, base64);
+
+      const url = pcmToWavUrl(base64);
+      if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = url;
+      initAudio(url);
+      setPodPhase('ready');
+    } catch (e) {
+      setErrorMsg(e instanceof Error ? e.message : 'Failed to generate podcast.');
+      setPodPhase('error');
+    }
+  };
+
+  const togglePlay = () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (isPlaying) {
+      audio.pause();
+      cancelAnimationFrame(rafRef.current);
+      setIsPlaying(false);
+    } else {
+      void audio.play().catch(() => {});
+      setIsPlaying(true);
+    }
+  };
+
+  const seek = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const t = parseFloat(e.target.value);
+    audio.currentTime = t;
+    setCurrentTime(t);
+  };
+
+  const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+
+  // Parse script into labelled lines for display
+  const scriptLines = script
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(l => {
+      if (l.startsWith('Host:'))   return { speaker: 'Host',   text: l.slice(5).trim(),   color: '#8B5CF6' };
+      if (l.startsWith('Expert:')) return { speaker: 'Expert', text: l.slice(7).trim(), color: '#059669' };
+      return { speaker: '', text: l, color: 'var(--ink-3)' };
+    });
+
+  // Estimate which script line is currently playing
+  const activeLine = duration > 0 && scriptLines.length > 0
+    ? Math.min(Math.floor((currentTime / duration) * scriptLines.length), scriptLines.length - 1)
+    : -1;
+
+  const scriptRef = useRef<HTMLDivElement>(null);
+  // Auto-scroll active line into view
+  useEffect(() => {
+    if (activeLine < 0 || !scriptRef.current) return;
+    const el = scriptRef.current.children[activeLine] as HTMLElement | undefined;
+    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [activeLine]);
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100dvh', background: 'var(--bg)', overflow: 'hidden' }}>
+      {/* Header */}
+      <div style={{ flexShrink: 0, display: 'flex', alignItems: 'center', gap: 12, padding: isMobile ? '12px 16px' : '14px 24px', borderBottom: '1px solid var(--line)', background: 'var(--card)' }}>
+        <button onClick={onBack} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', borderRadius: 8, border: '1px solid var(--line)', background: 'none', cursor: 'pointer', color: 'var(--ink-2)', fontSize: 13, fontWeight: 600 }}>
+          ← Back
+        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 18 }}>🎙️</span>
+          <span style={{ fontSize: 15, fontWeight: 800, color: 'var(--ink)' }}>AI Podcast</span>
+        </div>
+      </div>
+
+      {/* Scrollable content */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: isMobile ? '20px 16px' : '28px 32px' }}>
+        <div style={{ maxWidth: 600, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+          {/* Episode card */}
+          <div style={{ borderRadius: 20, overflow: 'hidden', background: 'linear-gradient(135deg, #1e1b2e 0%, #2d1f4e 100%)', color: 'white', boxShadow: '0 8px 40px rgba(139,92,246,0.25)' }}>
+            {/* Top strip */}
+            <div style={{ padding: '20px 24px 16px', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase', color: '#A78BFA', marginBottom: 6 }}>
+                🎙️ AI Podcast Episode
+              </div>
+              <div style={{ fontSize: isMobile ? 17 : 20, fontWeight: 800, lineHeight: 1.3, color: 'white', marginBottom: 6 }}>{topic}</div>
+              <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.45)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#8B5CF6', display: 'inline-block' }} /> Host
+                </span>
+                <span>+</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#10B981', display: 'inline-block' }} /> Expert
+                </span>
+                {duration > 0 && <span style={{ marginLeft: 'auto' }}>{fmtTime(duration)}</span>}
+              </div>
+            </div>
+
+            {/* Player / generation area */}
+            <div style={{ padding: '18px 24px 22px' }}>
+              {/* No summaries warning */}
+              {summaryTopics.length === 0 && podPhase === 'idle' && (
+                <div style={{ textAlign: 'center', padding: '16px 0' }}>
+                  <div style={{ fontSize: 24, marginBottom: 8 }}>📝</div>
+                  <div style={{ fontSize: 13, color: 'rgba(255,255,255,0.5)', lineHeight: 1.5, marginBottom: 16 }}>
+                    Generate AI Summaries first — the podcast is based on your summary content.
+                  </div>
+                  <button onClick={onBack} style={{ padding: '8px 20px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.08)', color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}>
+                    ← Go to AI Summary
+                  </button>
+                </div>
+              )}
+
+              {/* Generate button (idle + have summaries) */}
+              {summaryTopics.length > 0 && podPhase === 'idle' && (
+                <div style={{ textAlign: 'center', padding: '10px 0' }}>
+                  <div style={{ fontSize: 12, color: 'rgba(255,255,255,0.4)', marginBottom: 16 }}>
+                    {summaryTopics.length} topic{summaryTopics.length !== 1 ? 's' : ''} · ~2 min episode · two voices
+                  </div>
+                  <button
+                    onClick={() => void generate()}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 8, padding: '12px 28px', borderRadius: 14, border: 'none', background: 'linear-gradient(135deg, #8B5CF6, #6D28D9)', color: 'white', fontSize: 15, fontWeight: 800, cursor: 'pointer', boxShadow: '0 4px 20px rgba(139,92,246,0.5)' }}
+                  >
+                    🎙️ Generate Podcast
+                  </button>
+                </div>
+              )}
+
+              {/* Scripting progress */}
+              {podPhase === 'scripting' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0' }}>
+                  <div style={{ width: 20, height: 20, borderRadius: '50%', border: '2.5px solid rgba(139,92,246,0.3)', borderTopColor: '#8B5CF6', animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'white' }}>Writing script…</div>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>Crafting a conversation about your topics</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Recording progress */}
+              {podPhase === 'recording' && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '10px 0' }}>
+                  <div style={{ display: 'flex', gap: 3, alignItems: 'flex-end', height: 20, flexShrink: 0 }}>
+                    {[0,1,2,3].map(b => (
+                      <div key={b} style={{ width: 4, borderRadius: 2, background: '#8B5CF6', animation: `soundbar 0.8s ease-in-out ${b * 0.15}s infinite alternate`, height: 8 + b * 4 }} />
+                    ))}
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: 'white' }}>Recording voices…</div>
+                    <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>Generating Host + Expert audio</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Error state */}
+              {podPhase === 'error' && (
+                <div style={{ padding: '10px 0' }}>
+                  <div style={{ fontSize: 13, color: '#FCA5A5', marginBottom: 12 }}>{errorMsg || 'Something went wrong.'}</div>
+                  <button
+                    onClick={() => void generate()}
+                    style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '8px 18px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.2)', background: 'rgba(255,255,255,0.08)', color: 'white', fontSize: 13, fontWeight: 700, cursor: 'pointer' }}
+                  >
+                    ↺ Retry
+                  </button>
+                </div>
+              )}
+
+              {/* Player (ready) */}
+              {podPhase === 'ready' && (
+                <div>
+                  {/* Play/Pause + progress row */}
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+                    <button
+                      onClick={togglePlay}
+                      style={{ width: 48, height: 48, borderRadius: '50%', border: 'none', background: 'linear-gradient(135deg, #8B5CF6, #6D28D9)', color: 'white', fontSize: 20, cursor: 'pointer', display: 'grid', placeItems: 'center', flexShrink: 0, boxShadow: '0 4px 16px rgba(139,92,246,0.5)' }}
+                    >
+                      {isPlaying ? '⏸' : '▶'}
+                    </button>
+                    <div style={{ flex: 1 }}>
+                      <input
+                        type="range"
+                        min={0}
+                        max={duration || 0}
+                        step={0.1}
+                        value={currentTime}
+                        onChange={seek}
+                        style={{ width: '100%', accentColor: '#8B5CF6', cursor: 'pointer' }}
+                      />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'rgba(255,255,255,0.4)', marginTop: 2 }}>
+                        <span>{fmtTime(currentTime)}</span>
+                        <span>{fmtTime(duration)}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Regenerate link */}
+                  <div style={{ marginTop: 14, textAlign: 'center' }}>
+                    <button
+                      onClick={() => {
+                        audioRef.current?.pause();
+                        setIsPlaying(false);
+                        setCurrentTime(0);
+                        setDuration(0);
+                        setPodPhase('idle');
+                        Store.del(`podcast-script:${sourceKey}`);
+                        Store.del(`podcast-audio:${sourceKey}`);
+                      }}
+                      style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
+                    >
+                      ↺ Regenerate
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Script transcript */}
+          {podPhase === 'ready' && scriptLines.length > 0 && (
+            <div style={{ borderRadius: 16, border: '1.5px solid var(--line)', background: 'var(--card)', overflow: 'hidden' }}>
+              <div style={{ padding: '12px 18px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--ink-2)' }}>📄 Transcript</span>
+                <div style={{ display: 'flex', gap: 10, marginLeft: 'auto', alignItems: 'center' }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#8B5CF6', fontWeight: 700 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#8B5CF6', display: 'inline-block' }} /> Host
+                  </span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: 11, color: '#059669', fontWeight: 700 }}>
+                    <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#059669', display: 'inline-block' }} /> Expert
+                  </span>
+                </div>
+              </div>
+              <div
+                ref={scriptRef}
+                style={{ padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 12, maxHeight: 360, overflowY: 'auto' }}
+              >
+                {scriptLines.map((line, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex', flexDirection: 'column', gap: 2,
+                      opacity: i < activeLine ? 0.4 : 1,
+                      transition: 'opacity 0.3s',
+                    }}
+                  >
+                    {line.speaker && (
+                      <span style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.06em', color: line.color }}>
+                        {line.speaker}
+                      </span>
+                    )}
+                    <p style={{
+                      fontSize: 13, lineHeight: 1.6, margin: 0,
+                      color: i === activeLine ? 'var(--ink)' : 'var(--ink-2)',
+                      fontWeight: i === activeLine ? 600 : 400,
+                      background: i === activeLine ? (line.speaker === 'Host' ? '#8B5CF610' : '#05966910') : 'transparent',
+                      borderRadius: 6, padding: i === activeLine ? '2px 6px' : '2px 0',
+                      transition: 'all 0.2s',
+                    }}>
+                      {line.text}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── Idle view (two-column) ────────────────────────────────────
 
 function DocIdleView({
   source, topic, breadcrumb, isLargeDoc, fromCache, audit, hasMap, error, retryRef, profile,
-  onBack, onGenerate, onRegenerate, onStartLearning, onStartExam,
+  onBack, onGenerate, onRegenerate, onStartLearning, onStartExam, onStartPodcast,
 }: {
   source: FeedSource | null; topic: string; breadcrumb: string;
   isLargeDoc: boolean; fromCache: boolean; audit: FeedAudit | null; hasMap: boolean; error: string;
   retryRef: React.RefObject<HTMLButtonElement | null>; profile: LearnerProfile | null;
-  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onStartLearning: () => void; onStartExam: () => void;
+  onBack: () => void; onGenerate: (mode: 'activities' | 'flashcards' | 'quiz') => void; onRegenerate: () => void; onStartLearning: () => void; onStartExam: () => void; onStartPodcast: () => void;
 }) {
   const isMobile = useIsMobile();
   const [hoveredMode, setHoveredMode] = useState<string | null>(null);
@@ -1254,12 +1609,12 @@ function DocIdleView({
     { id: 'flashcards',  emoji: '🃏', bg: '#EEF6FF', title: 'Flashcards',  desc: 'AI-generated flip cards to test your memory' },
     { id: 'activities',  emoji: '🎮', bg: '#EDFAF3', title: 'Activities',   desc: 'Interactive learning components', recommended: true },
     { id: 'exam',        emoji: '📝', bg: '#FFF7ED', title: 'Examination',  desc: 'Upload past papers — AI generates a timed practice exam' },
-    { id: 'podcast',     emoji: '🎙️', bg: '#F5F0FF', title: 'Podcast',      desc: 'AI-generated audio lesson', soon: true },
+    { id: 'podcast',     emoji: '🎙️', bg: '#F5F0FF', title: 'Podcast',      desc: 'AI-generated two-voice audio lesson' },
   ];
 
-  const handleMode = (id: string, soon?: boolean) => {
-    if (soon) return;
-    if (id === 'exam') { onStartExam(); return; }
+  const handleMode = (id: string) => {
+    if (id === 'exam')     { onStartExam(); return; }
+    if (id === 'podcast')  { onStartPodcast(); return; }
     const mode: 'activities' | 'flashcards' | 'quiz' =
       id === 'flashcards' ? 'flashcards' : 'activities';
     onGenerate(mode);
@@ -1371,9 +1726,9 @@ function DocIdleView({
           <button
             key={m.id}
             ref={'recommended' in m && m.recommended && error ? retryRef : undefined}
-            onClick={() => handleMode(m.id, 'soon' in m ? m.soon : false)}
-            disabled={'soon' in m && m.soon}
-            onMouseEnter={() => { if (!('soon' in m && m.soon)) setHoveredMode(m.id); }}
+            onClick={() => handleMode(m.id)}
+            disabled={false}
+            onMouseEnter={() => setHoveredMode(m.id)}
             onMouseLeave={() => setHoveredMode(null)}
             style={{
               position: 'relative',

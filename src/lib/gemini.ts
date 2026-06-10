@@ -2460,3 +2460,77 @@ export async function generateSpeech(text: string): Promise<string> {
   if (!data) throw new Error('TTS returned no audio data. Check that the model name is correct and the API key has TTS access.');
   return data;
 }
+
+// ── Podcast ───────────────────────────────────────────────────
+
+const PODCAST_HOST_VOICE   = 'Aoede'; // warm, flowing — host voice
+const PODCAST_EXPERT_VOICE = 'Puck';  // upbeat, clear — expert voice
+
+/**
+ * Generate a two-speaker podcast script covering every topic.
+ * Output lines are formatted as:
+ *   "Host: [dialogue]"
+ *   "Expert: [dialogue]"
+ * so they can be fed directly to generatePodcastAudio.
+ */
+export async function generatePodcastScript(
+  documentTitle: string,
+  topics: { title: string; summaryText: string }[],
+): Promise<string> {
+  const topicBlocks = topics
+    .map((t, i) => `Topic ${i + 1} — ${t.title}:\n${t.summaryText.slice(0, 500)}`)
+    .join('\n\n');
+
+  const prompt = `You are a podcast script writer for Sprout, an AI learning app.
+
+Write a short, engaging two-speaker podcast episode about "${documentTitle}".
+
+Speakers:
+- Host: curious, warm, asks good questions, keeps things accessible
+- Expert: knowledgeable, clear, uses examples, enthusiastic but not over the top
+
+Format every line EXACTLY as one of:
+Host: [dialogue here]
+Expert: [dialogue here]
+
+Rules:
+- Total: 280–350 words (roughly 2 minutes of audio)
+- Open with a one-line intro, close with a one-sentence takeaway
+- Cover every topic below — one short exchange each
+- Conversational tone, NOT academic
+- No markdown, no stage directions, no blank lines between speaker turns
+
+Topics to cover:
+${topicBlocks}`;
+
+  const sys = 'Output ONLY the formatted Host:/Expert: dialogue. Nothing else.';
+  return generateText(FAST_MODEL, sys, [textPart(prompt)], 1200, 'generatePodcastScript');
+}
+
+/**
+ * Convert a two-speaker Host:/Expert: script to audio.
+ * Returns raw base64-encoded PCM (24 kHz, 16-bit, mono) — same format as generateSpeech.
+ */
+export async function generatePodcastAudio(script: string): Promise<string> {
+  const client = getClient();
+  const response = await client.models.generateContent({
+    model: TTS_MODEL,
+    contents: [{ parts: [{ text: script }] }],
+    config: {
+      responseModalities: [Modality.AUDIO],
+      speechConfig: {
+        multiSpeakerVoiceConfig: {
+          speakerVoiceConfigs: [
+            { speaker: 'Host',   voiceConfig: { prebuiltVoiceConfig: { voiceName: PODCAST_HOST_VOICE   } } },
+            { speaker: 'Expert', voiceConfig: { prebuiltVoiceConfig: { voiceName: PODCAST_EXPERT_VOICE } } },
+          ],
+        },
+      },
+    },
+  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const part = response.candidates?.[0]?.content?.parts?.[0] as any;
+  const data  = part?.inlineData?.data as string | undefined;
+  if (!data) throw new Error('Podcast TTS returned no audio data.');
+  return data;
+}
