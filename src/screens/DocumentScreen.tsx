@@ -529,10 +529,18 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   };
 
   const startBullets = async (map: ContentMap) => {
+    // 1. In-memory state check — fastest path; avoids redundant localStorage/DB reads when
+    //    the user navigates Map → AI Summary → Map → AI Summary within the same session, or
+    //    when the mount-effect DB load already populated courseMaterial before the user clicked.
+    if (courseMaterial?.topics?.length && courseMaterial.topics[0]?.subtopics?.length) {
+      setPhase('course'); return;
+    }
+    // 2. localStorage cache
     const cached = Store.get<DocumentReading | null>(`course:${sourceKey}`, null);
     if (cached?.topics?.length && cached.topics[0]?.subtopics?.length) {
       setCourseMaterial(cached); setPhase('course'); return;
     }
+    // 3. Supabase fallback (handles the case where localStorage save failed due to quota)
     if (userId) {
       const dbCached = await dbLoadContent<DocumentReading>(userId, sourceKey, 'course').catch(() => null);
       if (dbCached?.topics?.length && dbCached.topics[0]?.subtopics?.length) {

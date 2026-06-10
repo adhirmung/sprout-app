@@ -8,7 +8,12 @@ export const Store = {
     }
   },
   set(key: string, val: unknown) {
-    try { localStorage.setItem('sprout:' + key, JSON.stringify(val)); } catch {}
+    try {
+      localStorage.setItem('sprout:' + key, JSON.stringify(val));
+    } catch (e) {
+      // Log quota failures so they surface in DevTools → Console, rather than silently vanishing
+      console.warn('[Sprout] localStorage quota exceeded — could not save key:', key, e);
+    }
   },
   del(key: string) {
     try { localStorage.removeItem('sprout:' + key); } catch {}
