@@ -120,8 +120,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // ── Lifted from ReadView so they survive within-session navigation ──
   const [subStatuses,       setSubStatuses]       = useState<Record<string, SubStatus>>({});
   const [focusChatMessages, setFocusChatMessages] = useState<ChatMessage[]>([]);
-  const [understandTexts,   setUnderstandTexts]   = useState<Record<string, string>>({});
-  const [understandLoading, setUnderstandLoading] = useState<Set<string>>(new Set());
+  const [understandTexts,      setUnderstandTexts]      = useState<Record<string, string>>({});
+  const [understandLoading,    setUnderstandLoading]    = useState<Set<string>>(new Set());
+  // true once the understand cache has been fully resolved (localStorage hit OR DB load complete/absent)
+  // ReadView gates auto-generation on this flag to avoid regenerating when the DB load is still in-flight
+  const [understandTextsLoaded, setUnderstandTextsLoaded] = useState(false);
   const [topicVisuals,      setTopicVisuals]      = useState<Record<string, VisualComponent>>({});
   const [topicVisualLoading, setTopicVisualLoading] = useState<Set<string>>(new Set());
   // Deferred practice — set when user clicks Practice before Notes are loaded
@@ -213,10 +216,28 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
-    // Preload AI Summary texts
+    // Preload AI Summary texts — localStorage first, then Supabase (same pattern as courseMaterial)
+    setUnderstandTextsLoaded(false); // reset so ReadView waits for resolution
     const cachedUnderstand = Store.get<Record<string, string> | null>(`understand:${sourceKey}`, null);
-    if (cachedUnderstand && typeof cachedUnderstand === 'object') setUnderstandTexts(cachedUnderstand);
-    else setUnderstandTexts({});
+    if (cachedUnderstand && typeof cachedUnderstand === 'object') {
+      setUnderstandTexts(cachedUnderstand);
+      setUnderstandTextsLoaded(true);
+    } else if (userId) {
+      dbLoadContent<Record<string, string>>(userId, sourceKey, 'understand')
+        .then(data => {
+          if (data && typeof data === 'object') {
+            Store.set(`understand:${sourceKey}`, data);
+            setUnderstandTexts(data);
+          } else {
+            setUnderstandTexts({});
+          }
+          setUnderstandTextsLoaded(true);
+        })
+        .catch(() => { setUnderstandTexts({}); setUnderstandTextsLoaded(true); });
+    } else {
+      setUnderstandTexts({});
+      setUnderstandTextsLoaded(true);
+    }
     setUnderstandLoading(new Set());
 
     // Preload topic visuals
@@ -262,9 +283,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // total (once when each topic starts, once when it finishes), which is cheap.
   // This also captures partial progress: if the user closes mid-stream, completed
   // topics are already saved and won't regenerate on the next visit.
+  // DB save runs only when ALL topics have finished (size === 0) to avoid many round-trips.
   useEffect(() => {
     if (Object.keys(understandTexts).length > 0 && sourceKey) {
       Store.set(`understand:${sourceKey}`, understandTexts);
+      if (understandLoading.size === 0 && userId) {
+        dbSaveContent(userId, sourceKey, 'understand', understandTexts).catch(console.error);
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [understandLoading, sourceKey]);
@@ -649,6 +674,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onUnderstandTextsChange={setUnderstandTexts}
         understandLoading={understandLoading}
         onUnderstandLoadingChange={setUnderstandLoading}
+        understandTextsLoaded={understandTextsLoaded}
         topicVisuals={topicVisuals}
         onTopicVisualsChange={setTopicVisuals}
         topicVisualLoading={topicVisualLoading}
@@ -3053,7 +3079,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:                DocumentReading;
   topic:                          string;
   hasCache:                       boolean;
@@ -3068,6 +3094,10 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   onUnderstandTextsChange:        React.Dispatch<React.SetStateAction<Record<string, string>>>;
   understandLoading:              Set<string>;
   onUnderstandLoadingChange:      React.Dispatch<React.SetStateAction<Set<string>>>;
+  /** True once the understand cache has been fully resolved from localStorage or Supabase.
+   *  ReadView waits for this before auto-starting generation so it doesn't regenerate when
+   *  the DB load is still in-flight and understandTexts is temporarily empty. */
+  understandTextsLoaded:          boolean;
   topicVisuals:                   Record<string, VisualComponent>;
   onTopicVisualsChange:           React.Dispatch<React.SetStateAction<Record<string, VisualComponent>>>;
   topicVisualLoading:             Set<string>;
@@ -3493,9 +3523,14 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     </div>
   );
 
-  // Auto-start AI Summary generation when the view mounts in understand mode
+  // Auto-start AI Summary generation once the cache has been resolved.
+  // We depend on `understandTextsLoaded` (not []) so we don't fire before DocumentScreen's
+  // Supabase DB load completes — otherwise understandTexts would be empty and every topic
+  // would regenerate even though the data exists in the database.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { if (initialTab === 'understand') startUnderstandMode(); }, []);
+  useEffect(() => {
+    if (initialTab === 'understand' && understandTextsLoaded) startUnderstandMode();
+  }, [understandTextsLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Understand mode: generate per-topic explanations ─────────
   const streamOneTopic = (t: typeof documentReading.topics[0]) => {
