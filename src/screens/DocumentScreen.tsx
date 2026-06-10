@@ -162,6 +162,15 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
 
   // Preload cached content map and reading on mount (localStorage first, then Supabase)
   useEffect(() => {
+    // Evict any stale podcast audio keys — they can be ~7.5 MB and silently fill the
+    // localStorage quota, causing all other saves (summaries, visuals, etc.) to fail.
+    try {
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const k = localStorage.key(i);
+        if (k?.startsWith('sprout:podcast-audio:')) localStorage.removeItem(k);
+      }
+    } catch {}
+
     const cachedMap = Store.get<ContentMap | null>(`map:${sourceKey}`, null);
     if (cachedMap?.synthesis && Array.isArray(cachedMap.topics)) {
       setContentMap(cachedMap);
@@ -247,13 +256,18 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [contentMap]);
 
-  // Persist AI Summary texts to localStorage once all topics have finished streaming
+  // Persist AI Summary texts whenever a topic finishes (understandLoading shrinks).
+  // Deliberately NOT watching understandTexts — that fires on every streaming chunk
+  // (hundreds of writes). Watching understandLoading means we save at most 2×N times
+  // total (once when each topic starts, once when it finishes), which is cheap.
+  // This also captures partial progress: if the user closes mid-stream, completed
+  // topics are already saved and won't regenerate on the next visit.
   useEffect(() => {
-    if (understandLoading.size === 0 && Object.keys(understandTexts).length > 0) {
+    if (Object.keys(understandTexts).length > 0 && sourceKey) {
       Store.set(`understand:${sourceKey}`, understandTexts);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [understandLoading, understandTexts]);
+  }, [understandLoading, sourceKey]);
 
   // Persist topic visuals to localStorage whenever a new one is generated
   useEffect(() => {
@@ -1228,16 +1242,26 @@ function PodcastView({ sourceKey, documentReading, understandTexts, topic, onBac
     audioRef.current = audio;
   };
 
-  // Load cached podcast on mount
+  // Load cached podcast script on mount.
+  // Audio is NOT stored in localStorage (base64 PCM ≈ 7.5 MB per episode —
+  // would exceed the 5-10 MB quota and silently corrupt other cached data).
+  // Instead we re-record in ~5s whenever the user opens the podcast player.
   useEffect(() => {
     const cachedScript = Store.get<string | null>(`podcast-script:${sourceKey}`, null);
-    const cachedAudio  = Store.get<string | null>(`podcast-audio:${sourceKey}`,  null);
-    if (cachedScript && cachedAudio) {
+    if (cachedScript) {
       setScript(cachedScript);
-      const url = pcmToWavUrl(cachedAudio);
-      audioUrlRef.current = url;
-      initAudio(url);
-      setPodPhase('ready');
+      // Script exists but audio needs to be recorded — go straight to recording
+      setPodPhase('recording');
+      void generatePodcastAudio(cachedScript).then(base64 => {
+        const url = pcmToWavUrl(base64);
+        if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
+        audioUrlRef.current = url;
+        initAudio(url);
+        setPodPhase('ready');
+      }).catch(() => {
+        // If re-record fails, show generate button so user can retry from scratch
+        setPodPhase('idle');
+      });
     }
   }, [sourceKey]); // eslint-disable-line
 
@@ -1255,11 +1279,12 @@ function PodcastView({ sourceKey, documentReading, understandTexts, topic, onBac
     try {
       const newScript = await generatePodcastScript(topic, summaryTopics);
       setScript(newScript);
-      Store.set(`podcast-script:${sourceKey}`, newScript);
+      Store.set(`podcast-script:${sourceKey}`, newScript); // script is ~2 KB — safe
 
       setPodPhase('recording');
       const base64 = await generatePodcastAudio(newScript);
-      Store.set(`podcast-audio:${sourceKey}`, base64);
+      // Audio (~7.5 MB base64) is intentionally NOT stored in localStorage to avoid
+      // filling the quota and silently breaking other persistence (AI summaries etc.)
 
       const url = pcmToWavUrl(base64);
       if (audioUrlRef.current) URL.revokeObjectURL(audioUrlRef.current);
@@ -1463,7 +1488,6 @@ function PodcastView({ sourceKey, documentReading, understandTexts, topic, onBac
                         setDuration(0);
                         setPodPhase('idle');
                         Store.del(`podcast-script:${sourceKey}`);
-                        Store.del(`podcast-audio:${sourceKey}`);
                       }}
                       style={{ fontSize: 11, color: 'rgba(255,255,255,0.3)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}
                     >
