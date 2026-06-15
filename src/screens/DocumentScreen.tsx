@@ -323,6 +323,42 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [understandLoading, sourceKey]);
 
+  // Stream summaries for missed sections, then let the audit effect re-run automatically.
+  // Called from the audit effect on the first pass, or from ReadView's manual "run another pass" button.
+  const runGapFill = (missedTopics: string[], firstPassScore: number) => {
+    const newMeta = missedTopics.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
+    setPreGapScore(firstPassScore);
+    if (sourceKey) Store.set(`understand-pregap-score:${sourceKey}`, firstPassScore);
+    // Clearing the audit lets the audit effect re-fire once gap loading finishes
+    setSummaryAudit(null);
+    if (sourceKey) Store.del(`understand-audit:${sourceKey}`);
+    setGapTopicMeta(prev => {
+      const updated = [...prev, ...newMeta];
+      if (sourceKey) Store.set(`understand-gaps:${sourceKey}`, updated);
+      return updated;
+    });
+    setUnderstandLoading(prev => {
+      const next = new Set(prev);
+      newMeta.forEach(g => next.add(g.id));
+      return next;
+    });
+    (async () => {
+      for (const g of newMeta) {
+        try {
+          await streamGapTopicUnderstanding(
+            topic,
+            g.title,
+            extractedText ?? '',
+            (chunk) => setUnderstandTexts(prev => ({ ...prev, [g.id]: (prev[g.id] ?? '') + chunk })),
+          );
+        } catch { /* leave partial text */ }
+        finally {
+          setUnderstandLoading(prev => { const next = new Set(prev); next.delete(g.id); return next; });
+        }
+      }
+    })();
+  };
+
   // Auto-run audit once all topic summaries have finished streaming.
   // Checks whether the generated summaries faithfully and completely represent the source document.
   // Runs only once per document (guarded by summaryAudit being null).
@@ -342,6 +378,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     auditDocumentSummary(topic, extractedText, topics)
       .then(result => {
         if (!result) return;
+        // First pass with gaps: auto-fill silently without showing the intermediate audit score
+        if (result.missedTopics && result.missedTopics.length > 0 && gapTopicMeta.length === 0) {
+          runGapFill(result.missedTopics, result.overallScore);
+          return;
+        }
+        // No gaps (or already did a gap-fill pass): persist and display the final audit
         setSummaryAudit(result);
         Store.set(`understand-audit:${sourceKey}`, result);
         if (userId) dbSaveContent(userId, sourceKey, 'understand-audit', result).catch(console.error);
@@ -746,16 +788,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (sourceKey) Store.set(`understand-gaps:${sourceKey}`, meta);
         }}
         preGapScore={preGapScore}
-        onSetPreGapScore={(score) => {
-          setPreGapScore(score);
-          if (sourceKey) Store.set(`understand-pregap-score:${sourceKey}`, score);
-        }}
-        onClearAudit={() => {
-          setSummaryAudit(null);
-          if (sourceKey) {
-            Store.del(`understand-audit:${sourceKey}`);
-            if (userId) dbSaveContent(userId, sourceKey, 'understand-audit', null).catch(() => {});
-          }
+        onFillGaps={() => {
+          if (summaryAudit?.missedTopics?.length) runGapFill(summaryAudit.missedTopics, summaryAudit.overallScore);
         }}
         topicVisuals={topicVisuals}
         onTopicVisualsChange={setTopicVisuals}
@@ -3161,7 +3195,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, preGapScore, onSetPreGapScore, gapTopicMeta, onGapTopicMetaChange, onClearAudit, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, preGapScore, onFillGaps, gapTopicMeta, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:                DocumentReading;
   topic:                          string;
   hasCache:                       boolean;
@@ -3184,10 +3218,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
    *  Null until all topics finish streaming and the audit Gemini call returns. */
   summaryAudit:                   FeedAudit | null;
   preGapScore:                    number | null;
-  onSetPreGapScore:               (score: number) => void;
+  onFillGaps:                     () => void;
   gapTopicMeta:                   { id: string; title: string }[];
-  onGapTopicMetaChange:           (meta: { id: string; title: string }[]) => void;
-  onClearAudit:                   () => void;
   topicVisuals:                   Record<string, VisualComponent>;
   onTopicVisualsChange:           React.Dispatch<React.SetStateAction<Record<string, VisualComponent>>>;
   topicVisualLoading:             Set<string>;
@@ -3660,45 +3692,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     if (t) streamOneTopic(t);
   };
 
-  const [gapFilling, setGapFilling] = useState(false);
-
-  const handleFillGaps = () => {
-    if (!summaryAudit?.missedTopics?.length || gapFilling) return;
-    const missed = summaryAudit.missedTopics;
-    // Build synthetic IDs for gap topics that don't overlap existing IDs
-    const newMeta = missed.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
-    setGapFilling(true);
-    // Snapshot the first-pass score before clearing the audit
-    onSetPreGapScore(summaryAudit.overallScore);
-    onClearAudit();
-    onGapTopicMetaChange([...gapTopicMeta, ...newMeta]);
-    // Mark all gap IDs as loading before streaming starts
-    setUnderstandLoading(prev => {
-      const next = new Set(prev);
-      newMeta.forEach(g => next.add(g.id));
-      return next;
-    });
-    // Stream each missed topic sequentially (avoids hammering the API)
-    (async () => {
-      for (const g of newMeta) {
-        try {
-          await streamGapTopicUnderstanding(
-            topic,
-            g.title,
-            extractedText,
-            (chunk) => {
-              setUnderstandTexts(prev => ({ ...prev, [g.id]: (prev[g.id] ?? '') + chunk }));
-            },
-          );
-        } catch {
-          // Leave partial text; user can see the partial result
-        } finally {
-          setUnderstandLoading(prev => { const next = new Set(prev); next.delete(g.id); return next; });
-        }
-      }
-      setGapFilling(false);
-    })();
-  };
+  // True while any gap topic is still streaming
+  const gapFilling = gapTopicMeta.some(g => understandLoading.has(g.id));
 
   // ── Export notes ─────────────────────────────────────────────
   const [exportCopied, setExportCopied] = useState(false);
@@ -4046,7 +4041,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                 <QualityBadge audit={summaryAudit} preGapScore={preGapScore} />
                 {summaryAudit.missedTopics && summaryAudit.missedTopics.length > 0 && (
                   <button
-                    onClick={handleFillGaps}
+                    onClick={onFillGaps}
                     disabled={gapFilling}
                     style={{
                       display: 'flex', alignItems: 'center', gap: 8, width: '100%',
