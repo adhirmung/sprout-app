@@ -596,6 +596,53 @@ Return ONLY valid JSON:
   } catch { return null; }
 }
 
+// ── AI Summary audit ─────────────────────────────────────────
+// Compares the per-topic understand texts against the original document to
+// verify that the summaries are accurate, complete, and don't miss key content.
+export async function auditDocumentSummary(
+  topic:         string,
+  extractedText: string,
+  topics: { title: string; summary: string }[],
+): Promise<FeedAudit | null> {
+  if (topics.length === 0 || !extractedText) return null;
+
+  const summaryManifest = topics
+    .map((t, i) => `## Topic ${i + 1}: ${t.title}\n${t.summary.slice(0, 800)}`)
+    .join('\n\n');
+
+  const prompt = `You are auditing AI-generated study summaries for "${topic}" against the original source document.
+
+SOURCE DOCUMENT (first 18 000 chars):
+"""
+${extractedText.slice(0, 18_000)}
+"""
+
+GENERATED SUMMARIES (one per topic):
+${summaryManifest}
+
+Score 0–100 on each dimension:
+- coverageScore: what % of the document's major concepts, named facts, and key sections appear in the summaries
+- accuracyScore: how faithfully the summaries reflect the source — penalise any invented or distorted claims
+- depthScore: whether summaries cover the full document breadth (beginning, middle, and end) or cluster on early sections
+- overallScore: integer average of the three
+- missedTopics: up to 4 important document sections or concepts not addressed by any summary (empty array if none)
+
+Return ONLY valid JSON — no markdown, no extra text:
+{ "coverageScore": <0-100>, "accuracyScore": <0-100>, "depthScore": <0-100>, "overallScore": <integer>, "missedTopics": [] }`;
+
+  try {
+    const raw = await generateText(
+      FAST_MODEL,
+      'You are a precise JSON generator. Output only valid JSON — no markdown, no extra text.',
+      [textPart(prompt)],
+      350,
+      'auditDocumentSummary',
+    );
+    const parsed = parseJson<FeedAudit>(raw);
+    return typeof parsed.coverageScore === 'number' ? parsed : null;
+  } catch { return null; }
+}
+
 // ── Booster pass ──────────────────────────────────────────────
 
 export async function generateBoosterCards(

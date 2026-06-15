@@ -26,6 +26,7 @@ import {
   generateStudyBrief,
   generateParagraphQuiz,
   generatePracticeQuiz,
+  auditDocumentSummary,
   generateTopicBullets,
   generateTopicVisual,
   hasApiKey,
@@ -125,6 +126,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // true once the understand cache has been fully resolved (localStorage hit OR DB load complete/absent)
   // ReadView gates auto-generation on this flag to avoid regenerating when the DB load is still in-flight
   const [understandTextsLoaded, setUnderstandTextsLoaded] = useState(false);
+  // Audit of AI Summary quality — auto-runs after all topics finish streaming
+  const [summaryAudit,         setSummaryAudit]         = useState<FeedAudit | null>(null);
   const [topicVisuals,      setTopicVisuals]      = useState<Record<string, VisualComponent>>({});
   const [topicVisualLoading, setTopicVisualLoading] = useState<Set<string>>(new Set());
   // Deferred practice — set when user clicks Practice before Notes are loaded
@@ -260,6 +263,17 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     const cachedWeak = Store.get<Record<string, number> | null>(`weakspots:${sourceKey}`, null);
     if (cachedWeak && typeof cachedWeak === 'object') setWeakSpots(cachedWeak);
 
+    // Preload AI Summary audit result
+    setSummaryAudit(null);
+    const cachedSummaryAudit = Store.get<FeedAudit | null>(`understand-audit:${sourceKey}`, null);
+    if (cachedSummaryAudit && typeof cachedSummaryAudit.overallScore === 'number') {
+      setSummaryAudit(cachedSummaryAudit);
+    } else if (userId) {
+      dbLoadContent<FeedAudit>(userId, sourceKey, 'understand-audit')
+        .then(data => { if (data && typeof data.overallScore === 'number') { Store.set(`understand-audit:${sourceKey}`, data); setSummaryAudit(data); } })
+        .catch(() => {});
+    }
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
 
@@ -293,6 +307,32 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [understandLoading, sourceKey]);
+
+  // Auto-run audit once all topic summaries have finished streaming.
+  // Checks whether the generated summaries faithfully and completely represent the source document.
+  // Runs only once per document (guarded by summaryAudit being null).
+  useEffect(() => {
+    if (understandLoading.size !== 0) return;
+    if (Object.keys(understandTexts).length === 0) return;
+    if (summaryAudit) return;       // already have a result — don't re-run
+    if (!extractedText || !courseMaterial || !sourceKey) return;
+
+    const topics = courseMaterial.topics
+      .map(t => ({ title: t.title, summary: understandTexts[t.topicId] ?? '' }))
+      .filter(t => t.summary.length > 0);
+
+    if (topics.length === 0) return;
+
+    auditDocumentSummary(topic, extractedText, topics)
+      .then(result => {
+        if (!result) return;
+        setSummaryAudit(result);
+        Store.set(`understand-audit:${sourceKey}`, result);
+        if (userId) dbSaveContent(userId, sourceKey, 'understand-audit', result).catch(console.error);
+      })
+      .catch(console.error);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [understandLoading]);
 
   // Persist topic visuals to localStorage whenever a new one is generated
   useEffect(() => {
@@ -683,6 +723,7 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         understandLoading={understandLoading}
         onUnderstandLoadingChange={setUnderstandLoading}
         understandTextsLoaded={understandTextsLoaded}
+        summaryAudit={summaryAudit}
         topicVisuals={topicVisuals}
         onTopicVisualsChange={setTopicVisuals}
         topicVisualLoading={topicVisualLoading}
@@ -3087,7 +3128,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:                DocumentReading;
   topic:                          string;
   hasCache:                       boolean;
@@ -3106,6 +3147,9 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
    *  ReadView waits for this before auto-starting generation so it doesn't regenerate when
    *  the DB load is still in-flight and understandTexts is temporarily empty. */
   understandTextsLoaded:          boolean;
+  /** Audit result comparing the generated summaries against the original document.
+   *  Null until all topics finish streaming and the audit Gemini call returns. */
+  summaryAudit:                   FeedAudit | null;
   topicVisuals:                   Record<string, VisualComponent>;
   onTopicVisualsChange:           React.Dispatch<React.SetStateAction<Record<string, VisualComponent>>>;
   topicVisualLoading:             Set<string>;
@@ -3918,6 +3962,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                 <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--brand)' }}>All {documentReading.topics.length} topics summarised</span>
               </div>
             )}
+            {/* Document audit quality badge — shows once the audit Gemini call returns */}
+            {summaryAudit && <QualityBadge audit={summaryAudit} />}
             {documentReading.topics.map((t, i) => {
               const color      = TOPIC_COLORS[i % TOPIC_COLORS.length];
               const text       = understandTexts[t.topicId];
