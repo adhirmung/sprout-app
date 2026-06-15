@@ -392,6 +392,19 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [understandLoading]);
 
+  // Auto-fill gaps whenever a summaryAudit arrives with missed topics and no prior gap fill.
+  // This covers both fresh audits (where the audit effect's .then() path might have
+  // set summaryAudit) and cached audits loaded on revisit (where the audit never re-runs).
+  useEffect(() => {
+    if (!summaryAudit?.missedTopics?.length) return;
+    if (gapTopicMeta.length > 0) return;           // already did a gap fill for this doc
+    if (!understandTextsLoaded) return;            // wait until texts are fully resolved
+    if (Object.keys(understandTexts).length === 0) return;
+    if (!extractedText || !courseMaterial || !sourceKey) return;
+    runGapFill(summaryAudit.missedTopics, summaryAudit.overallScore);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summaryAudit, understandTextsLoaded]);
+
   // Persist topic visuals to localStorage whenever a new one is generated
   useEffect(() => {
     if (topicVisualLoading.size === 0 && Object.keys(topicVisuals).length > 0) {
