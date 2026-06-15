@@ -189,6 +189,18 @@ export async function dbSaveContent<T>(
   if (error) throw error;
 }
 
+export async function dbDeleteContent(
+  userId: string,
+  fileKey: string,
+  contentType: 'map' | 'reading' | 'course' | 'visuals' | 'activities' | 'audit' | 'extract' | 'summary' | 'chat' | 'progress' | 'understand' | 'understand-audit',
+): Promise<void> {
+  await supabase.from('generated_content')
+    .delete()
+    .eq('user_id', userId)
+    .eq('file_key', fileKey)
+    .eq('content_type', contentType);
+}
+
 // ── Library ───────────────────────────────────────────────────
 
 export async function dbLoadLibrary(userId: string): Promise<LibraryTree> {

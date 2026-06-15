@@ -40,7 +40,7 @@ import { ActivityMemoryMatch } from '../components/ActivityMemoryMatch';
 import { ActivitySortClassify } from '../components/ActivitySortClassify';
 import { ActivitySequence }     from '../components/ActivitySequence';
 import { ActivityTrueFalse }    from '../components/ActivityTrueFalse';
-import { dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
+import { dbDeleteContent, dbLoadContent, dbLoadGeneratedCards, dbSaveContent, dbSaveGeneratedCards, fetchPdfBase64FromStorage } from '../lib/supabase';
 import { Store, StudyTracker, celebrate } from '../lib/store';
 import type { FeedSource, LearnerProfile } from '../lib/types';
 
@@ -329,9 +329,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     const newMeta = missedTopics.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
     setPreGapScore(firstPassScore);
     if (sourceKey) Store.set(`understand-pregap-score:${sourceKey}`, firstPassScore);
-    // Clearing the audit lets the audit effect re-fire once gap loading finishes
+    // Clearing the audit (both localStorage and Supabase) ensures the old result
+    // with missedTopics can't reload on the next visit before the re-audit saves.
     setSummaryAudit(null);
-    if (sourceKey) Store.del(`understand-audit:${sourceKey}`);
+    if (sourceKey) {
+      Store.del(`understand-audit:${sourceKey}`);
+      if (userId) dbDeleteContent(userId, sourceKey, 'understand-audit').catch(() => {});
+    }
     setGapTopicMeta(prev => {
       const updated = [...prev, ...newMeta];
       if (sourceKey) Store.set(`understand-gaps:${sourceKey}`, updated);
