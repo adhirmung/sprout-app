@@ -129,6 +129,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [understandTextsLoaded, setUnderstandTextsLoaded] = useState(false);
   // Audit of AI Summary quality — auto-runs after all topics finish streaming
   const [summaryAudit,         setSummaryAudit]         = useState<FeedAudit | null>(null);
+  // Score from the first-pass audit, preserved so we can show the delta after gap fill
+  const [preGapScore,          setPreGapScore]          = useState<number | null>(null);
   // Gap topics: sections identified by audit as missed, filled in a second pass
   const [gapTopicMeta,         setGapTopicMeta]         = useState<{ id: string; title: string }[]>([]);
   const [topicVisuals,      setTopicVisuals]      = useState<Record<string, VisualComponent>>({});
@@ -281,6 +283,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     setGapTopicMeta([]);
     const cachedGaps = Store.get<{ id: string; title: string }[] | null>(`understand-gaps:${sourceKey}`, null);
     if (Array.isArray(cachedGaps)) setGapTopicMeta(cachedGaps);
+
+    // Preload pre-gap score (first-pass overall score, used to show delta after gap fill)
+    setPreGapScore(null);
+    const cachedPreGap = Store.get<number | null>(`understand-pregap-score:${sourceKey}`, null);
+    if (typeof cachedPreGap === 'number') setPreGapScore(cachedPreGap);
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
@@ -737,6 +744,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onGapTopicMetaChange={(meta) => {
           setGapTopicMeta(meta);
           if (sourceKey) Store.set(`understand-gaps:${sourceKey}`, meta);
+        }}
+        preGapScore={preGapScore}
+        onSetPreGapScore={(score) => {
+          setPreGapScore(score);
+          if (sourceKey) Store.set(`understand-pregap-score:${sourceKey}`, score);
         }}
         onClearAudit={() => {
           setSummaryAudit(null);
@@ -3149,7 +3161,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, gapTopicMeta, onGapTopicMetaChange, onClearAudit, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, preGapScore, onSetPreGapScore, gapTopicMeta, onGapTopicMetaChange, onClearAudit, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:                DocumentReading;
   topic:                          string;
   hasCache:                       boolean;
@@ -3171,6 +3183,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   /** Audit result comparing the generated summaries against the original document.
    *  Null until all topics finish streaming and the audit Gemini call returns. */
   summaryAudit:                   FeedAudit | null;
+  preGapScore:                    number | null;
+  onSetPreGapScore:               (score: number) => void;
   gapTopicMeta:                   { id: string; title: string }[];
   onGapTopicMetaChange:           (meta: { id: string; title: string }[]) => void;
   onClearAudit:                   () => void;
@@ -3654,6 +3668,8 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     // Build synthetic IDs for gap topics that don't overlap existing IDs
     const newMeta = missed.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
     setGapFilling(true);
+    // Snapshot the first-pass score before clearing the audit
+    onSetPreGapScore(summaryAudit.overallScore);
     onClearAudit();
     onGapTopicMetaChange([...gapTopicMeta, ...newMeta]);
     // Mark all gap IDs as loading before streaming starts
@@ -4027,7 +4043,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
             {/* Document audit quality badge — shows once the audit Gemini call returns */}
             {summaryAudit && (
               <div>
-                <QualityBadge audit={summaryAudit} />
+                <QualityBadge audit={summaryAudit} preGapScore={preGapScore} />
                 {summaryAudit.missedTopics && summaryAudit.missedTopics.length > 0 && (
                   <button
                     onClick={handleFillGaps}
@@ -4816,7 +4832,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
 
 // ── Quality badge ─────────────────────────────────────────────
 
-function QualityBadge({ audit }: { audit: FeedAudit }) {
+function QualityBadge({ audit, preGapScore }: { audit: FeedAudit; preGapScore?: number | null }) {
   const scoreColor = (s: number) =>
     s >= 75 ? 'var(--brand)' : s >= 50 ? 'var(--gold)' : 'var(--coral)';
   const scoreBg = (s: number) =>
@@ -4828,14 +4844,23 @@ function QualityBadge({ audit }: { audit: FeedAudit }) {
     { label: 'Depth',    value: audit.depthScore    },
   ];
 
+  const delta = preGapScore != null ? audit.overallScore - preGapScore : null;
+
   return (
     <div style={{ marginBottom: 24, padding: '14px 16px', borderRadius: 14, background: 'var(--bg-tint)', border: '1px solid var(--line)' }}>
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
         <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: '0.07em', color: 'var(--ink-3)', textTransform: 'uppercase' }}>
           Content Quality
         </div>
-        <div style={{ fontSize: 13, fontWeight: 800, color: scoreColor(audit.overallScore), fontFamily: 'var(--font-mono)' }}>
-          {audit.overallScore}/100
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {delta != null && delta !== 0 && (
+            <span style={{ fontSize: 11, fontWeight: 700, color: delta > 0 ? 'var(--brand)' : 'var(--coral)', background: delta > 0 ? 'var(--brand-tint)' : 'var(--coral-soft)', padding: '2px 7px', borderRadius: 6 }}>
+              {delta > 0 ? `↑ +${delta}` : `↓ ${delta}`} after gap fill
+            </span>
+          )}
+          <div style={{ fontSize: 13, fontWeight: 800, color: scoreColor(audit.overallScore), fontFamily: 'var(--font-mono)' }}>
+            {audit.overallScore}/100
+          </div>
         </div>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
