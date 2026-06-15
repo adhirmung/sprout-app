@@ -324,9 +324,13 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   }, [understandLoading, sourceKey]);
 
   // Stream summaries for missed sections, then let the audit effect re-run automatically.
-  // Called from the audit effect on the first pass, or from ReadView's manual "run another pass" button.
+  // Deduplicates: only processes topics not already in gapTopicMeta to prevent
+  // duplicate audit manifest entries that would degrade the re-audit score.
   const runGapFill = (missedTopics: string[], firstPassScore: number) => {
-    const newMeta = missedTopics.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
+    const alreadyAttempted = new Set(gapTopicMeta.map(g => g.title.toLowerCase()));
+    const trulyNew = missedTopics.filter(t => !alreadyAttempted.has(t.toLowerCase()));
+    if (trulyNew.length === 0) return; // all have been attempted — stop to avoid infinite loop
+    const newMeta = trulyNew.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
     setPreGapScore(firstPassScore);
     if (sourceKey) Store.set(`understand-pregap-score:${sourceKey}`, firstPassScore);
     // Clearing the audit (both localStorage and Supabase) ensures the old result
@@ -396,13 +400,12 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [understandLoading]);
 
-  // Auto-fill gaps whenever a summaryAudit arrives with missed topics and no prior gap fill.
-  // This covers both fresh audits (where the audit effect's .then() path might have
-  // set summaryAudit) and cached audits loaded on revisit (where the audit never re-runs).
+  // Auto-fill gaps whenever a summaryAudit arrives with missed topics.
+  // Keeps running passes until the audit finds no new missed topics.
+  // runGapFill deduplicates, so topics already attempted are skipped — no infinite loop.
   useEffect(() => {
     if (!summaryAudit?.missedTopics?.length) return;
-    if (gapTopicMeta.length > 0) return;           // already did a gap fill for this doc
-    if (!understandTextsLoaded) return;            // wait until texts are fully resolved
+    if (!understandTextsLoaded) return;
     if (Object.keys(understandTexts).length === 0) return;
     if (!extractedText || !courseMaterial || !sourceKey) return;
     runGapFill(summaryAudit.missedTopics, summaryAudit.overallScore);
@@ -805,9 +808,6 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
           if (sourceKey) Store.set(`understand-gaps:${sourceKey}`, meta);
         }}
         preGapScore={preGapScore}
-        onFillGaps={() => {
-          if (summaryAudit?.missedTopics?.length) runGapFill(summaryAudit.missedTopics, summaryAudit.overallScore);
-        }}
         topicVisuals={topicVisuals}
         onTopicVisualsChange={setTopicVisuals}
         topicVisualLoading={topicVisualLoading}
@@ -3212,7 +3212,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, preGapScore, onFillGaps, gapTopicMeta, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, preGapScore, gapTopicMeta, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:                DocumentReading;
   topic:                          string;
   hasCache:                       boolean;
@@ -3235,7 +3235,6 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
    *  Null until all topics finish streaming and the audit Gemini call returns. */
   summaryAudit:                   FeedAudit | null;
   preGapScore:                    number | null;
-  onFillGaps:                     () => void;
   gapTopicMeta:                   { id: string; title: string }[];
   topicVisuals:                   Record<string, VisualComponent>;
   onTopicVisualsChange:           React.Dispatch<React.SetStateAction<Record<string, VisualComponent>>>;
@@ -4053,29 +4052,7 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
               </div>
             )}
             {/* Document audit quality badge — shows once the audit Gemini call returns */}
-            {summaryAudit && (
-              <div>
-                <QualityBadge audit={summaryAudit} preGapScore={preGapScore} />
-                {summaryAudit.missedTopics && summaryAudit.missedTopics.length > 0 && (
-                  <button
-                    onClick={onFillGaps}
-                    disabled={gapFilling}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 8, width: '100%',
-                      marginBottom: 24, padding: '10px 16px', borderRadius: 12,
-                      fontSize: 13, fontWeight: 700, cursor: gapFilling ? 'default' : 'pointer',
-                      border: '1.5px solid var(--brand-soft)', background: 'var(--brand-tint)',
-                      color: 'var(--brand)', opacity: gapFilling ? 0.6 : 1,
-                    }}
-                  >
-                    {gapFilling
-                      ? <><div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--brand-soft)', borderTopColor: 'var(--brand)', animation: 'spin 0.9s linear infinite', flexShrink: 0 }} /> Filling coverage gaps…</>
-                      : <>✦ Cover {summaryAudit.missedTopics.length} missing section{summaryAudit.missedTopics.length > 1 ? 's' : ''}</>
-                    }
-                  </button>
-                )}
-              </div>
-            )}
+            {summaryAudit && <QualityBadge audit={summaryAudit} preGapScore={preGapScore} />}
             {documentReading.topics.map((t, i) => {
               const color      = TOPIC_COLORS[i % TOPIC_COLORS.length];
               const text       = understandTexts[t.topicId];
