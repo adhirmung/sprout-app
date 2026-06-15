@@ -4876,8 +4876,17 @@ function QualityBadge({ audit, preGapScore }: { audit: FeedAudit; preGapScore?: 
         ))}
       </div>
       {audit.missedTopics && audit.missedTopics.length > 0 && (
-        <div style={{ marginTop: 10, fontSize: 11, color: 'var(--ink-3)', lineHeight: 1.5 }}>
-          Not covered: {audit.missedTopics.join(' · ')}
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 10, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--coral)', marginBottom: 6 }}>
+            Still missing
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            {audit.missedTopics.map(t => (
+              <span key={t} style={{ fontSize: 11, fontWeight: 600, padding: '3px 9px', borderRadius: 20, background: 'var(--coral-soft)', color: 'var(--coral)', border: '1px solid var(--coral)33', whiteSpace: 'nowrap' }}>
+                {t}
+              </span>
+            ))}
+          </div>
         </div>
       )}
     </div>
