@@ -32,6 +32,7 @@ import {
   hasApiKey,
   saveApiKey,
   streamCardChat,
+  streamGapTopicUnderstanding,
   streamTopicUnderstanding,
 } from '../lib/gemini';
 import type { ActivityPack, ChatMessage, ContentMap, DocumentReading, FeedCard, FeedAudit, GameActivity, ParagraphQuestion, PracticeQuestion, PracticeQuiz, StudyBrief, VisualComponent, VisualSet, WrittenEvaluation } from '../lib/gemini';
@@ -128,6 +129,8 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
   const [understandTextsLoaded, setUnderstandTextsLoaded] = useState(false);
   // Audit of AI Summary quality — auto-runs after all topics finish streaming
   const [summaryAudit,         setSummaryAudit]         = useState<FeedAudit | null>(null);
+  // Gap topics: sections identified by audit as missed, filled in a second pass
+  const [gapTopicMeta,         setGapTopicMeta]         = useState<{ id: string; title: string }[]>([]);
   const [topicVisuals,      setTopicVisuals]      = useState<Record<string, VisualComponent>>({});
   const [topicVisualLoading, setTopicVisualLoading] = useState<Set<string>>(new Set());
   // Deferred practice — set when user clicks Practice before Notes are loaded
@@ -274,6 +277,11 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         .catch(() => {});
     }
 
+    // Preload gap topic metadata (which sections were filled on second pass)
+    setGapTopicMeta([]);
+    const cachedGaps = Store.get<{ id: string; title: string }[] | null>(`understand-gaps:${sourceKey}`, null);
+    if (Array.isArray(cachedGaps)) setGapTopicMeta(cachedGaps);
+
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId, sourceKey]);
 
@@ -317,9 +325,10 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
     if (summaryAudit) return;       // already have a result — don't re-run
     if (!extractedText || !courseMaterial || !sourceKey) return;
 
-    const topics = courseMaterial.topics
-      .map(t => ({ title: t.title, summary: understandTexts[t.topicId] ?? '' }))
-      .filter(t => t.summary.length > 0);
+    const topics = [
+      ...courseMaterial.topics.map(t => ({ title: t.title, summary: understandTexts[t.topicId] ?? '' })),
+      ...gapTopicMeta.map(g => ({ title: g.title, summary: understandTexts[g.id] ?? '' })),
+    ].filter(t => t.summary.length > 0);
 
     if (topics.length === 0) return;
 
@@ -724,6 +733,18 @@ export function DocumentScreen({ source, profile, onBack, userId }: DocumentScre
         onUnderstandLoadingChange={setUnderstandLoading}
         understandTextsLoaded={understandTextsLoaded}
         summaryAudit={summaryAudit}
+        gapTopicMeta={gapTopicMeta}
+        onGapTopicMetaChange={(meta) => {
+          setGapTopicMeta(meta);
+          if (sourceKey) Store.set(`understand-gaps:${sourceKey}`, meta);
+        }}
+        onClearAudit={() => {
+          setSummaryAudit(null);
+          if (sourceKey) {
+            Store.del(`understand-audit:${sourceKey}`);
+            if (userId) dbSaveContent(userId, sourceKey, 'understand-audit', null).catch(() => {});
+          }
+        }}
         topicVisuals={topicVisuals}
         onTopicVisualsChange={setTopicVisuals}
         topicVisualLoading={topicVisualLoading}
@@ -3128,7 +3149,7 @@ function FocusChatInput({ color, streaming, onSend }: { color: string; streaming
 
 // ── Read view ─────────────────────────────────────────────────
 
-function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
+function ReadView({ documentReading, topic, hasCache, profile, extractedText, courseStreaming, subStatuses, onSubStatusChange, focusChatMessages, onFocusChatMessagesChange, understandTexts, onUnderstandTextsChange, understandLoading, onUnderstandLoadingChange, understandTextsLoaded, summaryAudit, gapTopicMeta, onGapTopicMetaChange, onClearAudit, topicVisuals, onTopicVisualsChange, topicVisualLoading, onTopicVisualLoadingChange, onBack, onPractice, onRegenerate, onPodcast, weakSpots = {}, initialTab = 'understand' }: {
   documentReading:                DocumentReading;
   topic:                          string;
   hasCache:                       boolean;
@@ -3150,6 +3171,9 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
   /** Audit result comparing the generated summaries against the original document.
    *  Null until all topics finish streaming and the audit Gemini call returns. */
   summaryAudit:                   FeedAudit | null;
+  gapTopicMeta:                   { id: string; title: string }[];
+  onGapTopicMetaChange:           (meta: { id: string; title: string }[]) => void;
+  onClearAudit:                   () => void;
   topicVisuals:                   Record<string, VisualComponent>;
   onTopicVisualsChange:           React.Dispatch<React.SetStateAction<Record<string, VisualComponent>>>;
   topicVisualLoading:             Set<string>;
@@ -3622,6 +3646,44 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
     if (t) streamOneTopic(t);
   };
 
+  const [gapFilling, setGapFilling] = useState(false);
+
+  const handleFillGaps = () => {
+    if (!summaryAudit?.missedTopics?.length || gapFilling) return;
+    const missed = summaryAudit.missedTopics;
+    // Build synthetic IDs for gap topics that don't overlap existing IDs
+    const newMeta = missed.map((title, i) => ({ id: `gap-${Date.now()}-${i}`, title }));
+    setGapFilling(true);
+    onClearAudit();
+    onGapTopicMetaChange([...gapTopicMeta, ...newMeta]);
+    // Mark all gap IDs as loading before streaming starts
+    setUnderstandLoading(prev => {
+      const next = new Set(prev);
+      newMeta.forEach(g => next.add(g.id));
+      return next;
+    });
+    // Stream each missed topic sequentially (avoids hammering the API)
+    (async () => {
+      for (const g of newMeta) {
+        try {
+          await streamGapTopicUnderstanding(
+            topic,
+            g.title,
+            extractedText,
+            (chunk) => {
+              setUnderstandTexts(prev => ({ ...prev, [g.id]: (prev[g.id] ?? '') + chunk }));
+            },
+          );
+        } catch {
+          // Leave partial text; user can see the partial result
+        } finally {
+          setUnderstandLoading(prev => { const next = new Set(prev); next.delete(g.id); return next; });
+        }
+      }
+      setGapFilling(false);
+    })();
+  };
+
   // ── Export notes ─────────────────────────────────────────────
   const [exportCopied, setExportCopied] = useState(false);
 
@@ -3963,7 +4025,29 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
               </div>
             )}
             {/* Document audit quality badge — shows once the audit Gemini call returns */}
-            {summaryAudit && <QualityBadge audit={summaryAudit} />}
+            {summaryAudit && (
+              <div>
+                <QualityBadge audit={summaryAudit} />
+                {summaryAudit.missedTopics && summaryAudit.missedTopics.length > 0 && (
+                  <button
+                    onClick={handleFillGaps}
+                    disabled={gapFilling}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                      marginBottom: 24, padding: '10px 16px', borderRadius: 12,
+                      fontSize: 13, fontWeight: 700, cursor: gapFilling ? 'default' : 'pointer',
+                      border: '1.5px solid var(--brand-soft)', background: 'var(--brand-tint)',
+                      color: 'var(--brand)', opacity: gapFilling ? 0.6 : 1,
+                    }}
+                  >
+                    {gapFilling
+                      ? <><div style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid var(--brand-soft)', borderTopColor: 'var(--brand)', animation: 'spin 0.9s linear infinite', flexShrink: 0 }} /> Filling coverage gaps…</>
+                      : <>✦ Cover {summaryAudit.missedTopics.length} missing section{summaryAudit.missedTopics.length > 1 ? 's' : ''}</>
+                    }
+                  </button>
+                )}
+              </div>
+            )}
             {documentReading.topics.map((t, i) => {
               const color      = TOPIC_COLORS[i % TOPIC_COLORS.length];
               const text       = understandTexts[t.topicId];
@@ -4143,6 +4227,47 @@ function ReadView({ documentReading, topic, hasCache, profile, extractedText, co
                 </div>
               );
             })}
+
+            {/* ── Gap coverage section: second-pass topics from audit ── */}
+            {gapTopicMeta.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 28 }}>
+                  <div style={{ flex: 1, height: 1, background: 'var(--line)' }} />
+                  <span style={{ fontSize: 11, fontWeight: 700, color: 'var(--ink-4)', textTransform: 'uppercase', letterSpacing: '0.08em', whiteSpace: 'nowrap' }}>
+                    Coverage gaps filled
+                  </span>
+                  <div style={{ flex: 1, height: 1, background: 'var(--line)' }} />
+                </div>
+                {gapTopicMeta.map((g, i) => {
+                  const color   = TOPIC_COLORS[(documentReading.topics.length + i) % TOPIC_COLORS.length];
+                  const text    = understandTexts[g.id];
+                  const loading = understandLoading.has(g.id);
+                  return (
+                    <div key={g.id} style={{ marginBottom: 44 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12 }}>
+                        <div style={{ width: 28, height: 28, borderRadius: '50%', background: color, display: 'grid', placeItems: 'center', fontSize: 11, fontWeight: 800, color: 'white', flexShrink: 0 }}>✦</div>
+                        <div style={{ flex: 1, height: 2, background: `linear-gradient(90deg, ${color}99, transparent)`, borderRadius: 2 }} />
+                      </div>
+                      <h2 style={{ fontSize: 19, fontWeight: 800, color, marginBottom: 10, lineHeight: 1.3 }}>{g.title}</h2>
+                      <div style={{ borderRadius: 16, border: `1.5px solid ${color}33`, background: 'var(--card)', boxShadow: '0 2px 14px rgba(0,0,0,0.05)' }}>
+                        <div style={{ padding: isMobile ? '16px 18px' : '20px 24px' }}>
+                          {loading && !text ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: 10, color: 'var(--ink-4)' }}>
+                              <div style={{ width: 18, height: 18, borderRadius: '50%', border: `2px solid ${color}44`, borderTopColor: color, animation: 'spin 0.9s linear infinite', flexShrink: 0 }} />
+                              <span style={{ fontSize: 13, fontStyle: 'italic' }}>Finding this in your document…</span>
+                            </div>
+                          ) : text ? (
+                            <NoteMarkdown content={text} />
+                          ) : (
+                            <span style={{ fontSize: 13, color: 'var(--ink-4)', fontStyle: 'italic' }}>—</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         ) : (viewMode === 'cards' || viewMode === 'ask') ? cardView : (<> {/* ── Notes tab (list view) ── */}
 

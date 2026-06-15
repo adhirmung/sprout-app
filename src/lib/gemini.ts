@@ -2352,6 +2352,57 @@ Strict rules:
   void dbLogUsage(_currentUserId, 'streamTopicUnderstanding', FAST_MODEL, inputTokens, outputTokens);
 }
 
+// ── Gap-fill: summarise a missed section from the raw document ─
+// Used when the audit identifies topics not covered by the first pass.
+// Unlike streamTopicUnderstanding (which weaves existing notes), this reads
+// the source document directly to generate a fresh summary for the missed section.
+
+export async function streamGapTopicUnderstanding(
+  documentTopic: string,
+  missedSection: string,
+  extractedText: string,
+  onChunk:       (text: string) => void,
+): Promise<void> {
+  const client = getClient();
+
+  const systemInstruction = `\
+You are a study-notes generator reading a source document.
+Find every mention of the requested topic and write a clear 150–220 word summary.
+Strict rules:
+- Use ONLY facts from the provided document. Do NOT add outside knowledge.
+- Write in plain, conversational English. No headings, no bullet points.
+- End with one key insight as a Markdown blockquote: > Insight here.`;
+
+  const prompt = [
+    `Course: "${documentTopic}"`,
+    `Topic to summarise: "${missedSection}"`,
+    `\n--- SOURCE DOCUMENT (may be truncated) ---\n${extractedText.slice(0, 18_000)}`,
+    `\nUsing ONLY the document above, summarise everything it says about "${missedSection}".`,
+  ].join('\n');
+
+  const stream = await client.models.generateContentStream({
+    model:    FAST_MODEL,
+    contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    config: {
+      systemInstruction,
+      maxOutputTokens: 500,
+      temperature:     0.35,
+      thinkingConfig:  { thinkingBudget: 0 },
+    },
+  });
+
+  let inputTokens = 0, outputTokens = 0;
+  for await (const chunk of stream) {
+    const t = chunk.text ?? '';
+    if (t) onChunk(t);
+    if (chunk.usageMetadata) {
+      inputTokens  = chunk.usageMetadata.promptTokenCount     ?? inputTokens;
+      outputTokens = chunk.usageMetadata.candidatesTokenCount ?? outputTokens;
+    }
+  }
+  void dbLogUsage(_currentUserId, 'streamGapTopicUnderstanding', FAST_MODEL, inputTokens, outputTokens);
+}
+
 // ── Study brief (personalised plan shown on the Map screen) ───
 
 export type StudyBrief = {
